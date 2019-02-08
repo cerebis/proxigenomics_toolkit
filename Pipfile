@@ -9,7 +9,7 @@ verify_ssl = true
 biopython = "*"
 matplotlib = "*"
 networkx = "<2"
-numba = "*"
+numba = "<=0.42.0"
 numpy = "<1.15.0"
 python-louvain = "*"
 pysam = "*"
@@ -18,6 +18,11 @@ scipy = "*"
 seaborn = "*"
 sparse = "*"
 tqdm = "*"
+typing = "*"
+llvmlite = "<0.27.1"
 
 [requires]
 python_version = "2.7"
+
+[pipenv]
+allow_prereleases = true
