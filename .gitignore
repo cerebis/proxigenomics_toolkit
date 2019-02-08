@@ -9,6 +9,7 @@ __pycache__/
 *.so
 
 *.iml
+.idea/
 
 # Distribution / packaging
 .Python
