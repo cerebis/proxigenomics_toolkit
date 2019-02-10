@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "b607a4d1e63b44677830dd9a4d261dc018ceac499d51ec9b48394208c1c98cfd"
+            "sha256": "54b47eb8d303d561fcb478a575812d354875de73f9e36dd7b1e9ae5d4434f8fc"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -119,6 +119,13 @@
                 "sha256:f923406e6b32c86309261b8195e24e18b6a8801df0cfc7814ac44017bfcb3939"
             ],
             "version": "==1.0.1"
+        },
+        "lap": {
+            "hashes": [
+                "sha256:c4dad9976f0e9f276d8a676a6d03632c3cb7ab7c80142e3b27303d49f0ed0e3b"
+            ],
+            "index": "pypi",
+            "version": "==0.4.0"
         },
         "llvmlite": {
             "hashes": [
@@ -269,6 +276,11 @@
                 "sha256:fef9939176cba0c2526ebeefffb8b9807543dc0954877b7226f751ec1294a869"
             ],
             "version": "==0.24.1"
+        },
+        "polo": {
+            "editable": true,
+            "git": "https://github.com/adrianveres/polo",
+            "ref": "7c1fe6893d4874a0097f10c42f4a86c5ca77388e"
         },
         "pyparsing": {
             "hashes": [

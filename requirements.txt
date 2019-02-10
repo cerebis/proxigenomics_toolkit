@@ -1,4 +1,5 @@
 -i https://pypi.org/simple
+-e git+https://github.com/adrianveres/polo@7c1fe6893d4874a0097f10c42f4a86c5ca77388e#egg=polo
 backports.functools-lru-cache==1.5
 biopython==1.73
 cycler==0.10.0
@@ -6,6 +7,7 @@ decorator==4.3.2
 enum34==1.1.6
 funcsigs==1.0.2
 kiwisolver==1.0.1
+lap==0.4.0
 llvmlite==0.27.0
 matplotlib==2.2.3
 networkx==1.11

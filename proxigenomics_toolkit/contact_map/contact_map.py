@@ -1,20 +1,22 @@
-import matplotlib
-matplotlib.use('Agg')
-
 from ..io_utils import io_utils
 from ..linalg import sparse_utils
+from ..misc_utils import app_path
+from .. import ordering
 from ..seq_utils.seq_utils import *
 from collections import OrderedDict, namedtuple
+from functools import partial
 from numba import jit, int64, float64, void
 import Bio.SeqIO as SeqIO
 import logging
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import numpy as np
 import pysam
-import seaborn
 import scipy.sparse as sp
 import tqdm
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import seaborn
 
 # package logger
 logger = logging.getLogger(__name__)
@@ -846,6 +848,63 @@ class ContactMap:
         """
         return self.tip_size is not None
 
+    def find_order(self, _map, seed, inverse_method='inverse', runs=5, work_dir='.'):
+        """
+        Using LKH TSP solver, find the best ordering of the sequence map in terms of proximity ligation counts.
+        Here, it is assumed that sequence proximity can be inferred from number of observed trans read-pairs, where
+        an inverse relationship exists.
+
+        :param _map: the seq map to analyze
+        :param seed: a random seed
+        :param inverse_method: the chosen inverse method for converting count (similarity) to distance
+        :param runs: number of individual runs of lkh to perform
+        :param work_dir: working directory
+        :return: the surrogate ids in optimal order
+        """
+
+        # a minimum of three sequences is required to run LKH
+        if _map.shape[0] < 3:
+            raise TooFewException(_map.shape[0], 'find_order')
+
+        # we'll supply a partially initialized distance function
+        dist_func = partial(ordering.similarity_to_distance, method=inverse_method, alpha=1.2, beta=1)
+
+        with open(os.path.join(work_dir, 'lkh.log'), 'w+') as stdout:
+
+            control_base_name = os.path.join(work_dir, 'lkh_run')
+
+            if self.is_tipbased():
+
+                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=app_path('external', 'LKH'), precision=1,
+                                           seed=seed, runs=runs, pop_size=50, dist_func=dist_func, special=False,
+                                           stdout=stdout, fixed_edges=[(i, i+1) for i in xrange(1, _map.shape[0], 2)])
+
+                # To solve this with TSP, doublet tips use a graph transformation, where each node comes a pair. Pairs
+                # possess fixed inter-connecting edges which must be included in any solution tour.
+                # Eg. node 0 -> (0,1) or node 1 -> (2,3). The fixed paths are undirected, depending on which direction
+                # is traversed, defines the orientation of the sequence.
+
+                # 1.  pair adjacent nodes by reshape the 1D array into a two-column array of half the length
+                lkh_o = lkh_o.reshape(lkh_o.shape[0]/2, 2)
+                # 2. convert to surrogate ids and infer orientation from paths taken through doublets.
+                #   0->1 forward (+1): 1->0 reverse (-1).
+                lkh_o = np.fromiter(((oi[0]/2, oi[1]-oi[0]) for oi in lkh_o), dtype=SeqOrder.INDEX_TYPE)
+
+            else:
+
+                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=app_path('external', 'LKH'), precision=1,
+                                           seed=seed, runs=runs, pop_size=50, dist_func=dist_func, special=False,
+                                           stdout=stdout)
+
+                # for singlet tours, no orientation can be inferred.
+                lkh_o = np.fromiter(((oi, 1) for oi in lkh_o), dtype=SeqOrder.INDEX_TYPE)
+
+        # lkh ordering references the supplied matrix indices, not the surrogate ids.
+        # we must map this consecutive set to the contact map indices.
+        lkh_o = self.order.remap_gapless(lkh_o)
+
+        return lkh_o
+
     def get_primary_acceptance_mask(self):
         assert self.primary_acceptance_mask is not None, 'Primary acceptance mask has not be initialized'
         return self.primary_acceptance_mask.copy()
@@ -1379,4 +1438,3 @@ class ContactMap:
         fig.tight_layout()
         plt.savefig(fname, dpi=dpi)
         plt.close(fig)
-
