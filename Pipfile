@@ -8,14 +8,14 @@ verify_ssl = true
 [packages]
 biopython = "*"
 lap = "*"
-matplotlib = "*"
+matplotlib = "<3"
 networkx = "<2"
 numba = "<=0.42.0"
 numpy = "<1.15.0"
 polo = {ref = "master",git = "https://github.com/adrianveres/polo",editable = true}
 python-louvain = "*"
 pysam = "*"
-PyYAML = "*"
+PyYAML = "<4"
 scipy = "*"
 seaborn = "*"
 sparse = "*"

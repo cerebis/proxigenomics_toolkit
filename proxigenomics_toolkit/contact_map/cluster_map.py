@@ -1,8 +1,8 @@
-from proxigenomics_toolkit.clustering import louvain
-from proxigenomics_toolkit.misc_utils import app_path, make_dir
-from proxigenomics_toolkit.contact_map import SeqOrder
-from proxigenomics_toolkit.seq_utils import IndexedFasta
-from proxigenomics_toolkit.exceptions import *
+from ..clustering import louvain
+from ..misc_utils import app_path, make_dir
+from ..seq_utils import IndexedFasta
+from ..exceptions import *
+from .contact_map import SeqOrder
 from typing import Optional
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils

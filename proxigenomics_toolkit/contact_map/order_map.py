@@ -1,4 +1,4 @@
-from proxigenomics_toolkit.exceptions import *
+from ..exceptions import *
 import logging
 import numpy as np
 import os

@@ -7,3 +7,5 @@ from . import linalg
 from . import misc_utils
 from . import ordering
 from . import seq_utils
+
+name = 'proxigenomics_toolkit'
