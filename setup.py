@@ -17,7 +17,7 @@ setuptools.setup(
     include_package_data=True,
     install_requires=['biopython',
                       'lap',
-                      'polo',
+                      'polo @ git+https://github.com/adrianveres/polo@master#egg=polo-99',
                       'matplotlib<3',
                       'networkx<2',
                       'numba<=0.42.0',
@@ -31,7 +31,7 @@ setuptools.setup(
                       'tqdm',
                       'typing',
                       'llvmlite<0.27.1'],
-    dependency_links=['git+https://github.com/adrianveres/polo#egg=polo'],
+    dependency_links=['git+https://github.com/adrianveres/polo@master#egg=polo-99'],
     classifiers=[
         'Programming Language :: Python :: 2.7',
         'License :: OSI Approved :: GNU Affero General Public License v3',
