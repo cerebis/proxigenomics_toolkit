@@ -46,4 +46,4 @@ def package_path(subdir, filename):
     :param filename: name of file
     :return: absolute path
     """
-    return os.path.join(get_python_lib(), subdir, filename)
+    return os.path.join(get_python_lib(), __name__.split('.')[0], subdir, filename)
