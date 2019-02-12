@@ -16,6 +16,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def count_bam_reads(file_name):
+    """
+    Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
+    the number of mapped reads.
+    :param file_name: a bam file to scan (neither sorted nor an index is required)
+    :return: estimated number of mapped reads
+    """
+    proc_samtools = subprocess.Popen(['samtools', 'view', file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc_wc = subprocess.Popen(['wc', '-l'], stdin=proc_samtools.stdout, stdout=subprocess.PIPE)
+    return int(proc_wc.stdout.readline())
+
 
 def count_fasta_sequences(file_name):
     """

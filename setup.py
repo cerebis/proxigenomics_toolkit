@@ -51,5 +51,4 @@ setuptools.setup(
         'Development Status :: 2 - Pre-Alpha'
     ]
 
-
 )

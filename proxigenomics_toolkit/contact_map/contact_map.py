@@ -585,10 +585,9 @@ class ContactMap:
                 logger.info('Determining bins...')
                 self.grouping = ExtentGrouping(self.seq_info, self.bin_size)
 
-            logger.info('Counting reads in bam file...')
-
             if self.precount:
-                self.total_reads = bam.count(until_eof=True)
+                logger.info('Counting reads in bam file for ETA projection...')
+                self.total_reads = count_bam_reads(bam_file)
                 logger.info('BAM file contains {0} alignments'.format(self.total_reads))
             else:
                 logger.info('Skipping pre-count of BAM file, no ETA will be offered')
