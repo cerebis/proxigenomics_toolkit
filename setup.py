@@ -34,7 +34,7 @@ setuptools.setup(
                       'typing',
                       'llvmlite<0.27.1',
                       'cython',
-                      'lap @ git+https://https://github.com/cerebis/lap@master#egg=lap-99',
+                      'lap @ git+https://github.com/cerebis/lap@master#egg=lap-99',
                       'polo @ git+https://github.com/adrianveres/polo@master#egg=polo-99'
                       ],
 
