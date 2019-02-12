@@ -173,8 +173,8 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
             with open(os.path.join(work_dir, 'simap.log'), 'w+') as stdout:
                 ofile = os.path.join(work_dir, '{}.simap'.format(base_name))
                 edge_file = _write_edges(g, work_dir, base_name)
-                subprocess.check_call(['java', '-jar', package_path('external', 'simap-1.0.0.jar'), 'mdl', '-s', str(seed),
-                                       '-i', '1e-5', '1e-3', '-a', '1e-5', '-g', edge_file, '-o', ofile],
+                subprocess.check_call(['java', '-jar', package_path('external', 'simap-1.0.0.jar'), 'mdl', '-s',
+                                       str(seed), '-i', '1e-5', '1e-3', '-a', '1e-5', '-g', edge_file, '-o', ofile],
                                       stdout=stdout, stderr=subprocess.STDOUT)
                 cl_to_ids = _read_table(ofile)
         elif method == 'infomap':

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def simple_splitter(win_size, seq_file, out_file=None, threshold=0.333, fmt='fasta', clobber=False):
     """
-    A simplistic routing which will split a set of sequences into pieces.
+    A simplistic routine which will split a set of sequences into pieces.
 
     Sequence IDs of the fragments will contain their relevant coordinates appended to the
     originating sequence's identifier.
