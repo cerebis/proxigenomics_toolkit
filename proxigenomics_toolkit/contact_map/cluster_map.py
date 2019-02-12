@@ -562,7 +562,7 @@ def write_fasta(contact_map, output_dir, clustering, source_fasta=None, clobber=
     seq_info = contact_map.seq_info
 
     parent_dir = os.path.join(output_dir, 'fasta')
-    make_dir(parent_dir)
+    make_dir(parent_dir, clobber)
 
     if source_fasta is None:
         source_fasta = contact_map.seq_file
