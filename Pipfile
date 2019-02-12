@@ -22,6 +22,7 @@ sparse = "*"
 tqdm = "*"
 typing = "*"
 llvmlite = "<0.27.1"
+cython = "*"
 
 [requires]
 python_version = "2.7"
