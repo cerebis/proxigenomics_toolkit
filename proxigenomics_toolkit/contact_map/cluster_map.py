@@ -1,5 +1,5 @@
 from ..clustering import louvain
-from ..misc_utils import app_path, make_dir
+from ..misc_utils import package_path, make_dir
 from ..seq_utils import IndexedFasta
 from ..exceptions import *
 from .contact_map import SeqOrder
@@ -165,21 +165,21 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
             ofile = os.path.join(work_dir, '{}.mcl'.format(base_name))
             edge_file = _write_edges(g, work_dir, base_name)
             nx.write_edgelist(g, edge_file, data=['weight'])
-            subprocess.check_call([app_path('external', 'mcl'),  edge_file, '--abc', '-I', '1.2', '-o', ofile],
+            subprocess.check_call([package_path('external', 'mcl'),  edge_file, '--abc', '-I', '1.2', '-o', ofile],
                                   stdout=stdout, stderr=subprocess.STDOUT)
             cl_to_ids = _read_mcl(ofile)
     elif method == 'simap':
         with open(os.path.join(work_dir, 'simap.log'), 'w+') as stdout:
             ofile = os.path.join(work_dir, '{}.simap'.format(base_name))
             edge_file = _write_edges(g, work_dir, base_name)
-            subprocess.check_call(['java', '-jar', app_path('external', 'simap-1.0.0.jar'), 'mdl', '-s', str(seed),
+            subprocess.check_call(['java', '-jar', package_path('external', 'simap-1.0.0.jar'), 'mdl', '-s', str(seed),
                                    '-i', '1e-5', '1e-3', '-a', '1e-5', '-g', edge_file, '-o', ofile],
                                   stdout=stdout, stderr=subprocess.STDOUT)
             cl_to_ids = _read_table(ofile)
     elif method == 'infomap':
         with open(os.path.join(work_dir, 'infomap.log'), 'w+') as stdout:
             edge_file = _write_edges(g, work_dir, base_name)
-            subprocess.check_call([app_path('external', 'Infomap'), '-u', '-v', '-z', '-i', 'link-list',
+            subprocess.check_call([package_path('external', 'Infomap'), '-u', '-v', '-z', '-i', 'link-list',
                                    '-s', str(seed), '-N', '10', edge_file, work_dir],
                                   stdout=stdout, stderr=subprocess.STDOUT)
             cl_to_ids = _read_tree(os.path.join(work_dir, '{}.tree'.format(base_name)))
@@ -193,7 +193,7 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
             ofile = os.path.join(work_dir, '{}.slm'.format(base_name))
             verb = '1'
             edge_file = _write_edges(g, work_dir, base_name, sep='\t')
-            subprocess.check_call(['java', '-jar', app_path('external', 'ModularityOptimizer.jar'), edge_file,
+            subprocess.check_call(['java', '-jar', package_path('external', 'ModularityOptimizer.jar'), edge_file,
                                    ofile, mod_func, resolution, opti_algo, n_starts, n_iters, str(seed), verb],
                                   stdout=stdout, stderr=subprocess.STDOUT)
             cl_to_ids = _read_table(ofile, seq_col=None, cl_col=0)

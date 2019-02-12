@@ -1,6 +1,8 @@
+from distutils.sysconfig import get_python_lib
 import numpy as np
 import os
 import sys
+
 
 
 def make_random_seed():
@@ -37,3 +39,12 @@ def app_path(subdir, filename):
     return os.path.join(sys.path[0], subdir, filename)
 
 
+def package_path(subdir, filename):
+    """
+    Return the path to a file within the installed location of the containing package.
+
+    :param subdir: subdirectory of application path
+    :param filename: name of file
+    :return: absolute path
+    """
+    return os.path.join(get_python_lib(), subdir, filename)

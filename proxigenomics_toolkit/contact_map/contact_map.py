@@ -1,6 +1,6 @@
 from ..io_utils import io_utils
 from ..linalg import sparse_utils
-from ..misc_utils import app_path
+from ..misc_utils import package_path
 from .. import ordering
 from ..seq_utils.seq_utils import *
 from collections import OrderedDict, namedtuple
@@ -875,7 +875,7 @@ class ContactMap:
 
             if self.is_tipbased():
 
-                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=app_path('external', 'LKH'), precision=1,
+                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=package_path('external', 'LKH'), precision=1,
                                            seed=seed, runs=runs, pop_size=50, dist_func=dist_func, special=False,
                                            stdout=stdout, fixed_edges=[(i, i+1) for i in xrange(1, _map.shape[0], 2)])
 
@@ -892,7 +892,7 @@ class ContactMap:
 
             else:
 
-                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=app_path('external', 'LKH'), precision=1,
+                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=package_path('external', 'LKH'), precision=1,
                                            seed=seed, runs=runs, pop_size=50, dist_func=dist_func, special=False,
                                            stdout=stdout)
 
