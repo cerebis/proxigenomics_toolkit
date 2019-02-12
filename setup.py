@@ -35,7 +35,7 @@ setuptools.setup(
                       'llvmlite<0.27.1',
                       'cython',
                       'lap @ git+https://github.com/cerebis/lap@master#egg=lap-99',
-                      'polo @ git+https://github.com/adrianveres/polo@master#egg=polo-99'
+                      'polo @ git+https://github.com/cerebis/polo@master#egg=polo-99'
                       ],
 
     dependency_links=['git+https://github.com/gatagat/lap@master#egg=lap-99',
