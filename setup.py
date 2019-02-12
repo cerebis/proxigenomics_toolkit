@@ -3,6 +3,7 @@ import setuptools
 with open('README.md', 'r') as fh:
     long_description = fh.read()
 
+
 setuptools.setup(
     name='proxigenomics_toolkit',
     version='0.1a2',
@@ -15,9 +16,10 @@ setuptools.setup(
     license='GNU Affero General Public License v3',
     platforms='Linux-86_x64',
     include_package_data=True,
+
+    setup_requires=['numpy<1.15.0'],
+
     install_requires=['biopython',
-                      'lap',
-                      'polo @ git+https://github.com/adrianveres/polo@master#egg=polo-99',
                       'matplotlib<3',
                       'networkx<2',
                       'numba<=0.42.0',
@@ -30,8 +32,16 @@ setuptools.setup(
                       'sparse',
                       'tqdm',
                       'typing',
-                      'llvmlite<0.27.1'],
-    dependency_links=['git+https://github.com/adrianveres/polo@master#egg=polo-99'],
+                      'llvmlite<0.27.1',
+                      'cython',
+                      'lap @ git+https://github.com/gatagat/lap@master#egg=lap-99',
+                      'polo @ git+https://github.com/adrianveres/polo@master#egg=polo-99'
+                      ],
+
+    dependency_links=['git+https://github.com/gatagat/lap@master#egg=lap-99',
+                      'git+https://github.com/adrianveres/polo@master#egg=polo-99'
+                      ],
+
     classifiers=[
         'Programming Language :: Python :: 2.7',
         'License :: OSI Approved :: GNU Affero General Public License v3',
