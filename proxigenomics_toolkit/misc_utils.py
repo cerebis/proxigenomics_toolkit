@@ -4,7 +4,6 @@ import os
 import sys
 
 
-
 def make_random_seed():
     """
     Provide a random seed value between 1 and 10 million.
