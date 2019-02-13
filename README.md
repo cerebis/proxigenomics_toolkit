@@ -1,7 +1,7 @@
 # proxigenomics_toolkit
 A collection of classes and methods for the analysis of 3C-based sequencing data.
 
-The toolkit forms the basis of the 3C-based tools [bin3C](https://github.com/cerebis/bin3C) and [scaffold3C](https://github.com/cerebis/scaffold3C).
+The toolkit forms the basis of the 3C-based tools [bin3C](https://github.com/cerebis/bin3C@pgtk) and [scaffold3C](https://github.com/cerebis/scaffold3C).
 
 ## Installation
 ### Dependencies
