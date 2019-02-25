@@ -7,7 +7,7 @@ The toolkit forms the basis of the 3C-based tools [bin3C](https://github.com/cer
 - Python 2.7
 - virtualenv
 - Pip >=19
-- GCC
+- C/C++ compiler. (tested with GNU C/C++)
 
 ## Installation
 
