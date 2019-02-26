@@ -15,7 +15,7 @@ def is_hermitian(m, tol=1e-6):
     :param tol: tolernace above zero for m - m.T < tol
     :return: True matrix is Hermitian
     """
-    return np.all(~(np.abs(m - m.H) >= tol).todense())
+    return np.all(~((np.abs(m - m.H) >= tol).data))
 
 
 def tensor_print(T):
