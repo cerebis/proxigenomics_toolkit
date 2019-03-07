@@ -5,6 +5,7 @@ from collections import Iterable, Mapping
 from scipy.stats import mstats
 import Bio.SeqIO as SeqIO
 import heapq
+import multiprocessing
 import numpy as np
 import networkx as nx
 import os
@@ -16,16 +17,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def count_bam_reads(file_name):
+def count_bam_reads(file_name, max_cpus=None):
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
     :param file_name: a bam file to scan (neither sorted nor an index is required)
+    :param max_cpus: set the maximum number of CPUS to use in counting (otherwise all cores)
     :return: estimated number of mapped reads
     """
-    proc_samtools = subprocess.Popen(['samtools', 'view', file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    proc_wc = subprocess.Popen(['wc', '-l'], stdin=proc_samtools.stdout, stdout=subprocess.PIPE)
-    return int(proc_wc.stdout.readline())
+    if max_cpus is None:
+        max_cpus = multiprocessing.cpu_count()
+    proc = subprocess.Popen(['samtools', 'view', '-c', '-@{}'.format(max_cpus), file_name], 
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return int(proc.stdout.readline())
 
 
 def count_fasta_sequences(file_name):
