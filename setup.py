@@ -2,11 +2,29 @@ from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from shutil import copyfile
 import os
+import re
 
-__pkg_name__ = 'proxigenomics_toolkit'
-__infomap_url__ = 'https://github.com/mapequation/infomap/tarball/'
-__infomap_commit__ = '11bd312db1'
-__infomap_tarball__ = 'infomap.tar.gz'
+pkg_name = 'proxigenomics_toolkit'
+
+# Infomap source details
+infomap_url = 'https://github.com/mapequation/infomap/tarball/'
+infomap_commit = '11bd312db1'
+infomap_tarball = 'infomap.tar.gz'
+
+with open('README.md', 'r') as fh:
+    long_description = fh.read()
+
+version_str = None
+VERSION_FILE = "{}/_version.py".format(pkg_name)
+with open(VERSION_FILE, "rt") as vh:
+    for _line in vh:
+        mo = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", _line, re.M)
+        if mo:
+            version_str = mo.group(1)
+            break
+
+if version_str is None:
+    raise RuntimeError("Unable to find version string in {}".format(VERSION_FILE))
 
 
 class InfomapExtension(Extension, object):
@@ -22,11 +40,11 @@ class build_ext(build_ext_orig, object):
             self.build_infomap(ext)
 
     def build_infomap(self, ext):
-        build_dir = os.path.join(self.build_lib, __pkg_name__)
+        build_dir = os.path.join(self.build_lib, pkg_name)
         # fetch the relevant commit from github
-        self.spawn(['curl', '-L', '{}{}'.format(__infomap_url__, __infomap_commit__), '-o', __infomap_tarball__])
+        self.spawn(['curl', '-L', '{}{}'.format(infomap_url, infomap_commit), '-o', infomap_tarball])
         # rename parent folder to something simple and consistent
-        self.spawn(['tar', '--transform=s,[^/]*,infomap,', '-xzvf', __infomap_tarball__])
+        self.spawn(['tar', '--transform=s,[^/]*,infomap,', '-xzvf', infomap_tarball])
         # build infomap
         self.spawn(['make', '-j4', '-C', 'infomap'])
         # copy the infomap binary to package folder
@@ -36,12 +54,9 @@ class build_ext(build_ext_orig, object):
         os.chmod(dest, 0o555)
 
 
-with open('README.md', 'r') as fh:
-    long_description = fh.read()
-
 setup(
-    name=__pkg_name__,
-    version='0.1a2',
+    name=pkg_name,
+    version=version_str,
     author='Matthew Z DeMaere',
     author_email='matt.demaere@gmail.com',
     description='Tools for 3C-based sequencing',
@@ -53,7 +68,7 @@ setup(
     include_package_data=True,
     zip_safe=False,
 
-    ext_modules=[InfomapExtension('{}/external/infomap'.format(__pkg_name__))],
+    ext_modules=[InfomapExtension('{}/external/infomap'.format(pkg_name))],
     cmdclass={
         'build_ext': build_ext
     },

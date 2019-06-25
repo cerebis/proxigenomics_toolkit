@@ -19,7 +19,7 @@ import multiprocessing
 logger = logging.getLogger(__name__)
 
 
-def count_bam_reads(file_name, max_cpu = None):
+def count_bam_reads(file_name, max_cpu=None):
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
