@@ -1,4 +1,5 @@
 from ..exceptions import *
+from ..misc_utils import exe_exists
 from Bio.Restriction import Restriction
 from difflib import SequenceMatcher
 from collections import Iterable, Mapping
@@ -13,19 +14,40 @@ import tempfile
 import uuid
 import yaml
 import logging
+import multiprocessing
 
 logger = logging.getLogger(__name__)
 
-def count_bam_reads(file_name):
+
+def count_bam_reads(file_name, max_cpu = None):
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
     :param file_name: a bam file to scan (neither sorted nor an index is required)
+    :param max_cpu: maximum number of cpus to use for accessing bam file
     :return: estimated number of mapped reads
     """
-    proc_samtools = subprocess.Popen(['samtools', 'view', file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    proc_wc = subprocess.Popen(['wc', '-l'], stdin=proc_samtools.stdout, stdout=subprocess.PIPE)
-    return int(proc_wc.stdout.readline())
+    assert exe_exists('samtools'), 'required tool samtools was not found on path'
+    assert exe_exists('wc'), 'required tool wc was not found on path'
+
+    if not os.path.exists(file_name):
+        raise IOError('{} does not exist'.format(file_name))
+    if not os.path.isfile(file_name):
+        raise IOError('{} is not a file'.format(file_name))
+
+    opts = ['samtools', 'view', '-c']
+    if max_cpu is None:
+        max_cpu = multiprocessing.cpu_count()
+    opts.append('-@{}'.format(max_cpu))
+
+    proc = subprocess.Popen(opts + [file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    value_txt = proc.stdout.readline().strip()
+    try:
+        return int(value_txt)
+    except ValueError:
+        raise RuntimeError('Encountered a problem determining alignment count. samtools returned [{}]'
+                           .format(value_txt))
 
 
 def count_fasta_sequences(file_name):

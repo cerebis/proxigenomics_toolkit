@@ -47,3 +47,19 @@ def package_path(subdir, filename):
     :return: absolute path
     """
     return os.path.join(get_python_lib(), __name__.split('.')[0], subdir, filename)
+
+
+def exe_exists(exe_name):
+    """
+    Check that a executable exists on the Path.
+    :param exe_name: the base executable name
+    :return: True, an executable file named exe_name exists and has executable bit set
+    """
+    p, f = os.path.split(exe_name)
+    assert not p, 'include only the base file name, no path specification'
+
+    for pn in os.environ["PATH"].split(':'):
+        full_path = os.path.join(pn, exe_name)
+        if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
+            return True
+    return False
