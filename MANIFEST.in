@@ -1,4 +1,3 @@
-include proxigenomics_toolkit/external/Infomap
 include proxigenomics_toolkit/external/LKH
 include proxigenomics_toolkit/external/mcl
 include proxigenomics_toolkit/external/ModularityOptimizer.jar
