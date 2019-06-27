@@ -116,7 +116,7 @@ def fast_norm_fullseq_bysite(rows, cols, data, sites):
         data[n] *= 1.0/(sites[i] * sites[j])
 
 
-class ExtentGrouping:
+class ExtentGrouping(object):
 
     def __init__(self, seq_info, bin_size):
         self.bins = []
@@ -159,7 +159,7 @@ class ExtentGrouping:
         self.bins = np.array(self.bins)
 
 
-class SeqOrder:
+class SeqOrder(object):
 
     FORWARD = 1
     REVERSE = -1
@@ -485,7 +485,7 @@ class SeqOrder:
         return np.sum(self.order['length'][inter_ix])
 
 
-class ContactMap:
+class ContactMap(object):
 
     def __init__(self, bam_file, enzymes, seq_file, min_insert, min_mapq=0, min_len=0, min_sig=1, min_extent=0,
                  min_size=0, max_fold=None, random_seed=None, strong=None, bin_size=None, tip_size=None,

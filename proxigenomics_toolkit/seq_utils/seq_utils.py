@@ -194,7 +194,7 @@ class SiteCounter(object):
         return sites
 
 
-class SequenceAnalyzer:
+class SequenceAnalyzer(object):
 
     COV_TYPE = np.dtype([('index', np.int16), ('status', np.bool), ('node', np.float),
                          ('local', np.float), ('fold', np.float)])
