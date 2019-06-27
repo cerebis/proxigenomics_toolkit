@@ -1,4 +1,4 @@
-__version__ = '0.2'
+__version__ = '0.2.1'
 
 __copyright__ = """Copyright (C) 2019 Matthew Z DeMaere
 This is free software.  You may redistribute copies of it under the terms of
@@ -14,6 +14,6 @@ def version_stamp(full=True):
     :return: a version stamp string
     """
     if full:
-        return 'proxigenomics_toolkit {}\n{}'.format(__version__, __copyright__)
+        return 'proxigenomics_toolkit {}\n\n{}'.format(__version__, __copyright__)
     else:
         return 'proxigenomics_toolkit {}'.format(__version__)

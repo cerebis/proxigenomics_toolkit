@@ -6,11 +6,6 @@ import re
 
 pkg_name = 'proxigenomics_toolkit'
 
-# Infomap source details
-infomap_url = 'https://github.com/mapequation/infomap/tarball/'
-infomap_commit = '11bd312db1'
-infomap_tarball = 'infomap.tar.gz'
-
 with open('README.md', 'r') as fh:
     long_description = fh.read()
 
@@ -27,29 +22,57 @@ if version_str is None:
     raise RuntimeError("Unable to find version string in {}".format(VERSION_FILE))
 
 
-class InfomapExtension(Extension, object):
+class TarballExtension(Extension, object):
+    """
+    Simple class for use by build_tarball
+    """
+    def __init__(self, name, url, exe_path):
+        """
+        :param name: a name for the extension. This is used for naming the tarball and extracted parent path
+        :param url: the remote location of the tarball (github)
+        :param exe_path: a relative path to the executable from within the build directory
+        """
+        super(TarballExtension, self).__init__(name, sources=[])
+        self.url = url
+        self.exe_path = exe_path
 
-    def __init__(self, name):
-        super(InfomapExtension, self).__init__(name, sources=[])
+    @property
+    def tarball(self):
+        """
+        :return: a name for the tarball based on the extension name
+        """
+        return '{}_tarball.tar.gz'.format(self.name)
+
+    @property
+    def exe_name(self):
+        """
+        :return: the executable file name without path
+        """
+        return os.path.basename(self.exe_path)
 
 
-class build_ext(build_ext_orig, object):
+class build_tarball(build_ext_orig, object):
+    """
+    Build a C/C++ Make projects from remote tarballs and place the binaries in proxigenomics_toolkit/external
 
+    Build at install time allows easier support of runtime architectures which vary widely in age, making
+    supplying a universal static binaries for external helpers difficult.
+    """
     def run(self):
         for ext in self.extensions:
-            self.build_infomap(ext)
+            self.build_tarball(ext)
 
-    def build_infomap(self, ext):
+    def build_tarball(self, ext):
         build_dir = os.path.join(self.build_lib, pkg_name)
         # fetch the relevant commit from github
-        self.spawn(['curl', '-L', '{}{}'.format(infomap_url, infomap_commit), '-o', infomap_tarball])
+        self.spawn(['curl', '-L', ext.url, '-o', ext.tarball])
         # rename parent folder to something simple and consistent
-        self.spawn(['tar', '--transform=s,[^/]*,infomap,', '-xzvf', infomap_tarball])
-        # build infomap
-        self.spawn(['make', '-j4', '-C', 'infomap'])
-        # copy the infomap binary to package folder
-        src = os.path.join('infomap', 'Infomap')
-        dest = os.path.join(build_dir, 'external', 'Infomap')
+        self.spawn(['tar', '--transform=s,[^/]*,{},'.format(ext.name), '-xzvf', ext.tarball])
+        # build
+        self.spawn(['make', '-j4', '-C', ext.name])
+        # copy the built binary to package folder
+        src = os.path.join(ext.name, ext.exe_path)
+        dest = os.path.join(build_dir, 'external', ext.exe_name)
         copyfile(src, dest)
         os.chmod(dest, 0o555)
 
@@ -68,9 +91,14 @@ setup(
     include_package_data=True,
     zip_safe=False,
 
-    ext_modules=[InfomapExtension('{}/external/infomap'.format(pkg_name))],
+    ext_modules=[TarballExtension('infomap',
+                                  'https://github.com/mapequation/infomap/tarball/11bd312db1',
+                                  'Infomap'),
+                 TarballExtension('lkh',
+                                  'https://github.com/cerebis/LKH3/tarball/master',
+                                  'LKH')],
     cmdclass={
-        'build_ext': build_ext
+        'build_ext': build_tarball
     },
 
     setup_requires=['numpy<1.15.0'],
