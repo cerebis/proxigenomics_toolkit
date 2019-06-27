@@ -239,19 +239,19 @@ class SeqOrder:
 
         # now reintroduce the gaps to the gapless representation supplied
 
+        remapped = []
         # handle our local type
         if isinstance(gapless_indices, np.ndarray) and gapless_indices.dtype == SeqOrder.INDEX_TYPE:
-            remapped = []
             for oi in gapless_indices:
                 remapped.append((oi['index'] + shift[oi['index']], oi['ori']))
-            return np.array(remapped, dtype=SeqOrder.INDEX_TYPE)
-
+            remapped = np.array(remapped, dtype=SeqOrder.INDEX_TYPE)
         # handle plain collection
         else:
-            remapped = []
             for oi in gapless_indices:
                 remapped.append(oi + shift[oi])
-            return np.array(remapped)
+            remapped = np.array(remapped)
+
+        return remapped
 
     def accepted_positions(self, copy=True):
         """
@@ -446,8 +446,7 @@ class SeqOrder:
         """
         if exclude_masked:
             return self.order['length'][self.order['mask']]
-        else:
-            return self.order['length']
+        return self.order['length']
 
     def shuffle(self):
         """

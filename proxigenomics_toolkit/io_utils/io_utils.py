@@ -45,8 +45,7 @@ def open_input(file_name):
         return bz2.BZ2File(file_name, 'r')
     elif suffix == 'gz':
         return gzip.GzipFile(file_name, 'r')
-    else:
-        return open(file_name, 'r')
+    return open(file_name, 'r')
 
 
 def open_output(file_name, append=False, compress=None, gzlevel=6):

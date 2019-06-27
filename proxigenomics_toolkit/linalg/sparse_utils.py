@@ -240,8 +240,7 @@ class Sparse2DAccumulator(object):
     def __getitem__(self, index):
         if index in self.mat:
             return self.mat[index]
-        else:
-            return 0
+        return 0
 
     def get_coo(self, symm=True):
         """
