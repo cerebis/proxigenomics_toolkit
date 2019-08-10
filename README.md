@@ -21,7 +21,7 @@ A number of toolkit dependencies are built from source and as such bring along a
 
 ## Installation
 
-pgtk is not expected to be installed directly, but rather acts as a simply API within some of our Hi-C projects (bin3C, scaffol3C).
+pgtk is not expected to be installed alone and, rather, is a simple shared API used in some of our Hi-C projects (bin3C, scaffold3C).
 
 You can, however, install pgtk using recent versions (>19) of Pip as follows:
 
