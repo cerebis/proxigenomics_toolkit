@@ -34,15 +34,14 @@ bin/pip install "numpy<1.15" cython
 # install pgtk
 bin/pip install git+https://github.com/cerebis/proxigenomics_toolkit
 ```
-### Binary Helpers
+### External tools
 
-The toolkit makes use of a few external pre-compiled programs, which are currently supplied as staticaly linked binaries for recent Linux x86_64 kernels. Older systems may run into trouble if these tools are invoked. We wish to provide source builds of these tools but, before we do so, there are outstanding software license issues to consider.
+The toolkit makes use of external software tools which are compiled from source. This step introduces the above mention additional requirements for the successful installation of pgtk, while the benefit of building these tools from source is that we can support a wider range of runtime environments.
 
 - Infomap
-- mcl
 - LKH
 
-Pre-compiled tools are stored within the package hierarchy at proxigenomics_toolkit/external/
+The compiled tools are stored within the package hierarchy at proxigenomics_toolkit/external/
 
 ## Projects
 
