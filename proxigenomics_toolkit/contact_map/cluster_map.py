@@ -21,7 +21,7 @@ import tqdm
 logger = logging.getLogger(__name__)
 
 SPADES_PATTERN = re.compile(r'NODE_\d+_length_\d+_cov_(\d+\.\d*)')
-MEGAHIT_PATTERN = re.compile(r'flag=\d+ multi=(\d+\.\d*) len=\d+')
+MEGAHIT_PATTERN = re.compile(r'.*?multi=(\d+\.\d*).*?')
 
 
 def spades_extractor(seq_record):
