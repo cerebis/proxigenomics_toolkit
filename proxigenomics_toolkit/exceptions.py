@@ -50,3 +50,9 @@ class ParsingError(ApplicationException):
     """An error during input parsing"""
     def __init__(self, msg):
         super(ParsingError, self).__init__(msg)
+
+
+class InvalidCoverageFormatError(ApplicationException):
+    def __init__(self, seq_name, caller_name):
+        super(ApplicationException, self).__init__(
+            'Sequence {} did not follow expected format when extracting coverage'.format(seq_name, caller_name))

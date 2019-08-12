@@ -1063,7 +1063,7 @@ class ContactMap(object):
         :return: processed extent map
         """
 
-        logger.info('Preparing extent map with fill dimensions: {}'.format(self.extent_map.shape))
+        logger.info('Preparing extent map with full dimension: {}'.format(self.extent_map.shape))
 
         _map = self.extent_map.astype(np.float)
 

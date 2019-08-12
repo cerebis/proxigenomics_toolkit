@@ -13,11 +13,39 @@ import networkx as nx
 import numpy as np
 import os
 import pandas
+import re
 import scipy.sparse as sp
 import subprocess
 import tqdm
 
 logger = logging.getLogger(__name__)
+
+SPADES_PATTERN = re.compile(r'NODE_\d+_length_\d+_cov_(\d+\.\d*)')
+MEGAHIT_PATTERN = re.compile(r'flag=\d+ multi=(\d+\.\d*) len=\d+')
+
+
+def spades_extractor(seq_record):
+    """
+    For SPAdes assemblies, we can extract the coverage statistic contained in the contig name.
+    :param seq_record: Bio.SeqRecord instance
+    :return: float coverage
+    """
+    m = SPADES_PATTERN.match(seq_record.name)
+    if m is None:
+        raise InvalidCoverageFormatError(seq_record.name, 'spades_extractor')
+    return float(m.group(1))
+
+
+def megahit_extractor(seq_record):
+    """
+    For Megahit assemblies, we can extract the coverage statistic contained in the contig description.
+    :param seq_record: Bio.SeqRecord instance
+    :return: float coverage
+    """
+    m = MEGAHIT_PATTERN.match(seq_record.description)
+    if m is None:
+        raise InvalidCoverageFormatError(seq_record.name, 'megahit_extractor')
+    return float(m.group(1))
 
 
 def add_cluster_names(clustering, prefix='CL'):
@@ -232,7 +260,7 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
     return clustering
 
 
-def cluster_report(contact_map, clustering, source_fasta=None, is_spades=True):
+def cluster_report(contact_map, clustering, source_fasta=None, assembler='generic'):
     """
     For each cluster, analyze the member sequences and build a report.
     Update the clustering dictionary with this result by adding a "report" for each.
@@ -240,10 +268,21 @@ def cluster_report(contact_map, clustering, source_fasta=None, is_spades=True):
     :param contact_map: an instance of ContactMap to cluster
     :param clustering: clustering solution dictionary
     :param source_fasta: source assembly fasta (other than defined at instantiation)
-    :param is_spades: if SPAdes output, we can extract coverage information from the sequence names
+    :param assembler: name of assembly software used in creating contigs
     """
 
     logger.info('Analyzing the contents of each cluster')
+
+    depth_extractor = None
+    if assembler == 'spades':
+        depth_extractor = spades_extractor
+    elif assembler == 'megahit':
+        depth_extractor = megahit_extractor
+
+    if depth_extractor is not None:
+        logger.info('Assembly contig headers are presumed follow {}\'s format'.format(assembler))
+    else:
+        logger.info('No assembler was specified, therefore coverage information will not be available')
 
     seq_info = contact_map.seq_info
 
@@ -266,15 +305,20 @@ def cluster_report(contact_map, clustering, source_fasta=None, is_spades=True):
                 # fetch the SeqRecord object from the input fasta
                 _seq = seq_db[_name]
                 _gc.append(SeqUtils.GC(_seq.seq))
-                if is_spades:
-                    _cov.append(float(_name.split('_')[-1]))
+                if depth_extractor is not None:
+                    _cov.append(depth_extractor(_seq))
 
-            if is_spades:
+            assert len(_len) == len(_cov) == len(_gc), \
+                'There were missing records while collecting per-contig statistics (GC, length and coverage). ' \
+                'Did you declare the correct assembler?'
+
+            if len(_cov) > 0:
                 report = np.array(zip(_len, _gc, _cov),
                                   dtype=[('length', np.int),
                                          ('gc', np.float),
                                          ('cov', np.float)])
             else:
+                logger.debug('As it was not available, the report will not contain coverage information')
                 report = np.array(zip(_len, _gc),
                                   dtype=[('length', np.int),
                                          ('gc', np.float)])
@@ -495,8 +539,7 @@ def write_report(fname, clustering):
                         len(v['seq_ids']),
                         v['extent'],
                         _n50(sr['length']),
-                        _expect(sr['length'],
-                        sr['gc']),
+                        _expect(sr['length'], sr['gc']),
                         sr['gc'].mean(),
                         np.median(sr['gc']),
                         sr['gc'].std()]
@@ -504,8 +547,7 @@ def write_report(fname, clustering):
             # if coverage information exists, add statistics to the table
             if 'cov' in sr.dtype.names:
                 has_cov = True
-                _cl_info.extend([_expect(sr['length'],
-                                sr['cov']),
+                _cl_info.extend([_expect(sr['length'], sr['cov']),
                                 sr['cov'].mean(),
                                 np.median(sr['cov']),
                                 sr['cov'].std()])
