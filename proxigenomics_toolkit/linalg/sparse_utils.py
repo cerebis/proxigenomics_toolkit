@@ -1,10 +1,20 @@
 import logging
 import numpy as np
+import numba as nb
 import scipy.sparse as scisp
 import sparse
 from math import ceil
 
 logger = logging.getLogger(__name__)
+
+
+def add_matrices(a, b):
+    if isinstance(a, scisp.spmatrix) and isinstance(b, scisp.spmatrix):
+        return a.tocsr() + b.tocsr()
+    elif isinstance(a, sparse.COO) and isinstance(b, sparse.COO):
+        return sparse.elemwise(np.add, a, b)
+    else:
+        logger.error('Adding two different matrix types is not supported')
 
 
 def is_hermitian(m, tol=1e-6):
@@ -265,6 +275,28 @@ class Sparse2DAccumulator(object):
         return _m.tocoo()
 
 
+@nb.jit(nopython=True)
+def _fast_offdiag(_data, _row, _col, _shape):
+    """
+    Determine the maximum off-diagonal elements using the
+    internal attributes of a scipy coo matrix. The matrix
+    is assumed to be square.
+
+    :param _data: the corresponding adata of the coo matrix
+    :param _row: the row indices of the coo matrix
+    :param _col: the column indices of the coo matrix
+    :param _shape: the dimension of the square matrix (NxN)
+    :return: an array of size N of maximum off-diagonal values
+    """
+    mx = np.zeros(_shape, dtype=_data.dtype)
+    for i in range(_row.shape[0]):
+        if _row[i] == _col[i]:
+            continue
+        if mx[_row[i]] < _data[i]:
+            mx[_row[i]] = _data[i]
+    return mx
+
+
 def max_offdiag(_m):
     # type: (scisp.spmatrix) -> np.ndarray
     """
@@ -275,9 +307,46 @@ def max_offdiag(_m):
     :return: the off-diagonal maximum values
     """
     assert scisp.isspmatrix(_m), 'Input matrix is not a scipy.sparse object'
-    _m = _m.tolil(True)
-    _m.setdiag(0)
-    return np.asarray(_m.tocsr().max(axis=0).todense()).ravel()
+    if not scisp.isspmatrix_coo(_m):
+        _m = _m.tocoo()
+    return _fast_offdiag(_m.data, _m.row, _m.col, _m.shape[0])
+
+
+@nb.jit(nopython=True)
+def _fast_retained(_data, _row, _col, _nnz, _mask):
+    """
+    Given a mask, determine the elements of a coo matrix attributes
+    data, row and column and the resulting shifts.
+    :param _data: the corresponding adata of the coo matrix
+    :param _row: the row indices of the coo matrix
+    :param _col: the column indices of the coo matrix
+    :param _nnz: the number of non-zero elements in the coo matrix
+    :param _mask: the boolean mask to apply
+    :return: tuple of retained data, row, col and resulting shift
+    """
+    keep_row = []
+    keep_col = []
+    keep_data = []
+    accept_index = set(np.where(_mask)[0])
+    for i in xrange(_nnz):
+        if _row[i] in accept_index and _col[i] in accept_index:
+            keep_row.append(_row[i])
+            keep_col.append(_col[i])
+            keep_data.append(_data[i])
+
+    keep_row = np.array(keep_row)
+    keep_col = np.array(keep_col)
+    keep_data = np.array(keep_data)
+
+    # adjustments for removed rows/column indices
+    shift = np.cumsum(~_mask)
+
+    # TODO move this in the above loop
+    for i in xrange(len(keep_row)):
+        keep_row[i] -= shift[keep_row[i]]
+        keep_col[i] -= shift[keep_col[i]]
+
+    return keep_data, keep_row, keep_col, shift[-1]
 
 
 def compress(_m, _mask):
@@ -292,25 +361,9 @@ def compress(_m, _mask):
     if not scisp.isspmatrix_coo(_m):
         _m = _m.tocoo()
 
-    # collect those values not in the excluded rows/columns
-    keep_row = []
-    keep_col = []
-    keep_data = []
-    accept_index = set(np.where(_mask)[0])
-    for i in xrange(_m.nnz):
-        if _m.row[i] in accept_index and _m.col[i] in accept_index:
-            keep_row.append(_m.row[i])
-            keep_col.append(_m.col[i])
-            keep_data.append(_m.data[i])
+    _data, _row, _col, _shift = _fast_retained(_m.data, _m.row, _m.col, _m.nnz, _mask)
 
-    # adjustments for removed rows/column indices
-    shift = np.cumsum(~_mask)
-    # TODO move this in the above loop
-    for i in xrange(len(keep_row)):
-        keep_row[i] -= shift[keep_row[i]]
-        keep_col[i] -= shift[keep_col[i]]
-
-    return scisp.coo_matrix((keep_data, (keep_row, keep_col)), shape=_m.shape - shift[-1])
+    return scisp.coo_matrix((_data, (_row, _col)), shape=_m.shape - _shift)
 
 
 class Sparse4DAccumulator(object):
