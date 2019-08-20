@@ -69,7 +69,7 @@ def add_cluster_names(clustering, prefix='CL'):
         clustering[cl_id]['name'] = '{0}{1:0{2}d}'.format(prefix, cl_id+1, num_width)
 
 
-def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None, work_dir='.'):
+def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None, work_dir='.', n_iter=None):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -79,6 +79,7 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
     :param min_len: override minimum sequence length, otherwise use instance's setting)
     :param min_sig: override minimum off-diagonal signal (in raw counts), otherwise use instance's setting)
     :param work_dir: working directory to which files are written during clustering
+    :param n_iter: for method supporting iterations, specify a non-default number.
     :return: a dictionary detailing the full clustering of the contact map
     """
 
@@ -208,8 +209,13 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
         elif method == 'infomap':
             with open(os.path.join(work_dir, 'infomap.log'), 'w+') as stdout:
                 edge_file = _write_edges(g, work_dir, base_name)
-                subprocess.check_call([package_path('external', 'Infomap'), '-u', '-v', '-z', '-i', 'link-list',
-                                       '-s', str(seed), '-N', '10', edge_file, work_dir],
+
+                options = ['-u', '-v', '-z', '-i', 'link-list', '-s', str(seed)]
+                if n_iter is None:
+                    n_iter = 10
+                options.extend(['-N', str(n_iter)])
+
+                subprocess.check_call([package_path('external', 'Infomap')] + options + [edge_file, work_dir],
                                       stdout=stdout, stderr=subprocess.STDOUT)
                 cl_to_ids = _read_tree(os.path.join(work_dir, '{}.tree'.format(base_name)))
         elif method == 'slm':

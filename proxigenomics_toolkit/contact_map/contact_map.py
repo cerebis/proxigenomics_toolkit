@@ -487,6 +487,51 @@ class SeqOrder(object):
 
 class ContactMap(object):
 
+    def append_map(self, other):
+        if not isinstance(other, ContactMap):
+            raise ValueError('ContactMap value is required')
+
+        if self.extent_map is not None or other.extent_map is not None:
+            logger.error('Appending contact maps with extent mapping not implemented')
+
+        # issue debug warnings if the following attributes are different
+        for _attr in ['strong', 'min_mapq', 'min_insert', 'min_len', 'min_sig',
+                      'min_extent', 'min_size', 'max_fold']:
+            a = self.__dict__[_attr]
+            b = other.__dict__[_attr]
+            if a != b:
+                logger.debug('Differing values for attribute {}: {} and {}'.format(_attr, a, b))
+
+        # raise an error if the following attributes are different
+        for _attr in ['bin_size', 'tip_size']:
+            a = self.__dict__[_attr]
+            b = other.__dict__[_attr]
+            if a != b:
+                logger.error('Cannot combine contact maps with differing values for attribute {}: {} and {}'
+                             .format(_attr, a, b))
+
+        # compare the sequence sets on name, length and number of sites.
+        # we assume for potentially non-unique sequence naming practices, checking
+        # the number of sites is likely a decent proxy for comparing actual sequences
+        # Note: we also assume the sequence orders are the same, which greatly simplifies
+        # combining arrays.
+        a_info = [(si.name, si.length, si.sites) for si in self.seq_info]
+        b_info = [(si.name, si.length, si.sites) for si in other.seq_info]
+        if a_info != b_info:
+            logger.error('Cannot combine contact maps with differing sets of DNA sequences.')
+
+        if self.seq_map.shape != other.seq_map.shape:
+            logger.error('Cannot combine contact maps with differing dimensions {} vs {}'
+                         .format(self.seq_map.shape, other.seq_map.shape))
+
+        logger.debug('Combining sequence maps with size {}'.format(self.seq_map.shape))
+        logger.debug('Initial total map weights: {:,} and {:,}'.format(self.map_weight(), other.map_weight()))
+        self.seq_map = sparse_utils.add_matrices(self.seq_map, other.seq_map)
+        logger.debug('Final total map weight: {:,}'.format(self.map_weight()))
+
+        logger.debug('Reinitializing primary acceptance mask')
+        self.set_primary_acceptance_mask(update=True)
+
     def __init__(self, bam_file, enzymes, seq_file, min_insert, min_mapq=0, min_len=0, min_sig=1, min_extent=0,
                  min_size=0, max_fold=None, random_seed=None, strong=None, bin_size=None, tip_size=None,
                  precount=False):
@@ -502,7 +547,6 @@ class ContactMap(object):
         self.min_size = min_size
         self.max_fold = max_fold
         self.random_state = np.random.RandomState(random_seed)
-        self.strong = strong
         self.seq_info = []
         self.seq_map = None
         self.seq_file = seq_file
@@ -516,7 +560,6 @@ class ContactMap(object):
         self.processed_map = None
         self.primary_acceptance_mask = None
         self.bisto_scale = None
-        self.seq_analyzer = None
         self.enzymes = enzymes
 
         # build a dictionary of sites in each reference first
@@ -608,8 +651,6 @@ class ContactMap(object):
 
         :param bam: this instance's open bam file.
         """
-        import tqdm
-
         def _simple_match(r):
             return not r.is_unmapped and r.mapq >= _mapq
 
@@ -922,13 +963,13 @@ class ContactMap(object):
         assert max_fold is None, 'Filtering on max_fold is currently disabled'
 
         # If parameter based critiera were unset, use instance member values set at instantiation time
-        if not min_len:
+        if min_len is None:
             min_len = self.min_len
-        if not min_sig:
+        if min_sig is None:
             min_sig = self.min_sig
 
-        assert min_len, 'Filtering criteria min_len is None'
-        assert min_sig, 'Filtering criteria min_sig is None'
+        assert min_len is not None, 'Filtering criteria min_len is None'
+        assert min_sig is not None, 'Filtering criteria min_sig is None'
 
         logger.debug('Setting primary acceptance mask with '
                      'filtering criterion min_len: {} min_sig: {}'.format(min_len, min_sig))
@@ -1180,6 +1221,8 @@ class ContactMap(object):
             if tip_based:
                 fast_norm_tipbased_bysite(_map.coords, _map.data, _sites)
             else:
+                if not sp.isspmatrix_coo(_map):
+                    _map = _map.tocoo()
                 fast_norm_fullseq_bysite(_map.row, _map.col, _map.data, _sites)
 
         else:
