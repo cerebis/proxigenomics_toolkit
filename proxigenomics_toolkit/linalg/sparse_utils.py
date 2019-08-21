@@ -346,7 +346,7 @@ def _fast_retained(_data, _row, _col, _nnz, _mask):
         keep_row[i] -= shift[keep_row[i]]
         keep_col[i] -= shift[keep_col[i]]
 
-    return keep_data, keep_row, keep_col, shift[-1]
+    return keep_data, keep_row, keep_col, shift
 
 
 def compress(_m, _mask):
@@ -363,7 +363,7 @@ def compress(_m, _mask):
 
     _data, _row, _col, _shift = _fast_retained(_m.data, _m.row, _m.col, _m.nnz, _mask)
 
-    return scisp.coo_matrix((_data, (_row, _col)), shape=_m.shape - _shift)
+    return scisp.coo_matrix((_data, (_row, _col)), shape=_m.shape - _shift[-1])
 
 
 class Sparse4DAccumulator(object):
