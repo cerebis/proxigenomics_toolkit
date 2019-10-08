@@ -331,7 +331,8 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             clustering[cl_id]['report'] = report
 
 
-def to_graph(contact_map, norm=True, bisto=False, scale=False, extern_ids=False, min_len=None, min_sig=None):
+def to_graph(contact_map, norm=True, bisto=False, scale=False, extern_ids=False, min_len=None, min_sig=None,
+             clustering=None, cl_list=None):
     """
     Convert the seq_map to a undirected Networkx Graph.
 
@@ -347,12 +348,17 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, extern_ids=False,
     :param extern_ids: use the original external sequence identifiers for node ids
     :param min_len: override minimum sequence length, otherwise use instance's setting)
     :param min_sig: override minimum off-diagonal signal (in raw counts), otherwise use instance's setting)
+    :param clustering: bin3C clustering solution, required for subsets of the total map
+    :param cl_list: list of clusters to include in the graph (0-based internal ids)
     :return: graph of contigs
     """
     if extern_ids:
         _nn = lambda x: contact_map.seq_info[x].name
     else:
         _nn = lambda x: x
+
+    if cl_list is not None and clustering is None:
+        logger.error('When cl_list is specified, a clustering solution is required')
 
     if not min_len and not min_sig:
         # use the (potentially) existing mask if default criteria
@@ -373,8 +379,37 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, extern_ids=False,
 
     logger.debug('Building graph from edges')
     g = nx.Graph(name='contact_graph')
-    for u, v, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
-        g.add_edge(_nn(u), _nn(v), weight=w * scl)
+
+    if cl_list is not None:
+
+        # collect annotation info
+        id_info = {}
+        for _cl in cl_list:
+            id_info.update({k: v for k, v in itertools.izip(clustering[_cl]['seq_ids'], clustering[_cl]['report'])})
+
+        for u, v, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
+
+            if u not in id_info or v not in id_info:
+                continue
+
+            if not g.has_node(_nn(u)):
+                g.add_node(_nn(u),
+                           length=int(id_info[u]['length']),
+                           cov=float(id_info[u]['cov']),
+                           gc=float(id_info[u]['gc']))
+
+            if not g.has_node(_nn(v)):
+                g.add_node(_nn(v),
+                           length=int(id_info[v]['length']),
+                           cov=float(id_info[v]['cov']),
+                           gc=float(id_info[v]['gc']))
+
+            g.add_edge(_nn(u), _nn(v), weight=float(w * scl))
+
+    else:
+        # the full graph is not annotated for the sake of size
+        for u, v, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
+            g.add_edge(_nn(u), _nn(v), weight=float(w * scl))
 
     logger.info('Finished: {}'.format(nx.info(g).replace('\n', ' ')))
 

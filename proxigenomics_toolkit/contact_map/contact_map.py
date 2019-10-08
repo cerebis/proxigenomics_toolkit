@@ -5,7 +5,7 @@ from .. import ordering
 from ..seq_utils.seq_utils import *
 from collections import OrderedDict, namedtuple
 from functools import partial
-from numba import jit, int64, float64, void
+import numba as nb
 import Bio.SeqIO as SeqIO
 import logging
 import numpy as np
@@ -25,19 +25,25 @@ logger = logging.getLogger(__name__)
 SeqInfo = namedtuple('SeqInfo', ['offset', 'refid', 'name', 'length', 'sites'])
 
 
+"""
+Basic Mean functions
+"""
+@nb.jit(nopython=True)
+def geometric_mean(x, y):
+    return (x*y)**0.5
+
+
+@nb.jit(nopython=True)
+def harmonic_mean(x, y):
+    return 2*x*y/(x+y)
+
+
+@nb.jit(nopython=True)
+def arithmetic_mean(x, y):
+    return 0.5*(x+y)
+
+
 def mean_selector(name):
-    """
-    Basic Mean functions
-    """
-    def geometric_mean(x, y):
-        return (x*y)**0.5
-
-    def harmonic_mean(x, y):
-        return 2*x*y/(x+y)
-
-    def arithmetic_mean(x, y):
-        return 0.5*(x+y)
-
     try:
         mean_switcher = {
             'geometric': geometric_mean,
@@ -49,7 +55,7 @@ def mean_selector(name):
         raise RuntimeError('unsupported mean type [{}]'.format(name))
 
 
-@jit(int64(int64[:, :], int64), nopython=True)
+@nb.jit('int64(int64[:, :], int64)', nopython=True)
 def find_nearest_jit(group_sites, x):
     """
     Find the nearest site from a given position on a contig.
@@ -65,7 +71,7 @@ def find_nearest_jit(group_sites, x):
     return group_sites[ix, 1]
 
 
-@jit(void(float64[:, :, :, :], float64[:, :], float64[:], float64))
+@nb.jit('void(float64[:, :, :, :], float64[:, :], float64[:], float64)')
 def fast_norm_tipbased_bylength(coords, data, tip_lengths, tip_size):
     """
     In-place normalisation of the sparse 4D matrix used in tip-based maps.
@@ -83,7 +89,7 @@ def fast_norm_tipbased_bylength(coords, data, tip_lengths, tip_size):
         data[ii] *= tip_size**2 / (tip_lengths[i] * tip_lengths[j])
 
 
-@jit(void(float64[:, :, :, :], float64[:, :], float64[:, :]))
+@nb.jit('void(float64[:, :, :, :], float64[:, :], float64[:, :])')
 def fast_norm_tipbased_bysite(coords, data, sites):
     """
     In-place normalisation of the sparse 4D matrix used in tip-based maps.
@@ -100,7 +106,7 @@ def fast_norm_tipbased_bysite(coords, data, sites):
         data[n] *= 1.0/(sites[i, k] * sites[j, l])
 
 
-@jit(void(float64[:], float64[:], float64[:], float64[:]))
+@nb.jit('void(float64[:], float64[:], float64[:], float64[:])')
 def fast_norm_fullseq_bysite(rows, cols, data, sites):
     """
     In-place normalisation of the scipy.coo_matrix for full sequences
@@ -114,6 +120,26 @@ def fast_norm_fullseq_bysite(rows, cols, data, sites):
         i = rows[n]
         j = cols[n]
         data[n] *= 1.0/(sites[i] * sites[j])
+
+
+@nb.jit(nopython=True, parallel=True)
+def _fast_length_norm(_data, _row, _col, _nnz, _len_lookup, mean_func):
+    """
+    Normalise an extent map by contig length. This method is intended
+    to be used internally on the members of a scipy.sparse COO matrix.
+
+    :param _data: coo data member
+    :param _row:  coo row member
+    :param _col:  coo col member
+    :param _nnz:  coo nnz attribute
+    :param _len_lookup: contig length lookup for any index of extent map
+    :param mean_func: mean function to apply to length_i and length_j
+    :return: the normalised data array only
+    """
+
+    for n in nb.prange(_nnz):
+        w_ij = 1e-3 * mean_func(_len_lookup[_row[n]], _len_lookup[_col[n]])
+        _data[n] /= w_ij
 
 
 class ExtentGrouping(object):
@@ -652,17 +678,23 @@ class ContactMap(object):
         :param bam: this instance's open bam file.
         """
         def _simple_match(r):
-            return not r.is_unmapped and r.mapq >= _mapq
+            return r.mapping_quality >= _mapq
 
         def _strong_match(r):
+            if r.mapping_quality < _mapq or r.cigarstring is None:
+                return False
             cig = r.cigartuples[-1] if r.is_reverse else r.cigartuples[0]
-            return (r.mapping_quality >= _mapq and
-                    not r.is_secondary and
-                    not r.is_supplementary and
-                    cig[0] == 0 and cig[1] >= self.strong)
+            return cig[0] == 0 and cig[1] >= _strong
 
         # set-up match call
         _matcher = _strong_match if self.strong else _simple_match
+
+        def next_informative(_bam_iter, _pbar):
+            while True:
+                r = _bam_iter.next()
+                _pbar.update()
+                if not r.is_unmapped and not r.is_secondary and not r.is_supplementary:
+                    return r
 
         def _on_tip_withlocs(p1, p2, l1, l2, _tip_size):
             tailhead_mat = np.zeros((2, 2), dtype=np.uint32)
@@ -730,11 +762,12 @@ class ContactMap(object):
             _grouping_map = None
             _extent_map = None
 
-        with tqdm.tqdm(total=self.total_reads) as pbar:
+        with tqdm.tqdm(total=self.total_reads) as progress_bar:
 
             # locals for read filtering
             _min_sep = self.min_insert
             _mapq = self.min_mapq
+            _strong = self.strong
 
             _idx = self.make_reverse_index('refid')
 
@@ -756,12 +789,10 @@ class ContactMap(object):
             while True:
 
                 try:
-                    r1 = bam_iter.next()
-                    pbar.update()
+                    r1 = next_informative(bam_iter, progress_bar)
                     while True:
                         # read records until we get a pair
-                        r2 = bam_iter.next()
-                        pbar.update()
+                        r2 = next_informative(bam_iter, progress_bar)
                         if r1.query_name == r2.query_name:
                             break
                         r1 = r2
@@ -1249,19 +1280,20 @@ class ContactMap(object):
         """
         assert sp.isspmatrix(_map), 'Extent matrix is not a scipy matrix type'
 
-        if _map.dtype not in {np.float, float}:
-            _map = _map.astype(np.float)
-        if not sp.isspmatrix_lil(_map):
-            _map = _map.tolil()
+        if not sp.isspmatrix_coo(_map):
+            _map = _map.tocoo()
 
-        _mean_func = mean_selector(mean_type)
-        _len = self.order.lengths().astype(np.float)
-        _cbins = np.cumsum(self.grouping.bins)
-        for row_i, col_dat in enumerate(_map.rows):
-            i = np.searchsorted(_cbins, row_i, side='right')
-            wi = np.fromiter((1e-3 * _mean_func(_len[i], _len[j])
-                              for j in np.searchsorted(_cbins, col_dat, side='right')), dtype=np.float)
-            _map.data[row_i] /= wi
+        # prepare the lookup array mapping contig length to any index of extent map
+        _bins = self.grouping.bins
+        _len = self.order.lengths()
+        _len_lookup = []
+        for i in xrange(len(_bins)):
+            _len_lookup.extend([_len[i]] * _bins[i])
+        _len_lookup = np.array(_len_lookup, dtype=np.float64)
+
+        # normalised data array
+        _fast_length_norm(_map.data, _map.row, _map.col, _map.nnz, _len_lookup, mean_selector(mean_type))
+
         return _map
 
     def _reorder_extent(self, _map):
@@ -1318,32 +1350,12 @@ class ContactMap(object):
                 accept_bins.extend([j+s for j in xrange(_bins[i])])
             s += _bins[i]
 
-        # use a hashable container for quicker lookup
-        accept_bins = set(accept_bins)
+        _mask = np.zeros(self.grouping.total_bins, dtype=np.bool)
+        _mask[np.array(accept_bins)] = True
 
-        # collect those values not in the excluded rows/columns
-        keep_row = []
-        keep_col = []
-        keep_data = []
-        for i in xrange(_map.nnz):
-            if _map.row[i] in accept_bins and _map.col[i] in accept_bins:
-                keep_row.append(_map.row[i])
-                keep_col.append(_map.col[i])
-                keep_data.append(_map.data[i])
+        _data, _row, _col, _shift = sparse_utils._fast_retained(_map.data, _map.row, _map.col, _map.nnz, _mask)
 
-        # after removal of those intervening, shift the coordinates of affected bins
-        # TODO this could be moved into the loop above
-        _shift = np.cumsum((~_order['mask']) * _bins)
-        _csbins = np.cumsum(_bins)
-        for i in xrange(len(keep_row)):
-            # rather than build a complete list of shifts across matrix, we'll
-            # sacrifice some CPU and do lookups for the appropriate bin
-            ir = np.searchsorted(_csbins, keep_row[i], side='right')
-            ic = np.searchsorted(_csbins, keep_col[i], side='right')
-            keep_row[i] -= _shift[ir]
-            keep_col[i] -= _shift[ic]
-
-        return sp.coo_matrix((keep_data, (keep_row, keep_col)), shape=_map.shape - _shift[-1])
+        return sp.coo_matrix((_data, (_row, _col)), shape=np.array(_map.shape) - _shift[-1])
 
     def plot_seqnames(self, fname, simple=True, permute=False, **kwargs):
         """
@@ -1380,7 +1392,7 @@ class ContactMap(object):
         self.plot(fname, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=tick_labs, **kwargs)
 
     def plot(self, fname, simple=False, tick_locs=None, tick_labs=None, norm=True, permute=False, pattern_only=False,
-             dpi=180, width=25, height=22, zero_diag=None, alpha=0.01, robust=False, max_image_size=None,
+             dpi=180, width=25, height=22, zero_diag=True, alpha=0.01, robust=False, max_image_size=None,
              flatten=False):
         """
         Plot the contact map. This can either be as a sparse pattern (requiring much less memory but without visual
@@ -1416,17 +1428,16 @@ class ContactMap(object):
             if self.processed_map is None:
                 self.prepare_seq_map(norm=norm, bisto=True)
             _map = self.get_subspace(permute=permute, marginalise=False if flatten else True, flatten=flatten)
-            # unless requested, zero diagonal for simple plots as its intensity tends to obscure detail
-            if zero_diag is None:
-                _map.setdiag(0)
             # amplify values for plotting
-            _map *= 100
+            _map *= 10
         else:
             _map = self.get_extent_map(norm=norm, permute=permute)
 
         if pattern_only:
             # sparse matrix plot, does not support pixel intensity
             if zero_diag:
+                if sp.isspmatrix(_map) and not sp.isspmatrix_lil(_map):
+                    _map = _map.tolil()
                 _map.setdiag(0)
             ax.spy(_map.tocsr(), markersize=5 if simple else 1)
 

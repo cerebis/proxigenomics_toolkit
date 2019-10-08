@@ -317,7 +317,7 @@ def _fast_retained(_data, _row, _col, _nnz, _mask):
     """
     Given a mask, determine the elements of a coo matrix attributes
     data, row and column and the resulting shifts.
-    :param _data: the corresponding adata of the coo matrix
+    :param _data: the corresponding data of the coo matrix
     :param _row: the row indices of the coo matrix
     :param _col: the column indices of the coo matrix
     :param _nnz: the number of non-zero elements in the coo matrix
@@ -327,9 +327,8 @@ def _fast_retained(_data, _row, _col, _nnz, _mask):
     keep_row = []
     keep_col = []
     keep_data = []
-    accept_index = set(np.where(_mask)[0])
     for i in xrange(_nnz):
-        if _row[i] in accept_index and _col[i] in accept_index:
+        if _mask[_row[i]] and _mask[_col[i]]:
             keep_row.append(_row[i])
             keep_col.append(_col[i])
             keep_data.append(_data[i])
@@ -363,7 +362,7 @@ def compress(_m, _mask):
 
     _data, _row, _col, _shift = _fast_retained(_m.data, _m.row, _m.col, _m.nnz, _mask)
 
-    return scisp.coo_matrix((_data, (_row, _col)), shape=_m.shape - _shift[-1])
+    return scisp.coo_matrix((_data, (_row, _col)), shape=np.array(_m.shape) - _shift[-1])
 
 
 class Sparse4DAccumulator(object):
