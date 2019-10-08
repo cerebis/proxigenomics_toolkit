@@ -329,10 +329,10 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
                                          ('gc', np.float),
                                          ('cov', np.float)])
             else:
-                logger.debug('As it was not available, the report will not contain coverage information')
                 report = np.array(zip(_len, _gc),
                                   dtype=[('length', np.int),
                                          ('gc', np.float)])
+
             clustering[cl_id]['report'] = report
 
 
