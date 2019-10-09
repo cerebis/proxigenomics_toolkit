@@ -118,6 +118,7 @@ setup(
                       'typing',
                       'llvmlite<0.27.1',
                       'cython',
+                      'm3-cdecimal',
                       'lap @ git+https://github.com/gatagat/lap@master#egg=lap-99',
                       'polo @ git+https://github.com/adrianveres/polo@master#egg=polo-99'
                       ],

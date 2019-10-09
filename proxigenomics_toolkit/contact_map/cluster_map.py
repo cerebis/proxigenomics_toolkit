@@ -6,6 +6,7 @@ from .contact_map import SeqOrder
 from typing import Optional
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
+import cdecimal
 import contextlib
 import itertools
 import logging
@@ -165,7 +166,7 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
 
         return cl_map
 
-    def _write_edges(g, parent_dir, base_name, sep=' '):
+    def _write_edges(g, parent_dir, base_name, sep=' ', precision=16):
         """
         Prepare an edge-list file from the specified graph. This will be written to the
         specified parent directory, using basename.edges
@@ -173,10 +174,18 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
         :param parent_dir: parent directory of file
         :param base_name: file base name
         :param sep: separator within file
+        :param precision: floating-point precision for weight
         :return: file name
         """
         edge_file = os.path.join(parent_dir, '{}.edges'.format(base_name))
-        nx.write_edgelist(g, edge_file, data=['weight'], delimiter=sep)
+        # using our own method to avoid unexpected side-effects on precision.
+        # networkx write_edgelist is also slower, despite the use of Decimal here.
+        with open(edge_file, 'wt') as out_h:
+            cdecimal.getcontext().prec = precision
+            dec = cdecimal.Decimal
+            for u, v in g.edges_iter():
+                out_h.write('{1}{0}{2}{0}{3}\n'.format(sep, u, v, dec(g[u][v]['weight']) * 1))
+
         return edge_file
 
     assert os.path.exists(work_dir), 'supplied output path [{}] does not exist'.format(work_dir)

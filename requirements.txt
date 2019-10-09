@@ -2,6 +2,7 @@
 -e git+https://github.com/adrianveres/polo@7c1fe6893d4874a0097f10c42f4a86c5ca77388e#egg=polo
 backports.functools-lru-cache==1.5
 biopython==1.73
+m3-cdecimal
 cycler==0.10.0
 cython==0.29.5
 decorator==4.3.2
