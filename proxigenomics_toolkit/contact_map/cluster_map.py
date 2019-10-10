@@ -693,7 +693,7 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
     with contextlib.closing(IndexedFasta(source_fasta)) as seq_db:
 
         # iterate over the cluster set, in the existing order
-        for cl_id, cl_info in cl_list:
+        for cl_id in cl_list:
 
             cl_info = clustering[cl_id]
 
