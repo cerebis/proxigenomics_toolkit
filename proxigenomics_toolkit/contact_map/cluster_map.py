@@ -651,7 +651,7 @@ def write_mcl(contact_map, fname, clustering):
             outh.write('\n')
 
 
-def write_fasta(contact_map, output_dir, clustering, source_fasta=None, clobber=False, only_large=False):
+def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=None, clobber=False, only_large=False):
     """
     Write out multi-fasta for all determined clusters in clustering.
 
@@ -664,6 +664,7 @@ def write_fasta(contact_map, output_dir, clustering, source_fasta=None, clobber=
     :param contact_map: an instance of ContactMap to cluster
     :param output_dir: parent output path
     :param clustering: the clustering result, possibly also ordered
+    :param cl_list: the list of cluster ids to include in plot. If none, include all ordered clusters
     :param source_fasta: specify a source fasta file, otherwise assume the same path as was used in parsing
     :param clobber: True overwrite files in the output path. Does not remove directories
     :param only_large: Limit output to only clusters whose extent exceedds min_extent setting
@@ -681,11 +682,20 @@ def write_fasta(contact_map, output_dir, clustering, source_fasta=None, clobber=
     if source_fasta is None:
         source_fasta = contact_map.seq_file
 
+    # analyze all if no subset list was provided
+    if cl_list is None:
+        cl_list = clustering.keys()
+        logger.info('Writing FASTA for all suitable clusters')
+    else:
+        logger.info('Writing FASTA the following specified clusters: {}'.format(np.asarray(cl_list)+1))
+
     # set up indexed access to the input fasta
     with contextlib.closing(IndexedFasta(source_fasta)) as seq_db:
 
         # iterate over the cluster set, in the existing order
-        for cl_id, cl_info in clustering.iteritems():
+        for cl_id, cl_info in cl_list:
+
+            cl_info = clustering[cl_id]
 
             if only_large and cl_info['extent'] < contact_map.min_extent:
                 continue

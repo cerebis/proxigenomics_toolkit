@@ -41,6 +41,9 @@ def order_clusters(contact_map, clustering, seed, cl_list=None, min_len=None, mi
     # analyze all if no subset list was provided
     if cl_list is None:
         cl_list = clustering.keys()
+        logger.info('Ordering all suitable clusters')
+    else:
+        logger.info('Ordering the following specified clusters: {}'.format(np.asarray(cl_list)+1))
 
     for cl_id in cl_list:
 
