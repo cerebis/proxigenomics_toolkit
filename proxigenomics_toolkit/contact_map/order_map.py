@@ -6,8 +6,8 @@ import os
 logger = logging.getLogger(__name__)
 
 
-def order_clusters(contact_map, clustering, seed, min_len=None, min_sig=None, max_fold=None, min_extent=None,
-                   min_size=1, work_dir='.', dist_method='neglog'):
+def order_clusters(contact_map, clustering, seed, cl_list=None, min_len=None, min_sig=None, max_fold=None,
+                   min_extent=None, min_size=1, work_dir='.', dist_method='neglog'):
     """
     Determine the order of sequences for a given clustering solution, as returned by cluster_map. The ordering is
     framed as a Travelling Salesman Problem and uses the LKH solver.
@@ -15,6 +15,7 @@ def order_clusters(contact_map, clustering, seed, min_len=None, min_sig=None, ma
     :param contact_map: an instance of ContactMap to cluster
     :param clustering: the full clustering solution, derived from the supplied contact map
     :param seed: random seed
+    :param cl_list: the list of cluster ids to include in plot. If none, include all ordered clusters
     :param min_len: within a cluster exclude sequences that are too short (bp)
     :param min_sig: within a cluster exclude sequences with weak signal (counts)
     :param max_fold: within a cluster, exclude sequences that appear to be overly represented
@@ -37,7 +38,13 @@ def order_clusters(contact_map, clustering, seed, min_len=None, min_sig=None, ma
         contact_map.set_primary_acceptance_mask(min_len, min_sig, max_fold=max_fold, update=True)
         contact_map.prepare_seq_map(norm=True, bisto=True, mean_type='geometric')
 
-    for cl_id, cl_info in clustering.iteritems():
+    # analyze all if no subset list was provided
+    if cl_list is None:
+        cl_list = clustering.keys()
+
+    for cl_id in cl_list:
+
+        cl_info = clustering[cl_id]
 
         cl_size = len(cl_info['seq_ids'])
 
