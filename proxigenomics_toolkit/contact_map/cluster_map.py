@@ -323,9 +323,14 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
                 if depth_extractor is not None:
                     _cov.append(depth_extractor(_seq))
 
-            assert len(_len) == len(_cov) == len(_gc), \
-                'There were missing records while collecting per-contig statistics (GC, length and coverage). ' \
-                'Did you declare the correct assembler?'
+            if depth_extractor is None:
+                assert len(_len) == len(_gc), \
+                    'There were missing records while collecting per-contig statistics (GC, length). ' \
+                    'Did you declare the correct assembler?'
+            else:
+                assert len(_len) == len(_cov) == len(_gc), \
+                    'There were missing records while collecting per-contig statistics (GC, length and coverage). ' \
+                    'Did you declare the correct assembler?'
 
             if len(_cov) > 0:
                 report = np.array(zip(_len, _gc, _cov),
@@ -333,10 +338,10 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
                                          ('gc', np.float),
                                          ('cov', np.float)])
             else:
-                logger.debug('As it was not available, the report will not contain coverage information')
                 report = np.array(zip(_len, _gc),
                                   dtype=[('length', np.int),
                                          ('gc', np.float)])
+
             clustering[cl_id]['report'] = report
 
 
