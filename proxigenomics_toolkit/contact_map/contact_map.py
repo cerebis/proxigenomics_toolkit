@@ -560,7 +560,7 @@ class ContactMap(object):
 
     def __init__(self, bam_file, enzymes, seq_file, min_insert, min_mapq=0, min_len=0, min_sig=1, min_extent=0,
                  min_size=0, max_fold=None, random_seed=None, strong=None, bin_size=None, tip_size=None,
-                 precount=False):
+                 precount=False, threads=4):
 
         self.strong = strong
         self.bam_file = bam_file
@@ -602,7 +602,7 @@ class ContactMap(object):
                                          'length': len(seqrec)}
 
         # now parse the header information from bam file
-        with pysam.AlignmentFile(bam_file, 'rb') as bam:
+        with pysam.AlignmentFile(bam_file, 'rb', threads=threads) as bam:
 
             # test that BAM file is the correct sort order
             if 'SO' not in bam.header['HD'] or bam.header['HD']['SO'] != 'queryname':
@@ -689,7 +689,7 @@ class ContactMap(object):
         # set-up match call
         _matcher = _strong_match if self.strong else _simple_match
 
-        def next_informative(_bam_iter, _pbar):
+        def _next_informative(_bam_iter, _pbar):
             while True:
                 r = _bam_iter.next()
                 _pbar.update()
@@ -789,10 +789,10 @@ class ContactMap(object):
             while True:
 
                 try:
-                    r1 = next_informative(bam_iter, progress_bar)
+                    r1 = _next_informative(bam_iter, progress_bar)
                     while True:
                         # read records until we get a pair
-                        r2 = next_informative(bam_iter, progress_bar)
+                        r2 = _next_informative(bam_iter, progress_bar)
                         if r1.query_name == r2.query_name:
                             break
                         r1 = r2
