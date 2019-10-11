@@ -14,6 +14,7 @@ import networkx as nx
 import numpy as np
 import os
 import pandas
+import pysam
 import re
 import scipy.sparse as sp
 import subprocess
@@ -769,3 +770,96 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
                         _seq.name = _seq.id
                         _seq.description = 'contig:{} ori:{} length:{}'.format(_name, _ori_symb, _length)
                         SeqIO.write(_seq, output_h, 'fasta')
+
+
+def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clobber=False, bam_file=None):
+    """
+    Extract a BAM file from the full source BAM file used in creating the contact map.
+    Only read-pairs whose ends are both contained with the cluster are retained.
+
+    :param contact_map: the contact_map from which to extract a cluster
+    :param clustering: the clustering solution for this contact map
+    :param output_dir: the output directory to write the extracted bam
+    :param cluster_ids: the 0-based cluster identifier
+    :param threads: the number of threads to use when parsing the bam file
+    :param clobber: overwrite output if True
+    :param bam_file: alternative location for BAM file
+    :return: tuple (output file name, number of pairs)
+    """
+
+    def _next_informative(_bam_iter, _pbar):
+        while True:
+            r = _bam_iter.next()
+            _pbar.update()
+            if not r.is_unmapped and not r.is_secondary and not r.is_supplementary:
+                return r
+
+    cluster_ids = np.asarray(cluster_ids)
+
+    if len(cluster_ids) == 1:
+        output_file = os.path.join(output_dir, 'cluster_{}.bam'.format(cluster_ids[0]+1))
+    elif len(cluster_ids) <= 5:
+        output_file = os.path.join(output_dir, 'cluster_{}.bam'.format('_'.join(str(_id) for _id in cluster_ids+1)))
+    else:
+        output_file = os.path.join(output_dir, 'cluster_many.bam')
+
+    if clobber and os.path.exists(output_file):
+        logger.error('{} already exists'.format(output_file))
+
+    if bam_file is None:
+        logger.debug('Attempting to open source BAM: {}'.format(contact_map.bam_file))
+        bam_in = pysam.AlignmentFile(contact_map.bam_file, 'rb', threads=threads)
+    else:
+        logger.debug('Alternative source source BAM: {}'.format(bam_file))
+        bam_in = pysam.AlignmentFile(bam_file, 'rb', threads=threads)
+
+    logger.debug('Extracting BAM for clusters: {}'.format(cluster_ids + 1))
+
+    # prepare header for extracted bam
+    header = bam_in.header.to_dict()
+    keepers = []
+    ref_lookup = {}
+    n = 0
+    for _id in cluster_ids:
+        for seq_id in clustering[_id]['seq_ids']:
+            keepers.append(header['SQ'][contact_map.seq_info[seq_id].refid])
+            ref_lookup[contact_map.seq_info[seq_id].refid] = n
+            n += 1
+    header['SQ'] = keepers
+    # todo - add version stamp
+    header['PG'].append({'CL': 'bin3C extract', 'ID': 'bin3C', 'PN': 'bin3C', 'VN': ''})
+
+    n_refs = len(keepers)
+    logger.info('The extracted BAM is based on {} references'.format(n_refs))
+
+    # iterate over the complete bam, store those pairs which are contained
+    # within the chosen cluster
+    n_pairs = 0
+    bam_iter = bam_in.fetch(until_eof=True)
+
+    with pysam.AlignmentFile(output_file, 'wb', header=header, threads=threads) as bam_out:
+        with tqdm.tqdm(total=contact_map.total_reads) as progress_bar:
+
+            while True:
+
+                try:
+                    r1 = _next_informative(bam_iter, progress_bar)
+                    while True:
+                        # read records until we get a pair
+                        r2 = _next_informative(bam_iter, progress_bar)
+                        if r1.query_name == r2.query_name:
+                            break
+                        r1 = r2
+                except StopIteration:
+                    break
+
+                if r1.reference_id in ref_lookup and r2.reference_id in ref_lookup:
+                    r1.reference_id = ref_lookup[r1.reference_id]
+                    r1.next_reference_id = ref_lookup[r1.next_reference_id]
+                    r2.reference_id = ref_lookup[r2.reference_id]
+                    r2.next_reference_id = ref_lookup[r2.next_reference_id]
+                    bam_out.write(r1)
+                    bam_out.write(r2)
+                    n_pairs += 1
+
+        return output_file, n_refs, n_pairs
