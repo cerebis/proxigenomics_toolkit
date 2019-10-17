@@ -693,7 +693,7 @@ class ContactMap(object):
             while True:
                 r = _bam_iter.next()
                 _pbar.update()
-                if not r.is_unmapped and not r.is_secondary and not r.is_supplementary:
+                if not (r.is_unmapped or r.is_secondary or r.is_supplementary or r.is_duplicate):
                     return r
 
         def _on_tip_withlocs(p1, p2, l1, l2, _tip_size):
@@ -807,18 +807,8 @@ class ContactMap(object):
                     counts['poor_match'] += 1
                     continue
 
-                # if no_go[r1.reference_id][r1.reference_start:r1.reference_end] or \
-                #         no_go[r2.reference_id][r2.reference_start:r2.reference_end]:
-                #     counts['median_excluded'] += 1
-                #     continue
-
                 if r1.is_read2:
                     r1, r2 = r2, r1
-
-                # # accept only inward facing read pairs
-                # if not ((r1.is_reverse and not r2.is_reverse) or (not r1.is_reverse and r2.is_reverse)):
-                #     # counts['skipped'] += 1
-                #     continue
 
                 # use 5-prime base depending on orientation
                 r1pos = r1.pos if not r1.is_reverse else r1.pos + r1.alen
