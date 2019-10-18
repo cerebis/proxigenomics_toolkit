@@ -655,7 +655,7 @@ class ContactMap(object):
             return r.mapping_quality >= _mapq
 
         def _strong_match(r):
-            if r.mapping_quality < _mapq or r.cigarstring is None:
+            if r.mapping_quality < _mapq:
                 return False
             cig = r.cigartuples[-1] if r.is_reverse else r.cigartuples[0]
             return cig[0] == 0 and cig[1] >= self.strong
@@ -667,7 +667,7 @@ class ContactMap(object):
             while True:
                 r = _bam_iter.next()
                 _pbar.update()
-                if not r.is_unmapped and not r.is_secondary and not r.is_supplementary:
+                if not r.is_unmapped and not r.is_secondary and not r.is_supplementary and not r.is_duplicate:
                     return r
 
         def _on_tip_withlocs(p1, p2, l1, l2, _tip_size):
