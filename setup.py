@@ -1,6 +1,7 @@
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext as build_ext_orig
 from shutil import copyfile
+import subprocess
 import os
 import re
 
@@ -36,6 +37,13 @@ class TarballExtension(Extension, object):
         self.url = url
         self.exe_path = exe_path
 
+        # attempt to use GNU tar and not Mac OSX bsd tar or the like
+        self.tar_cmd = 'tar'
+        if re.search(r'GNU', subprocess.check_output([self.tar_cmd, '--version'])) is None:
+            self.tar_cmd = 'gtar'
+        if re.search(r'GNU', subprocess.check_output([self.tar_cmd, '--version'])) is None:
+            raise IOError('GNU tar was not found and installation requires special features')
+
     @property
     def tarball(self):
         """
@@ -67,7 +75,7 @@ class build_tarball(build_ext_orig, object):
         # fetch the relevant commit from github
         self.spawn(['curl', '-L', ext.url, '-o', ext.tarball])
         # rename parent folder to something simple and consistent
-        self.spawn(['tar', '--transform=s,[^/]*,{},'.format(ext.name), '-xzvf', ext.tarball])
+        self.spawn([ext.tar_cmd, '--transform=s,[^/]*,{},'.format(ext.name), '-xzvf', ext.tarball])
         # build
         self.spawn(['make', '-j4', '-C', ext.name])
         # copy the built binary to package folder
