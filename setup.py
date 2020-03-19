@@ -72,14 +72,14 @@ class build_tarball(build_ext_orig, object):
 
     def curl_exists():
         try:
-            subprocess.check_call(['curl, '--version'])
+            subprocess.check_call(['curl', '--version'])
             return True
         except subprocess.CalledProcessError as e:
             return False
                                    
     def wget_exists():
         try:
-            subprocess.check_call(['wget, '--version'])
+            subprocess.check_call(['wget', '--version'])
             return True
         except subprocess.CalledProcessError as e:
             return False
