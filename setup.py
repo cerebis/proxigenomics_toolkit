@@ -70,10 +70,31 @@ class build_tarball(build_ext_orig, object):
         for ext in self.extensions:
             self.build_tarball(ext)
 
+    def curl_exists():
+        try:
+            subprocess.check_call(['curl, '--version'])
+            return True
+        except subprocess.CalledProcessError as e:
+            return False
+                                   
+    def wget_exists():
+        try:
+            subprocess.check_call(['wget, '--version'])
+            return True
+        except subprocess.CalledProcessError as e:
+            return False
+                                   
     def build_tarball(self, ext):
-        build_dir = os.path.join(self.build_lib, pkg_name)
+
         # fetch the relevant commit from github
-        self.spawn(['curl', '-L', ext.url, '-o', ext.tarball])
+        if curl_exists():
+            self.spawn(['curl', '-L', ext.url, '-o', ext.tarball])
+        elif wget_exists():
+            self.spawn(['wget', '-O', ext.tarball, ext.url])
+        else:
+            raise IOError('Building {} requires either curl or wget be installed'.format(pkg_name))
+
+        build_dir = os.path.join(self.build_lib, pkg_name)
         # rename parent folder to something simple and consistent
         self.spawn([ext.tar_cmd, '--transform=s,[^/]*,{},'.format(ext.name), '-xzvf', ext.tarball])
         # build
