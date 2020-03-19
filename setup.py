@@ -59,6 +59,22 @@ class TarballExtension(Extension, object):
         return os.path.basename(self.exe_path)
 
 
+def curl_exists():
+    try:
+        subprocess.check_call(['curl', '--version'])
+        return True
+    except subprocess.CalledProcessError as e:
+        return False
+
+
+def wget_exists():
+    try:
+        subprocess.check_call(['wget', '--version'])
+        return True
+    except subprocess.CalledProcessError as e:
+        return False
+
+
 class build_tarball(build_ext_orig, object):
     """
     Build a C/C++ Make projects from remote tarballs and place the binaries in proxigenomics_toolkit/external
@@ -69,20 +85,6 @@ class build_tarball(build_ext_orig, object):
     def run(self):
         for ext in self.extensions:
             self.build_tarball(ext)
-
-    def curl_exists():
-        try:
-            subprocess.check_call(['curl', '--version'])
-            return True
-        except subprocess.CalledProcessError as e:
-            return False
-                                   
-    def wget_exists():
-        try:
-            subprocess.check_call(['wget', '--version'])
-            return True
-        except subprocess.CalledProcessError as e:
-            return False
                                    
     def build_tarball(self, ext):
 
