@@ -138,7 +138,7 @@ setup(
                       'matplotlib<3',
                       'networkx<2',
                       'numba',
-                      'numpy<1.15.0',
+                      'numpy<1.15',
                       'python-louvain',
                       'pysam',
                       'PyYAML<4',
