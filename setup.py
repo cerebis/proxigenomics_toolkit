@@ -63,7 +63,7 @@ def curl_exists():
     try:
         subprocess.check_call(['curl', '--version'])
         return True
-    except subprocess.CalledProcessError as e:
+    except:
         return False
 
 
@@ -71,7 +71,7 @@ def wget_exists():
     try:
         subprocess.check_call(['wget', '--version'])
         return True
-    except subprocess.CalledProcessError as e:
+    except:
         return False
 
 
