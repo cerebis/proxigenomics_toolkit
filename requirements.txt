@@ -1,5 +1,5 @@
 -i https://pypi.org/simple
--e git+https://github.com/adrianveres/polo@7c1fe6893d4874a0097f10c42f4a86c5ca77388e#egg=polo
+-e git+https://github.com/adrianveres/polo@7c1fe6893d4874a0097f10c42f4a86c5ca77388e
 backports.functools-lru-cache
 biopython
 m3-cdecimal
