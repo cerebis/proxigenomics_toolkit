@@ -132,13 +132,13 @@ setup(
         'build_ext': build_tarball
     },
 
-    setup_requires=['numpy<1.15.0'],
+    setup_requires=['cython', 'numpy'],
 
     install_requires=['biopython',
-                      'matplotlib<3',
-                      'networkx<2',
+                      'matplotlib',
+                      'networkx',
                       'numba',
-                      'numpy<1.15',
+                      'numpy',
                       'python-louvain',
                       'pysam',
                       'PyYAML<4',
