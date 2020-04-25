@@ -6,6 +6,7 @@ import sparse
 from math import ceil
 
 logger = logging.getLogger(__name__)
+logging.getLogger("numba").setLevel(logging.INFO)
 
 
 def add_matrices(a, b):
