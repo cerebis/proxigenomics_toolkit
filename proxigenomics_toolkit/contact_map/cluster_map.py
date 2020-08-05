@@ -192,7 +192,8 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
     assert os.path.exists(work_dir), 'supplied output path [{}] does not exist'.format(work_dir)
 
     base_name = 'cm_graph'
-    g = to_graph(contact_map, min_len=min_len, min_sig=min_sig, norm=True, bisto=True, scale=True)
+    g = to_graph(contact_map, node_id_type='filtered', min_len=min_len, min_sig=min_sig,
+                 norm=True, bisto=True, scale=True)
 
     method = method.lower()
     logger.info('Clustering contact graph using method: {}'.format(method))
@@ -346,31 +347,56 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             clustering[cl_id]['report'] = report
 
 
-def to_graph(contact_map, norm=True, bisto=False, scale=False, extern_ids=False, min_len=None, min_sig=None,
+def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='filtered', min_len=None, min_sig=None,
              clustering=None, cl_list=None):
     """
     Convert the seq_map to a undirected Networkx Graph.
 
-    The contact map is effectively an adjacency matrix, where sequences
-    are the nodes and edges weighted by the observed counts. Self-loops
-    are not included by default and weights are affected by normalisation
-    choices.
+    The contact map is used as an adjacency matrix, where sequences/contigs are the nodes and Hi-C interactions
+    become weighted edges. Edge weigths are dictated by normalisation choices (bisto, norm, scale).
+
+    Explaining node id type:
+
+    - filtered: the contiguous set of indices of the subspace map (after filtering) are used as node ids.
+    - complete: the (possibly sparse) set of indices for the complete contact map are used as node ids.
+    - external: the sequence ids of the input fasta files are used a node ids.
+
+    Depending on the intended use, how best to set node ids varies.
+
+    Internally, when clustering the map, node ids which reference the subspace being clustered are the most convenient
+    as they are a contiguous series and some clustering algorithms expect a contiguous series of integer identifiers.
+    You must remember to convert results back into full map indices when finished.
+
+    However, when interrogating interactions between nodes in other ways, ids which reference the entire contact map
+    can be handier. This is because algorithms may require access to other features of the sequences, such as
+    cluster membership, length, gc, etc. Data structures which store these additional features are indexed in the same
+    way as the full contact map.
+
+    Lastly there may be "external" uses of the graph representation of the contact map, where the original sequence ids
+    are the most usedful.
 
     :param contact_map: an instance of ContactMap to cluster
     :param norm: normalize weights by length
     :param bisto: normalise using bistochasticity
     :param scale: scale weights (max_w = 1)
-    :param extern_ids: use the original external sequence identifiers for node ids
+    :param node_id_type: select the node id type (filtered, complete, external)
     :param min_len: override minimum sequence length, otherwise use instance's setting)
     :param min_sig: override minimum off-diagonal signal (in raw counts), otherwise use instance's setting)
     :param clustering: bin3C clustering solution, required for subsets of the total map
     :param cl_list: list of clusters to include in the graph (0-based internal ids)
     :return: graph of contigs
     """
-    if extern_ids:
-        _nn = lambda x: contact_map.seq_info[x].name
-    else:
-        _nn = lambda x: x
+
+    # used for referencing complete indices
+    sub2full = contact_map.order.all_positions(copy=False)
+
+    type_map = {'external': lambda x: contact_map.seq_info[x].name,
+                'filtered': lambda x: x,
+                'complete': lambda x: sub2full[x]}
+    try:
+        _nn = type_map[node_id_type]
+    except KeyError:
+        raise ApplicationException('unknown node_id_type {}'.format(node_id_type))
 
     if cl_list is not None and clustering is None:
         logger.error('When cl_list is specified, a clustering solution is required')
@@ -772,7 +798,8 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
                         SeqIO.write(_seq, output_h, 'fasta')
 
 
-def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clobber=False, bam_file=None):
+def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clobber=False, bam_file=None,
+                version=None, cmdline=None):
     """
     Extract a BAM file from the full source BAM file used in creating the contact map.
     Only read-pairs whose ends are both contained with the cluster are retained.
@@ -784,6 +811,8 @@ def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clo
     :param threads: the number of threads to use when parsing the bam file
     :param clobber: overwrite output if True
     :param bam_file: alternative location for BAM file
+    :param version: version stamp string for BAM file
+    :param cmdline: commandline options used for BAM file
     :return: tuple (output file name, number of pairs)
     """
 
@@ -826,8 +855,10 @@ def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clo
             ref_lookup[contact_map.seq_info[seq_id].refid] = n
             n += 1
     header['SQ'] = keepers
-    # todo - add version stamp
-    header['PG'].append({'CL': 'bin3C extract', 'ID': 'bin3C', 'PN': 'bin3C', 'VN': ''})
+    header['PG'].append({'CL': 'bin3C extract' if cmdline is None else cmdline,
+                         'ID': 'bin3C',
+                         'PN': 'bin3C',
+                         'VN': 'unknown' if version is None else version})
 
     n_refs = len(keepers)
     logger.info('The extracted BAM is based on {} references'.format(n_refs))
