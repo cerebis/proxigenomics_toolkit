@@ -20,7 +20,7 @@ import seaborn
 
 # package logger
 logger = logging.getLogger(__name__)
-
+logging.getLogger("numba").setLevel(logging.INFO)
 
 SeqInfo = namedtuple('SeqInfo', ['offset', 'refid', 'name', 'length', 'sites'])
 
@@ -71,7 +71,7 @@ def find_nearest_jit(group_sites, x):
     return group_sites[ix, 1]
 
 
-@nb.jit('void(float64[:, :, :, :], float64[:, :], float64[:], float64)')
+@nb.jit(nopython=True)
 def fast_norm_tipbased_bylength(coords, data, tip_lengths, tip_size):
     """
     In-place normalisation of the sparse 4D matrix used in tip-based maps.
@@ -89,7 +89,7 @@ def fast_norm_tipbased_bylength(coords, data, tip_lengths, tip_size):
         data[ii] *= tip_size**2 / (tip_lengths[i] * tip_lengths[j])
 
 
-@nb.jit('void(float64[:, :, :, :], float64[:, :], float64[:, :])')
+@nb.jit(nopython=True)
 def fast_norm_tipbased_bysite(coords, data, sites):
     """
     In-place normalisation of the sparse 4D matrix used in tip-based maps.
@@ -106,7 +106,7 @@ def fast_norm_tipbased_bysite(coords, data, sites):
         data[n] *= 1.0/(sites[i, k] * sites[j, l])
 
 
-@nb.jit('void(float64[:], float64[:], float64[:], float64[:])')
+@nb.jit(nopython=True)
 def fast_norm_fullseq_bysite(rows, cols, data, sites):
     """
     In-place normalisation of the scipy.coo_matrix for full sequences
