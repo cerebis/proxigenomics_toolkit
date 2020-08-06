@@ -387,12 +387,21 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='fil
     :return: graph of contigs
     """
 
-    # used for referencing complete indices
-    sub2full = contact_map.order.all_positions(copy=False)
+    def _ix_to_seqid(ix_sub):
+        """ return a sequences external sequence name/id """
+        return contact_map.seq_info[_ix_lookup[ix_sub]].name
 
-    type_map = {'external': lambda x: contact_map.seq_info[x].name,
-                'filtered': lambda x: x,
-                'complete': lambda x: sub2full[x]}
+    def _ix_to_self(ix_sub):
+        """ return the same value """
+        return ix_sub
+
+    def _ix_to_full(ix_sub):
+        """ return the full-map index """
+        return _ix_lookup[ix_sub]
+
+    type_map = {'external': _ix_to_seqid,
+                'filtered': _ix_to_self,
+                'complete': _ix_to_full}
     try:
         _nn = type_map[node_id_type]
     except KeyError:
@@ -410,7 +419,10 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='fil
 
     if contact_map.processed_map is None:
         contact_map.prepare_seq_map(norm=norm, bisto=bisto)
-    _map = contact_map.get_subspace(marginalise=True, flatten=False)
+    _map = contact_map.get_subspace(permute=False, marginalise=True, flatten=False)
+
+    # sub-space to full map index lookup.
+    _ix_lookup = contact_map.order.accepted_positions(copy=False)
 
     logger.info('Graph will have {} nodes'.format(contact_map.order.count_accepted()))
 
@@ -427,30 +439,46 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='fil
         id_info = {}
         for _cl in cl_list:
             id_info.update({k: v for k, v in itertools.izip(clustering[_cl]['seq_ids'], clustering[_cl]['report'])})
+        logger.info('Graph will have {} nodes'.format(len(id_info)))
+
+        n_expected = len(id_info)
 
         for u, v, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
 
-            if u not in id_info or v not in id_info:
+            # lookups require the full map indices
+            u_full = _ix_lookup[u]
+            v_full = _ix_lookup[v]
+
+            if u_full not in id_info or v_full not in id_info:
                 continue
+
+            # add u and v nodes with attributes if not already existing
 
             if not g.has_node(_nn(u)):
                 g.add_node(_nn(u),
-                           length=int(id_info[u]['length']),
-                           cov=float(id_info[u]['cov']),
-                           gc=float(id_info[u]['gc']))
+                           length=int(id_info[u_full]['length']),
+                           cov=float(id_info[u_full]['cov']),
+                           gc=float(id_info[u_full]['gc']))
 
             if not g.has_node(_nn(v)):
                 g.add_node(_nn(v),
-                           length=int(id_info[v]['length']),
-                           cov=float(id_info[v]['cov']),
-                           gc=float(id_info[v]['gc']))
+                           length=int(id_info[v_full]['length']),
+                           cov=float(id_info[v_full]['cov']),
+                           gc=float(id_info[v_full]['gc']))
 
+            # create the edge
             g.add_edge(_nn(u), _nn(v), weight=float(w * scl))
 
     else:
+        n_expected = contact_map.order.count_accepted()
+
         # the full graph is not annotated for the sake of size
         for u, v, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
+            # no node attributes here, so we leave their creation to be implicit part of edge creation
             g.add_edge(_nn(u), _nn(v), weight=float(w * scl))
+
+    assert g.degree() != n_expected, \
+        'degree(graph) did not equal number of expected sequences'
 
     logger.info('Finished: {}'.format(nx.info(g).replace('\n', ' ')))
 

@@ -282,7 +282,10 @@ class SeqOrder(object):
     def accepted_positions(self, copy=True):
         """
         The current positional order of only those sequences which have not been excluded by the mask.
-        :param copy: return a copy
+        :param copy: return a copy.
+
+        Note: see usage of all_positions() for warning about when positional data must be refreshed.
+
         :return: all accepted positons in order of index
         """
         return self.all_positions(copy=copy)[:self.count_accepted()]
@@ -291,6 +294,9 @@ class SeqOrder(object):
         """
         The current positional order of all sequences. Internal logic relegates masked sequences to always come
         last and ascending surrogate id order.
+
+        Note: positions are updated when ContactMap.__init__(), .mask(), .set_mask_only(), .set_order_and_orientation()
+        and .shuffle() are called. Users should take care when copying and then using outdated positional data.
 
         :param copy: return a copy of the positions
         :return: all positions in order of index, masked or not.
