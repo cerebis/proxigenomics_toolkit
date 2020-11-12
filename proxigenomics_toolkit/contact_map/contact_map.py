@@ -5,6 +5,7 @@ from .. import ordering
 from ..seq_utils.seq_utils import *
 from collections import OrderedDict, namedtuple
 from functools import partial
+from scipy.stats import binom
 import numba as nb
 import Bio.SeqIO as SeqIO
 import logging
@@ -105,6 +106,48 @@ def fast_norm_tipbased_bysite(coords, data, sites):
         i, j, k, l = coords[:, n]
         data[n] *= 1.0/(sites[i, k] * sites[j, l])
 
+
+# first 30 factorial values as approx as floats
+LOOKUP_TABLE = np.fromiter((np.math.factorial(i) for i in range(31)), dtype=np.float64)
+
+
+@nb.jit(nopython=True)
+def fast_factorial(n):
+    if n > 30:
+        return np.math.gamma(n+1)
+    return LOOKUP_TABLE[n]
+
+
+@nb.jit(nopython=True)
+def poisson_cdf(x, n, p):
+    L = n * p
+    sum = 0
+    for i in range(0, x+1):
+        sum += L**i / fast_factorial(i)
+    return sum * np.exp(-L)
+
+
+def fast_norm_gothic(rows, cols, data, rel_cov, total_links, is_sig):
+    """
+    Inplace application of GOTHiC link significance. Here, modifications have been
+    made to approximate the Binomial using the Poisson for large N and small p.
+    This allows the easy implementation of a fast Poisson CDF calculator.
+    :param rows: COO matrix rows
+    :param cols: COO matrix cols
+    :param data: COO matrix data values to modify
+    :param rel_cov: relative coverages
+    :param total_links: total number of links (pairs) in the map
+    :param is_sig: calculate (- log significance), otherwise (effect-size)
+    """
+    if is_sig:
+        eps = np.finfo(data.dtype).eps
+        pij = rel_cov[rows] * rel_cov[cols]
+        pr = binom.sf(data, total_links, pij)
+        # replace all the zeros with the smallest possible float before taking log
+        data[:] = - np.log(np.where(pr < eps, eps, pr))
+    else:
+        pij = rel_cov[rows] * rel_cov[cols]
+        data[:] = np.log2(data / (pij * total_links))
 
 @nb.jit(nopython=True)
 def fast_norm_fullseq_bysite(rows, cols, data, sites):
@@ -588,7 +631,6 @@ class ContactMap(object):
         self.tip_size = tip_size
         self.precount = precount
         self.total_reads = None
-        self.cov_info = None
         self.processed_map = None
         self.primary_acceptance_mask = None
         self.bisto_scale = None
@@ -1030,13 +1072,14 @@ class ContactMap(object):
 
         return self.get_primary_acceptance_mask()
 
-    def prepare_seq_map(self, norm=True, bisto=False, mean_type='geometric'):
+    def prepare_seq_map(self, norm=True, bisto=False, mean_type='geometric', norm_method='sites'):
         """
         Prepare the sequence map (seq_map) by application of various filters and normalisations.
 
         :param norm: normalisation by sequence lengths
         :param bisto: make the output matrix bistochastic
         :param mean_type: when performing normalisation, use "geometric, harmonic or arithmetic" mean.
+        :param norm_method: normalisation method to apply to contact map
         """
 
         logger.info('Preparing sequence map with full dimensions: {}'.format(self.seq_map.shape))
@@ -1052,7 +1095,7 @@ class ContactMap(object):
 
         # apply length normalisation if requested
         if norm:
-            _map = self._norm_seq(_map, self.is_tipbased(), mean_type=mean_type, use_sites=True)
+            _map = self._norm_seq(_map, self.is_tipbased(), mean_type=mean_type, method=norm_method)
             logger.debug('Map normalized')
 
         # make map bistochastic if requested
@@ -1229,7 +1272,7 @@ class ContactMap(object):
         _sites[np.where(_sites == 0)] = 1
         return _sites
 
-    def _norm_seq(self, _map, tip_based, use_sites=True, mean_type='geometric'):
+    def _norm_seq(self, _map, tip_based, method='sites', mean_type='geometric'):
         """
         Normalise a simple sequence map in place by the geometric mean of interacting contig pairs lengths.
         The map is assumed to be in starting order.
@@ -1241,7 +1284,7 @@ class ContactMap(object):
         :param mean_type: for length normalisation, choice of mean (harmonic, geometric, arithmetic)
         :return: normalized map
         """
-        if use_sites:
+        if method == 'sites':
             logger.debug('Doing site based normalisation')
             _sites = self._get_sites()
             _map = _map.astype(np.float)
@@ -1252,7 +1295,7 @@ class ContactMap(object):
                     _map = _map.tocoo()
                 fast_norm_fullseq_bysite(_map.row, _map.col, _map.data, _sites)
 
-        else:
+        elif method == 'length':
             logger.debug('Doing length based normalisation')
             if tip_based:
                 _tip_lengths = np.minimum(self.tip_size, self.order.lengths()).astype(np.float)
@@ -1265,6 +1308,36 @@ class ContactMap(object):
                     _map[i, :] /= np.fromiter((1e-3 * _mean_func(_len[i],  _len[j])
                                                for j in xrange(_map.shape[0])), dtype=np.float)
                 _map = _map.tocsr()
+
+        elif method.startswith('gothic'):
+
+            if tip_based:
+                raise ApplicationException('GOTHiC tip based normalisation not supported')
+
+            if method.endswith('-es'):
+                is_sig = False
+                logger.debug('Doing GOTHiC based effect size normalisation')
+            elif method.endswith('-sig'):
+                is_sig = True
+                logger.debug('Doing GOTHiC based significance normalisation')
+            else:
+                raise ApplicationException('Unknown method {} in GOTHiC normalisation'.format(method))
+
+            # take triangular sum as total number of links (pairs) in map
+            _map = _map.tocsr()
+            total_links = sp.triu(_map).sum()
+
+            # calculate relative length-normalized contig coverage
+            seq_len = self.order.order['length'].astype(np.float64)
+            rel_cov = _map.sum(axis=1).astype(np.float64)
+            rel_cov = np.asarray(rel_cov).squeeze()
+            rel_cov /= (2 * total_links * seq_len / 5e-3)
+
+            _map = _map.tocoo()
+            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, is_sig)
+
+        else:
+            raise ApplicationException('unknown method {}'.format(method))
 
         return _map
 
@@ -1389,7 +1462,7 @@ class ContactMap(object):
 
     def plot(self, fname, simple=False, tick_locs=None, tick_labs=None, norm=True, permute=False, pattern_only=False,
              dpi=180, width=25, height=22, zero_diag=True, alpha=0.01, robust=False, max_image_size=None,
-             flatten=False):
+             flatten=False, norm_method='sites'):
         """
         Plot the contact map. This can either be as a sparse pattern (requiring much less memory but without visual
         cues about intensity), simple sequence or full binned map and normalized or permuted.
@@ -1409,6 +1482,7 @@ class ContactMap(object):
         :param robust: use seaborn robust dynamic range feature
         :param max_image_size: maximum allowable image size before rescale occurs
         :param flatten: for tip-based, flatten matrix rather than marginalise
+        :param norm_method: normalisation method to apply to contact map
         """
 
         plt.style.use('ggplot')
@@ -1422,7 +1496,7 @@ class ContactMap(object):
             # prepare the map if not already done. This overwrites
             # any current ordering mask beyond the primary acceptance mask
             if self.processed_map is None:
-                self.prepare_seq_map(norm=norm, bisto=True)
+                self.prepare_seq_map(norm=norm, bisto=True, norm_method=norm_method)
             _map = self.get_subspace(permute=permute, marginalise=False if flatten else True, flatten=flatten)
             # amplify values for plotting
             _map *= 10

@@ -26,6 +26,24 @@ SPADES_PATTERN = re.compile(r'NODE_\d+_length_\d+_cov_(\d+\.\d*)')
 MEGAHIT_PATTERN = re.compile(r'.*?multi=(\d+\.\d*).*?')
 
 
+def coverage_data_extractor(cov_data):
+    """
+    For supplied coverage data, return values from the DataFrame object
+    :param cov_data: pandas DataFrame indexed on seq_id
+    :return: extractor instance
+    """
+    def _extractor(seq_record):
+        """
+        :param seq_record: Bio.SeqRecord instance
+        :return: float coverage
+        """
+        try:
+            return cov_data.loc[seq_record].values[0]
+        except KeyError:
+            return None
+    return _extractor
+
+
 def spades_extractor(seq_record):
     """
     For SPAdes assemblies, we can extract the coverage statistic contained in the contig name.
@@ -71,7 +89,8 @@ def add_cluster_names(clustering, prefix='CL'):
         clustering[cl_id]['name'] = '{0}{1:0{2}d}'.format(prefix, cl_id+1, num_width)
 
 
-def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None, work_dir='.', n_iter=None):
+def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
+                work_dir='.', n_iter=None, norm_method='sites'):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -81,7 +100,8 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
     :param min_len: override minimum sequence length, otherwise use instance's setting)
     :param min_sig: override minimum off-diagonal signal (in raw counts), otherwise use instance's setting)
     :param work_dir: working directory to which files are written during clustering
-    :param n_iter: for method supporting iterations, specify a non-default number.
+    :param n_iter: for method supporting iterations, specify a non-default number
+    :param norm_method: noramlisation method to apply to contact map
     :return: a dictionary detailing the full clustering of the contact map
     """
 
@@ -193,7 +213,7 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
 
     base_name = 'cm_graph'
     g = to_graph(contact_map, node_id_type='filtered', min_len=min_len, min_sig=min_sig,
-                 norm=True, bisto=True, scale=True)
+                 norm=True, bisto=True, scale=True, norm_method=norm_method)
 
     method = method.lower()
     logger.info('Clustering contact graph using method: {}'.format(method))
@@ -277,7 +297,7 @@ def cluster_map(contact_map, seed, method='infomap', min_len=None, min_sig=None,
     return clustering
 
 
-def cluster_report(contact_map, clustering, source_fasta=None, assembler='generic'):
+def cluster_report(contact_map, clustering, source_fasta=None, assembler='generic', coverage_file=None):
     """
     For each cluster, analyze the member sequences and build a report.
     Update the clustering dictionary with this result by adding a "report" for each.
@@ -286,20 +306,30 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
     :param clustering: clustering solution dictionary
     :param source_fasta: source assembly fasta (other than defined at instantiation)
     :param assembler: name of assembly software used in creating contigs
+    :param coverage_file: csv file containing coverage information: seq_id,cov
     """
 
     logger.info('Analyzing the contents of each cluster')
 
+    cov_data = None
     depth_extractor = None
-    if assembler == 'spades':
-        depth_extractor = spades_extractor
-    elif assembler == 'megahit':
-        depth_extractor = megahit_extractor
-
-    if depth_extractor is not None:
-        logger.info('Assembly contig headers are presumed follow {}\'s format'.format(assembler))
+    if coverage_file is not None:
+        cov_data = pandas.read_csv(coverage_file, sep=',', index_col=0, skip_blank_lines=True,
+                                   header=None, comment='#')
+        depth_extractor = coverage_data_extractor(cov_data)
+        logger.info('Supplied coverage file {} will override any information stored with input sequences'
+                    .format(coverage_file))
     else:
-        logger.info('No assembler was specified, therefore coverage information will not be available')
+        if assembler == 'spades':
+            depth_extractor = spades_extractor
+        elif assembler == 'megahit':
+            depth_extractor = megahit_extractor
+        if depth_extractor is not None:
+            logger.info('Assembly contig headers are presumed follow {}\'s format'.format(assembler))
+
+    if depth_extractor is None:
+        logger.info('No assembler or coverage file was supplied, '
+                    'therefore coverage information will not be available in report')
 
     seq_info = contact_map.seq_info
 
@@ -348,7 +378,7 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
 
 
 def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='filtered', min_len=None, min_sig=None,
-             clustering=None, cl_list=None):
+             clustering=None, cl_list=None, norm_method='sites'):
     """
     Convert the seq_map to a undirected Networkx Graph.
 
@@ -384,6 +414,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='fil
     :param min_sig: override minimum off-diagonal signal (in raw counts), otherwise use instance's setting)
     :param clustering: bin3C clustering solution, required for subsets of the total map
     :param cl_list: list of clusters to include in the graph (0-based internal ids)
+    :param norm_method: normalisation method to apply to contact map
     :return: graph of contigs
     """
 
@@ -418,7 +449,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='fil
         contact_map.set_primary_acceptance_mask(min_len, min_sig, update=True)
 
     if contact_map.processed_map is None:
-        contact_map.prepare_seq_map(norm=norm, bisto=bisto)
+        contact_map.prepare_seq_map(norm=norm, bisto=bisto, norm_method=norm_method)
     _map = contact_map.get_subspace(permute=False, marginalise=True, flatten=False)
 
     # sub-space to full map index lookup.
@@ -478,7 +509,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='fil
             g.add_edge(_nn(u), _nn(v), weight=float(w * scl))
 
     assert g.degree() != n_expected, \
-        'degree(graph) did not equal number of expected sequences'
+        'order(graph) did not equal number of expected sequences'
 
     logger.info('Finished: {}'.format(nx.info(g).replace('\n', ' ')))
 
@@ -548,7 +579,8 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
 
 
 def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, permute=False, max_image_size=None,
-                  ordered_only=False, min_extent=None, use_taxo=False, flatten=False, **kwargs):
+                  ordered_only=False, min_extent=None, use_taxo=False, flatten=False, norm_method='sites',
+                  **kwargs):
     """
     Plot the contact map, annotating the map with cluster names and boundaries.
 
@@ -566,6 +598,7 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
     :param min_extent: include only clusters whose total extent is greater
     :param use_taxo: use taxonomic information within clustering, assuming it exists
     :param flatten: for tip-based, flatten matrix rather than marginalise
+    :param norm_method: normalisation method to apply to contact map
     :param kwargs: additional options passed to plot()
     """
 
@@ -578,7 +611,7 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
         # prepare the map early as we wish to override the mask
         # which happens to be initialized in this method call
         if contact_map.processed_map is None:
-            contact_map.prepare_seq_map(norm=True, bisto=True)
+            contact_map.prepare_seq_map(norm=True, bisto=True, norm_method=norm_method)
 
     # now build the list of relevant clusters and setup the associated mask
     cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=ordered_only,
