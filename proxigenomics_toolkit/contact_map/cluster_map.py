@@ -38,7 +38,7 @@ def coverage_data_extractor(cov_data):
         :return: float coverage
         """
         try:
-            return cov_data.loc[seq_record].values[0]
+            return cov_data.loc[seq_record.id].values[0]
         except KeyError:
             return None
     return _extractor
