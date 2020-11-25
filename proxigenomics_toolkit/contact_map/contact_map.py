@@ -140,14 +140,15 @@ def fast_norm_gothic(rows, cols, data, rel_cov, total_links, is_sig):
     :param is_sig: calculate (- log significance), otherwise (effect-size)
     """
     if is_sig:
-        eps = np.finfo(data.dtype).eps
+        tiny = np.finfo(data.dtype).tiny
         pij = rel_cov[rows] * rel_cov[cols]
         pr = binom.sf(data, total_links, pij)
-        # replace all the zeros with the smallest possible float before taking log
-        data[:] = - np.log(np.where(pr < eps, eps, pr))
+        # cap the smallest values to tiny, this prevents log errors
+        data[:] = - np.log2(np.where(pr < tiny, tiny, pr))
     else:
         pij = rel_cov[rows] * rel_cov[cols]
         data[:] = np.log2(data / (pij * total_links))
+
 
 @nb.jit(nopython=True)
 def fast_norm_fullseq_bysite(rows, cols, data, sites):
@@ -166,23 +167,23 @@ def fast_norm_fullseq_bysite(rows, cols, data, sites):
 
 
 @nb.jit(nopython=True, parallel=True)
-def _fast_length_norm(_data, _row, _col, _nnz, _len_lookup, mean_func):
+def fast_length_norm(row, col, data, nnz, len_lookup, mean_func):
     """
     Normalise an extent map by contig length. This method is intended
     to be used internally on the members of a scipy.sparse COO matrix.
 
-    :param _data: coo data member
-    :param _row:  coo row member
-    :param _col:  coo col member
-    :param _nnz:  coo nnz attribute
-    :param _len_lookup: contig length lookup for any index of extent map
+    :param data: coo data member
+    :param row:  coo row member
+    :param col:  coo col member
+    :param nnz:  coo nnz attribute
+    :param len_lookup: contig length lookup for any index of extent map
     :param mean_func: mean function to apply to length_i and length_j
     :return: the normalised data array only
     """
 
-    for n in nb.prange(_nnz):
-        w_ij = 1e-3 * mean_func(_len_lookup[_row[n]], _len_lookup[_col[n]])
-        _data[n] /= w_ij
+    for n in nb.prange(nnz):
+        w_ij = 1e-3 * mean_func(len_lookup[row[n]], len_lookup[col[n]])
+        data[n] /= w_ij
 
 
 class ExtentGrouping(object):
@@ -1301,6 +1302,8 @@ class ContactMap(object):
                 _tip_lengths = np.minimum(self.tip_size, self.order.lengths()).astype(np.float)
                 fast_norm_tipbased_bylength(_map.coords, _map.data, _tip_lengths, self.tip_size)
             else:
+                # TODO convert this to numba or remove
+                logger.warning('length normalisation is not optimised and therefore very slow')
                 _mean_func = mean_selector(mean_type)
                 _len = self.order.lengths().astype(np.float)
                 _map = _map.tolil().astype(np.float)
@@ -1341,7 +1344,7 @@ class ContactMap(object):
 
         return _map
 
-    def _norm_extent(self, _map, mean_type='geometric'):
+    def _norm_extent(self, _map, method='length', mean_type='geometric'):
         """
         Normalise a extent map in place by the geometric mean of interacting contig pairs lengths.
 
@@ -1361,7 +1364,10 @@ class ContactMap(object):
         _len_lookup = np.array(_len_lookup, dtype=np.float64)
 
         # normalised data array
-        _fast_length_norm(_map.data, _map.row, _map.col, _map.nnz, _len_lookup, mean_selector(mean_type))
+        if method == 'length':
+            fast_length_norm(_map.row, _map.col, _map.data, _map.nnz, _len_lookup, mean_selector(mean_type))
+        elif method.startswith('gothic'):
+            fast_norm_gothic()
 
         return _map
 
@@ -1553,8 +1559,8 @@ class ContactMap(object):
                 ax.yaxis.set_minor_locator(min_ticks)
 
             # seaborn will not display the grid, so we make our own.
-            ax.hlines(tick_locs, *ax.get_xlim(), color='grey', linewidth=0.5, linestyle='-.')
-            ax.vlines(tick_locs, *ax.get_ylim(), color='grey', linewidth=0.5, linestyle='-.')
+            ax.hlines(tick_locs, *ax.get_xlim(), color='grey', linewidth=0.2, linestyle='-.')
+            ax.vlines(tick_locs, *ax.get_ylim(), color='grey', linewidth=0.2, linestyle='-.')
 
         logger.debug('Saving plot')
         fig.tight_layout()
