@@ -610,6 +610,9 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
         if contact_map.processed_map is None:
             contact_map.prepare_seq_map(norm=True, bisto=True, norm_method=norm_method)
     else:
+        if norm_method == 'sites':
+            logger.debug('Extent map normalisation switching to "length" as "sites" is unsupported')
+            norm_method = 'length'
         if norm_method is None:
             norm_method = 'length'
 
