@@ -139,15 +139,16 @@ def fast_norm_gothic(rows, cols, data, rel_cov, total_links, is_sig):
     :param total_links: total number of links (pairs) in the map
     :param is_sig: calculate (- log significance), otherwise (effect-size)
     """
+    # we will cap the smallest values to tiny, preventing log errors
+    tiny = np.finfo(data.dtype).tiny
     if is_sig:
-        tiny = np.finfo(data.dtype).tiny
         pij = rel_cov[rows] * rel_cov[cols]
         pr = binom.sf(data, total_links, pij)
-        # cap the smallest values to tiny, this prevents log errors
         data[:] = - np.log2(np.where(pr < tiny, tiny, pr))
     else:
-        pij = rel_cov[rows] * rel_cov[cols]
-        data[:] = np.log2(data / (pij * total_links))
+        data /= rel_cov[rows] * rel_cov[cols] * total_links
+        data += 1
+        data[:] = np.log2(data)
 
 
 @nb.jit(nopython=True)
@@ -227,6 +228,22 @@ class ExtentGrouping(object):
             # logger.debug('{}: {} bins'.format(n, num_bins))
 
         self.bins = np.array(self.bins)
+
+    def get_bin_lengths(self):
+        """
+        Compuate the width of each bin. The bin widths vary slightly, as the grouping algorithm
+        attempts to disperse extra extect across all bins.
+        :return: bin lengths
+        """
+        bin_len = np.zeros(self.total_bins, dtype=np.int64)
+        n = 0
+        for i in range(len(self.map)):
+            bin_len[n] = self.map[i][0, 0]
+            n += 1
+            for j in range(1, len(self.map[i]) ):
+                bin_len[n] = self.map[i][j, 0] - self.map[i][j-1, 0]
+                n += 1
+        return bin_len
 
 
 class SeqOrder(object):
@@ -1092,7 +1109,7 @@ class ContactMap(object):
         if self.order.count_accepted() < 1:
             raise NoneAcceptedException()
 
-        _map = self.seq_map.astype(np.float)
+        _map = self.seq_map.astype(np.float64)
 
         # apply length normalisation if requested
         if norm:
@@ -1164,7 +1181,7 @@ class ContactMap(object):
 
         return _map
 
-    def get_extent_map(self, norm=True, bisto=False, permute=False, mean_type='geometric'):
+    def get_extent_map(self, norm=True, bisto=False, permute=False, mean_type='geometric', norm_method='length'):
         """
         Return the extent map after applying specified processing steps. Masked sequences are always removed.
 
@@ -1172,6 +1189,7 @@ class ContactMap(object):
         :param bisto: make map bistochastic
         :param permute: permute the map using current order
         :param mean_type: length normalisation mean (geometric, harmonic, arithmetic)
+        :param norm_method: methods used to normalise the matrix (length, gothic-es, gothic-sig)
         :return: processed extent map
         """
 
@@ -1181,7 +1199,7 @@ class ContactMap(object):
 
         # apply length normalisation if requested
         if norm:
-            _map = self._norm_extent(_map, mean_type)
+            _map = self._norm_extent(_map, method=norm_method, mean_type=mean_type)
             logger.debug('Map normalized')
 
         # if there are sequences to mask, remove them from the map
@@ -1286,6 +1304,7 @@ class ContactMap(object):
         :return: normalized map
         """
         if method == 'sites':
+
             logger.debug('Doing site based normalisation')
             _sites = self._get_sites()
             _map = _map.astype(np.float)
@@ -1297,6 +1316,7 @@ class ContactMap(object):
                 fast_norm_fullseq_bysite(_map.row, _map.col, _map.data, _sites)
 
         elif method == 'length':
+
             logger.debug('Doing length based normalisation')
             if tip_based:
                 _tip_lengths = np.minimum(self.tip_size, self.order.lengths()).astype(np.float)
@@ -1317,10 +1337,10 @@ class ContactMap(object):
             if tip_based:
                 raise ApplicationException('GOTHiC tip based normalisation not supported')
 
-            if method.endswith('-es'):
+            if method == 'gothic-es':
                 is_sig = False
                 logger.debug('Doing GOTHiC based effect size normalisation')
-            elif method.endswith('-sig'):
+            elif method == 'gothic-sig':
                 is_sig = True
                 logger.debug('Doing GOTHiC based significance normalisation')
             else:
@@ -1334,9 +1354,10 @@ class ContactMap(object):
             seq_len = self.order.order['length'].astype(np.float64)
             rel_cov = _map.sum(axis=1).astype(np.float64)
             rel_cov = np.asarray(rel_cov).squeeze()
-            rel_cov /= (2 * total_links * seq_len / 5e-3)
-
-            _map = _map.tocoo()
+            # gothic normalises this as reads_j / 2N
+            # we introduce relative to the number of 5kb chunks
+            rel_cov /= 2 * total_links * seq_len / 5000.
+            _map = _map.tocoo().astype(np.float64)
             fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, is_sig)
 
         else:
@@ -1355,19 +1376,46 @@ class ContactMap(object):
         if not sp.isspmatrix_coo(_map):
             _map = _map.tocoo()
 
-        # prepare the lookup array mapping contig length to any index of extent map
-        _bins = self.grouping.bins
-        _len = self.order.lengths()
-        _len_lookup = []
-        for i in xrange(len(_bins)):
-            _len_lookup.extend([_len[i]] * _bins[i])
-        _len_lookup = np.array(_len_lookup, dtype=np.float64)
-
         # normalised data array
         if method == 'length':
+
+            logger.debug('Doing length based normalisation')
+
+            # prepare the lookup array mapping contig length to any index of extent map
+            _bins = self.grouping.bins
+            _len = self.order.lengths()
+            _len_lookup = []
+            for i in xrange(len(_bins)):
+                _len_lookup.extend([_len[i]] * _bins[i])
+            _len_lookup = np.array(_len_lookup, dtype=np.float64)
+
             fast_length_norm(_map.row, _map.col, _map.data, _map.nnz, _len_lookup, mean_selector(mean_type))
+
         elif method.startswith('gothic'):
-            fast_norm_gothic()
+
+            if method == 'gothic-es':
+                is_sig = False
+                logger.debug('Doing GOTHiC based effect size normalisation')
+            elif method == 'gothic-sig':
+                is_sig = True
+                logger.debug('Doing GOTHiC based significance normalisation')
+            else:
+                raise ApplicationException('Unknown method {} in GOTHiC normalisation'.format(method))
+
+            # get total weight from seq_map as it is much faster
+            total_links = sp.triu(self.seq_map.tocsr()).sum()
+            # marginals represent total hits per bin
+            _map = _map.tocsr()
+            rel_cov = _map.sum(axis=1).astype(np.float64)
+            rel_cov = np.asarray(rel_cov).squeeze()
+            # gothic normalises this as reads_j / 2N
+            rel_cov /= 2 * total_links
+
+            _map = _map.tocoo().astype(np.float64)
+            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, is_sig)
+
+        else:
+            raise ApplicationException('unknown method {}'.format(method))
 
         return _map
 
@@ -1468,7 +1516,7 @@ class ContactMap(object):
 
     def plot(self, fname, simple=False, tick_locs=None, tick_labs=None, norm=True, permute=False, pattern_only=False,
              dpi=180, width=25, height=22, zero_diag=True, alpha=0.01, robust=False, max_image_size=None,
-             flatten=False, norm_method='sites'):
+             flatten=False, norm_method=None):
         """
         Plot the contact map. This can either be as a sparse pattern (requiring much less memory but without visual
         cues about intensity), simple sequence or full binned map and normalized or permuted.
@@ -1499,6 +1547,8 @@ class ContactMap(object):
         ax = fig.add_subplot(111)
 
         if simple or self.bin_size is None:
+            if norm_method is None:
+                norm_method = 'sites'
             # prepare the map if not already done. This overwrites
             # any current ordering mask beyond the primary acceptance mask
             if self.processed_map is None:
@@ -1507,7 +1557,9 @@ class ContactMap(object):
             # amplify values for plotting
             _map *= 10
         else:
-            _map = self.get_extent_map(norm=norm, permute=permute)
+            if norm_method is None:
+                norm_method = 'length'
+            _map = self.get_extent_map(norm=norm, bisto=True, permute=permute, norm_method=norm_method)
 
         if pattern_only:
             # sparse matrix plot, does not support pixel intensity

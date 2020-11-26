@@ -430,12 +430,27 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     except KeyError:
         raise ApplicationException('unknown node_id_type {}'.format(node_id_type))
 
-    if cl_list is not None and clustering is None:
-        logger.error('When cl_list is specified, a clustering solution is required')
+    def _attr_with_cov():
+        return {'cluster': _to_clid[i],
+                'length': int(_to_report[i]['length']),
+                'gc': float(_to_report[i]['gc']),
+                'cov': float(_to_report[i]['cov'])}
+
+    def _attr_without_cov():
+        return {'cluster': _to_clid[i],
+                'length': int(_to_report[i]['length']),
+                'gc': float(_to_report[i]['gc'])}
+
+    report_map = {True: _attr_with_cov,
+                  False: _attr_without_cov}
+
+    if cl_list is not None and not clustering:
+        raise ApplicationException('When cl_list is specified, a clustering solution is required')
 
     contact_map.prepare_seq_map(norm=norm, bisto=bisto, norm_method=norm_method)
 
     if cl_list is not None:
+        _node_attr = report_map['cov' in clustering[0]['report'].dtype.names]
         cl_list = sorted(cl_list)
         cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=False)
 
@@ -453,7 +468,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     g = nx.Graph(name='contact_graph')
 
     if cl_list is not None:
-        logger.info('Graph will only contain sequences from clusters: {}'.format(', '.join(cl_list)))
+        logger.info('Graph will only contain sequences from clusters: {}'.format(cl_list))
         # sub-space to full map index lookup.
         _to_seqid = make_gapless_lookup((_si for _cl in cl_list for _si in clustering[_cl]['seq_ids']))
         _to_report = make_gapless_lookup((_ri for _cl in cl_list for _ri in clustering[_cl]['report']))
@@ -470,18 +485,10 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
             v = _nn(j)
 
             if not g.has_node(u):
-                g.add_node(u,
-                           cluster=_to_clid[i],
-                           length=int(_to_report[i]['length']),
-                           gc=float(_to_report[i]['gc']),
-                           cov=float(_to_report[i]['cov']))
+                g.add_node(u, _node_attr())
 
             if not g.has_node(v):
-                g.add_node(v,
-                           cluster=_to_clid[j],
-                           length=int(_to_report[j]['length']),
-                           gc=float(_to_report[j]['gc']),
-                           cov=float(_to_report[j]['cov']))
+                g.add_node(v, _node_attr())
 
             # create the edge
             g.add_edge(u, v, weight=float(w * scl))
@@ -566,7 +573,7 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
 
 
 def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, permute=False, max_image_size=None,
-                  ordered_only=False, min_extent=None, use_taxo=False, flatten=False, norm_method='sites',
+                  ordered_only=False, min_extent=None, use_taxo=False, flatten=False, norm_method=None,
                   show_sequences=False, **kwargs):
     """
     Plot the contact map, annotating the map with cluster names and boundaries.
@@ -596,15 +603,19 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
         logger.info('Plotting heatmap for {} specified clusters'.format(len(cl_list)))
 
     if simple or contact_map.bin_size is None:
+        if norm_method is None:
+            norm_method = 'sites'
         # prepare the map early as we wish to override the mask
         # which happens to be initialized in this method call
         if contact_map.processed_map is None:
             contact_map.prepare_seq_map(norm=True, bisto=True, norm_method=norm_method)
+    else:
+        if norm_method is None:
+            norm_method = 'length'
 
     # now build the list of relevant clusters and setup the associated mask
     cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=ordered_only,
                               min_extent=min_extent)
-
     if simple or contact_map.bin_size is None:
         # tick spacing simple the number of sequences in the cluster
         tick_locs = np.cumsum([0] + [len(clustering[k]['seq_ids']) for k in cl_list])
@@ -638,7 +649,7 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
             _labels = [clustering[cl_id]['name'] for cl_id in cl_list]
 
     contact_map.plot(fname, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=_labels,
-                     max_image_size=max_image_size, flatten=flatten, **kwargs)
+                     max_image_size=max_image_size, flatten=flatten, norm_method=norm_method, **kwargs)
 
 
 def write_report(fname, clustering):
