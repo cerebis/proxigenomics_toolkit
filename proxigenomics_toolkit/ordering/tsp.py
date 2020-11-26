@@ -229,7 +229,7 @@ def write_lkh(base_name, m, dim, max_trials=None, runs=None, seed=None, mat_fmt=
             out_h.write('RUNS = {}\n'.format(runs))
         out_h.write('SEED = {}\n'.format(seed))
         out_h.write('OUTPUT_TOUR_FILE = {}.tour\n'.format(base_name))
-        out_h.write('PRECISION = {}.tour\n'.format(precision))
+        out_h.write('PRECISION = {}\n'.format(precision))
         out_h.write('TRACE_LEVEL = {}'.format(int(lkh_verbose)))
 
     with open(data_file, 'w') as out_h:
