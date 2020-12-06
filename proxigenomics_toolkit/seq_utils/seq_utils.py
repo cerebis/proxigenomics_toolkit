@@ -2,13 +2,16 @@ from ..exceptions import *
 from ..misc_utils import exe_exists
 from Bio.Restriction import Restriction
 from difflib import SequenceMatcher
-from collections import Iterable, Mapping
+from collections import Iterable, Mapping, namedtuple
 from scipy.stats import mstats
 import Bio.SeqIO as SeqIO
 import heapq
+import itertools
 import numpy as np
 import networkx as nx
 import os
+import re
+import string
 import subprocess
 import tempfile
 import uuid
@@ -17,6 +20,20 @@ import logging
 import multiprocessing
 
 logger = logging.getLogger(__name__)
+
+
+# translation table used for complementation
+COMPLEMENT_TABLE = string.maketrans('acgtumrwsykvhdbnACGTUMRWSYKVHDBN',
+                                    'TGCAAnnnnnnnnnnnTGCAANNNNNNNNNNN')
+
+
+def revcomp(seq):
+    """
+    Reverse complement a string representation of a sequence. This uses string.translate.
+    :param seq: input sequence as a string
+    :return: revcomp sequence as a string
+    """
+    return seq.translate(COMPLEMENT_TABLE)[::-1]
 
 
 def count_bam_reads(file_name, max_cpu=None):
@@ -126,24 +143,40 @@ class IndexedFasta(Mapping):
             os.unlink(self._tmp_file)
 
 
+# Information pertaining to digestion / private class for readability
+digest_info = namedtuple('digest_info', ('enzyme', 'end5', 'end3', 'overhang'))
+# Information pertaining to a Hi-C ligation junction
+ligation_info = namedtuple('ligation_info',
+                           ('enz5p', 'enz3p', 'junction', 'vestigial', 'junc_len',
+                            'vest_len', 'pattern', 'cross'))
+
+
 class SiteCounter(object):
 
-    def __init__(self, enzyme_names, tip_size=None, is_linear=True):
+    def __init__(self, enzyme_a, enzyme_b=None, tip_size=None, is_linear=True):
         """
         Simple class to count the total number of enzymatic cut sites for the given
         list if enzymes.
 
-        :param enzyme_names: a list of enzyme names (proper case sensitive spelling a la NEB)
+        :param enzyme_a: the first enzyme involved in digestion (case sensitive NEB name)
+        :param enzyme_b: the optional second enzyme involved in digestion (case sensitive NEB name)
         :param tip_size: when using tip based counting, the size in bp
         :param is_linear: Treat sequence as linear.
         """
-        if isinstance(enzyme_names, basestring):
-            enzyme_names = [enzyme_names]
-        assert (isinstance(enzyme_names, Iterable) and
-                not isinstance(enzyme_names, basestring)), 'enzyme_names must of a collection of names'
-        self.enzymes = [SiteCounter._get_enzyme_instance(en) for en in enzyme_names]
+        self.enzyme_a = SiteCounter._get_enzyme_instance(enzyme_a)
+        self.enzyme_b = None if enzyme_b is None else SiteCounter._get_enzyme_instance(enzyme_b)
         self.is_linear = is_linear
         self.tip_size = tip_size
+        self.junctions = self.junction_duplication()
+        # Digested ends, which are religated will not necessarily possess the entire
+        # cut-site, but will possess a remnant/vestigial sequence
+        self.any_vestigial = re.compile('({})'.format('|'.join(
+            sorted(set([v.vestigial for v in self.junctions.values()]),
+                   key=lambda x: (-len(x), x))).replace('N', '[ACGT]')))
+        self.end_vestigial = re.compile('{}$'.format(self.any_vestigial.pattern))
+
+    def get_vestigial_end_searcher(self):
+        return self.end_vestigial.search
 
     @staticmethod
     def _get_enzyme_instance(enz_name):
@@ -166,7 +199,7 @@ class SiteCounter(object):
             raise UnknownEnzymeException(enz_name, similar)
 
     def _count(self, seq):
-        return sum(len(en.search(seq, self.is_linear)) for en in self.enzymes)
+        return sum(len(en.search(seq, self.is_linear)) for en in [self.enzyme_a, self.enzyme_b] if en is not None)
 
     def count_sites(self, seq):
         """
@@ -192,6 +225,60 @@ class SiteCounter(object):
             sites = self._count(seq)
 
         return sites
+
+    @staticmethod
+    def enzyme_ends(enzyme):
+        """
+        Determine the 5` and 3` ends of a restriction endonuclease. Here, "ends"
+        are the parts of the recognition site not involved in overhang.
+        :param enzyme: Biopython ins
+        :return: a pair of strings containing the 5' and 3' ends
+        """
+        end5, end3 = '', ''
+        ovhg_size = abs(enzyme.ovhg)
+        if ovhg_size > 0 and ovhg_size != enzyme.size:
+            a = abs(enzyme.fst5)
+            if a > enzyme.size // 2:
+                a = enzyme.size - a
+            end5, end3 = enzyme.site[:a], enzyme.site[-a:]
+        return end5.upper(), end3.upper()
+
+    @staticmethod
+    def vestigial_site(enz, junc):
+        """
+        Determine the part of the 5-prime end cut-site that will remain when a ligation junction is
+        created. Depending on the enzymes involved, this may be the entire cut-site or a smaller portion
+        and begins from the left.
+        """
+        i = 0
+        while i < enz.size and (enz.site[i] == junc[i] or enz.site[i] == 'N'):
+            i += 1
+        return str(junc[:i]).upper()
+
+    def junction_duplication(self):
+        """
+        For the enzyme cocktail, generate the set of possible ligation junctions.
+        :return: a dictionary of ligation_info objects
+        """
+        end5, end3 = SiteCounter.enzyme_ends(self.enzyme_a)
+        enz_list = [digest_info(self.enzyme_a, end5, end3, self.enzyme_a.ovhgseq.upper())]
+
+        if self.enzyme_b is not None:
+            end5, end3 = SiteCounter.enzyme_ends(self.enzyme_b)
+            enz_list.append(digest_info(self.enzyme_b, end5, end3, self.enzyme_b.ovhgseq.upper()))
+
+        _junctions = {}
+        for a, b in itertools.product(enz_list, repeat=2):
+            # the actual sequence
+            _junc_seq = '{}{}{}{}'.format(a.end5, a.overhang, b.overhang, b.end3)
+            if _junc_seq not in _junctions:
+                _vest_seq = SiteCounter.vestigial_site(a.enzyme, _junc_seq)
+                _junctions[_junc_seq] = ligation_info(str(a.enzyme), str(b.enzyme),
+                                                      _junc_seq, _vest_seq,
+                                                      len(_junc_seq), len(_vest_seq),
+                                                      re.compile(_junc_seq.replace('N', '[ACGT]')),
+                                                      str(a.enzyme) == str(b.enzyme))
+        return _junctions
 
 
 class SequenceAnalyzer(object):

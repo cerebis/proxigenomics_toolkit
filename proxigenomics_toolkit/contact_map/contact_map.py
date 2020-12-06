@@ -3,7 +3,7 @@ from ..linalg import sparse_utils
 from ..misc_utils import package_path
 from .. import ordering
 from ..seq_utils.seq_utils import *
-from collections import OrderedDict, namedtuple
+from collections import OrderedDict, namedtuple, defaultdict
 from functools import partial
 from scipy.stats import binom
 import numba as nb
@@ -588,8 +588,8 @@ class ContactMap(object):
             logger.error('Appending contact maps with extent mapping not implemented')
 
         # issue debug warnings if the following attributes are different
-        for _attr in ['strong', 'min_mapq', 'min_insert', 'min_len', 'min_sig',
-                      'min_extent', 'min_size', 'max_fold']:
+        for _attr in ['min_mapq', 'min_insert', 'min_len', 'min_sig', 'min_extent',
+                      'min_size', 'max_fold', 'max_edist', 'min_alen']:
             a = self.__dict__[_attr]
             b = other.__dict__[_attr]
             if a != b:
@@ -626,13 +626,15 @@ class ContactMap(object):
         self.set_primary_acceptance_mask(update=True)
 
     def __init__(self, bam_file, enzymes, seq_file, min_insert, min_mapq=0, min_len=0, min_sig=1, min_extent=0,
-                 min_size=0, max_fold=None, random_seed=None, strong=None, bin_size=None, tip_size=None,
-                 precount=False, threads=4):
+                 min_size=0, max_edist=2, min_alen=25, max_fold=None, random_seed=None, bin_size=None, tip_size=None,
+                 no_duplicates=True, precount=False, threads=4):
 
-        self.strong = strong
+        self.no_duplicates = no_duplicates
         self.bam_file = bam_file
         self.bin_size = bin_size
         self.min_mapq = min_mapq
+        self.max_edit_distance = max_edist
+        self.min_align_length = min_alen
         self.min_insert = min_insert
         self.min_len = min_len
         self.min_sig = min_sig
@@ -653,18 +655,20 @@ class ContactMap(object):
         self.primary_acceptance_mask = None
         self.bisto_scale = None
         self.enzymes = enzymes
+        self.site_counter = None
 
         # build a dictionary of sites in each reference first
         fasta_info = {}
         with io_utils.open_input(seq_file) as multi_fasta:
             # prepare the site counter for the given experimental conditions
-            site_counter = SiteCounter(enzymes, tip_size, is_linear=True)
+            assert 0 < len(enzymes) <= 2, 'only 1 or 2 enzymes can be specified'
+            self.site_counter = SiteCounter(*enzymes, tip_size=tip_size, is_linear=True)
             # get an estimate of sequences for progress
             fasta_count = count_fasta_sequences(seq_file)
             for seqrec in tqdm.tqdm(SeqIO.parse(multi_fasta, 'fasta'), total=fasta_count, desc='Analyzing sites'):
                 if len(seqrec) < min_len:
                     continue
-                fasta_info[seqrec.id] = {'sites': site_counter.count_sites(seqrec.seq),
+                fasta_info[seqrec.id] = {'sites': self.site_counter.count_sites(seqrec.seq),
                                          'length': len(seqrec)}
 
         # now parse the header information from bam file
@@ -743,24 +747,81 @@ class ContactMap(object):
 
         :param bam: this instance's open bam file.
         """
-        def _simple_match(r):
-            return r.mapping_quality >= _mapq
 
-        def _strong_match(r):
-            if r.mapping_quality < _mapq or r.cigarstring is None:
+        def _strict_acceptance(r):
+            """
+            Carefully parse the read mapping record for suitability. This tests mapping quality,
+            cigar existence, alignment length, edit distance, first read position, and the condition
+            that ended the alignment. Reads which terminate before their 3p end is reached, must either
+            exceed the reference extent or terminate at the expected ezymatic cutsite.
+            :param r: the read to test
+            :return: True - the read mapping is accepted, False - it is rejected
+            """
+
+            if r.mapping_quality < _mapq:
+                counts['mapq'] += 1
                 return False
-            cig = r.cigartuples[-1] if r.is_reverse else r.cigartuples[0]
-            return cig[0] == 0 and cig[1] >= _strong
 
-        # set-up match call
-        _matcher = _strong_match if self.strong else _simple_match
+            if r.cigarstring is None:
+                counts['cigar'] += 1
+                return False
+
+            if r.query_length < _min_alen:
+                counts['alen'] += 1
+                return False
+
+            # restrict the maximum allowed edit distance
+            # This assumes BWA MEM style records, where NM = edit distance
+            try:
+                ed = r.get_tag('NM')
+                if ed > _max_edist:
+                    counts['edist'] += 1
+                    return False
+            except KeyError:
+                counts['edist'] += 1
+                return False
+
+            # insist that read alignments begin at position 0.
+            cig = r.cigartuples[-1] if r.is_reverse else r.cigartuples[0]
+            if cig[0] != 0:  # 0 -> Match
+                counts['5p_match'] += 1
+                return False
+
+            # accept full-length alignments that exceed minimum
+            if r.query_alignment_length == r.query_length:
+                return True
+
+            if r.is_reverse:
+                # accept alignments where the 3' end goes beyond the end of the reference
+                if r.reference_start == 0:
+                    return True
+                # extract the read's aligned sequence
+                seq = revcomp(r.seq)
+                aln_seq = seq[r.query_length - r.query_alignment_end: r.query_length - r.query_alignment_start]
+            else:
+                # accept alignments where the 3' end goes beyond the end of the reference
+                if r.reference_end >= _refid_to_reflen[r.reference_id]:
+                    return True
+                # extract the read's aligned sequence
+                seq = r.seq
+                aln_seq = seq[r.query_alignment_start: r.query_alignment_end]
+
+            # accept alignments which terminate at cute-site remnant
+            _match = _endswith_vestigial(aln_seq)
+            if _match is None:
+                counts['cs_end'] += 1
+                return False
+
+            return True
 
         def _next_informative(_bam_iter, _pbar):
             while True:
                 r = _bam_iter.next()
                 _pbar.update()
-                if not (r.is_unmapped or r.is_secondary or r.is_supplementary or r.is_duplicate):
-                    return r
+                if r.is_unmapped or r.is_secondary or r.is_supplementary or r.is_duplicate:
+                    continue
+                break
+            return r
 
         def _on_tip_withlocs(p1, p2, l1, l2, _tip_size):
             tailhead_mat = np.zeros((2, 2), dtype=np.uint32)
@@ -806,6 +867,14 @@ class ContactMap(object):
         def _always_true(*args):
             return True, 1
 
+        # lookup table for reference lengths
+        _refid_to_reflen = self.make_reverse_index('refid')
+        # set read acceptance method
+        _accept_read = _strict_acceptance
+        # prepare method which checks that alignments strings end in a vestigial cut-site.
+        _endswith_vestigial = self.site_counter.get_vestigial_end_searcher()
+
+        # set tip acceptance method
         _on_tip = _always_true if not self.is_tipbased() else _on_tip_withlocs
 
         # initialise a sparse matrix for accumulating the map
@@ -833,7 +902,8 @@ class ContactMap(object):
             # locals for read filtering
             _min_sep = self.min_insert
             _mapq = self.min_mapq
-            _strong = self.strong
+            _min_alen = self.min_align_length
+            _max_edist = self.max_edit_distance
 
             _idx = self.make_reverse_index('refid')
 
@@ -843,12 +913,22 @@ class ContactMap(object):
 
             counts = OrderedDict({
                 'accepted': 0,
+                'mapq': 0,
+                'edist': 0,
+                'alen': 0,
+                'cigar': 0,
+                'cs_end': 0,
+                '5p_match': 0,
                 'not_tip': 0,
                 'short_insert': 0,
                 'ref_excluded': 0,
                 'median_excluded': 0,
                 'end_buffered': 0,
                 'poor_match': 0})
+
+            pair_store = None
+            if self.no_duplicates:
+                pair_store = defaultdict(int)
 
             bam.reset()
             bam_iter = bam.fetch(until_eof=True)
@@ -869,7 +949,7 @@ class ContactMap(object):
                     counts['ref_excluded'] += 1
                     continue
 
-                if not _matcher(r1) or not _matcher(r2):
+                if not _accept_read(r1) or not _accept_read(r2):
                     counts['poor_match'] += 1
                     continue
 
@@ -879,6 +959,15 @@ class ContactMap(object):
                 # use 5-prime base depending on orientation
                 r1pos = r1.pos if not r1.is_reverse else r1.pos + r1.alen
                 r2pos = r2.pos if not r2.is_reverse else r2.pos + r2.alen
+
+                if pair_store is not None:
+                    # calculate a map identifier (map_id) from the pair
+                    # assuming identical map_id implies technical duplication, we count it only once
+                    map_id = hash((r1.reference_id, r1pos, r1.is_reverse, r1.cigarstring,
+                                   r2.reference_id, r2pos, r2.is_reverse, r2.cigarstring))
+                    pair_store[map_id] += 1
+                    if pair_store[map_id] > 1:
+                        continue
 
                 # filter inserts deemed "short" which tend to be heavily WGS signal
                 if _min_sep and r1.is_proper_pair:
@@ -929,6 +1018,18 @@ class ContactMap(object):
 
         self.seq_map = _seq_map.get_coo()
         del _seq_map
+
+        # calculate the proportion of duplicate pair mappings and
+        # a truncated histogram covering observed duplicates between 0 to 10+ times
+        if self.no_duplicates:
+            map_count = np.bincount(pair_store.values(), minlength=11)
+            dupe_rate = map_count[2:].sum() / map_count.sum(dtype=np.float64)
+            map_count[10] = map_count[10:].sum()
+            del pair_store
+            logger.debug('Duplication histogram: {}'.format([(n, ci) for n, ci in enumerate(map_count[:11])]))
+            logger.info('Duplication rate: {:.2f}%'.format(dupe_rate * 100))
+        else:
+            logger.warning('Duplicate removal was disabled by user')
 
         logger.info('Pair accounting: {}'.format(counts))
         logger.info('Total extent map weight {}'.format(self.map_weight()))
@@ -1298,8 +1399,7 @@ class ContactMap(object):
 
         :param _map: the target map to apply normalisation
         :param tip_based: treat the supplied map as a tip-based tensor
-        :param use_sites: normalise matrix counts using observed sites, otherwise normalise
-        using sequence lengths as a proxy
+        :param method: the normalisation method to use [sites, length, gothic-sig, gothic-es]
         :param mean_type: for length normalisation, choice of mean (harmonic, geometric, arithmetic)
         :return: normalized map
         """
