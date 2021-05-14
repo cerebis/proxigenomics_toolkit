@@ -89,7 +89,8 @@ def add_cluster_names(clustering, prefix='CL'):
         clustering[cl_id]['name'] = '{0}{1:0{2}d}'.format(prefix, cl_id+1, num_width)
 
 
-def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None, norm_method='sites'):
+def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
+                exclude_names=None, norm_method='sites'):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -98,6 +99,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None, 
     :param seed: a random seed
     :param work_dir: working directory to which files are written during clustering
     :param n_iter: for method supporting iterations, specify a non-default number
+    :param exclude_names: a collection of sequence identifiers to exclude when clustering
     :param norm_method: noramlisation method to apply to contact map
     :return: a dictionary detailing the full clustering of the contact map
     """
@@ -208,8 +210,10 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None, 
 
     assert os.path.exists(work_dir), 'supplied output path [{}] does not exist'.format(work_dir)
 
+    # build a graph of the complete map
     base_name = 'cm_graph'
-    g = to_graph(contact_map, node_id_type='internal', norm=True, bisto=True, scale=True, norm_method=norm_method)
+    g = to_graph(contact_map, node_id_type='internal', norm=True, bisto=True, scale=True,
+                 exclude_names=exclude_names, norm_method=norm_method)
 
     method = method.lower()
     logger.info('Clustering contact graph using method: {}'.format(method))
@@ -237,7 +241,10 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None, 
             with open(os.path.join(work_dir, 'infomap.log'), 'w+') as stdout:
                 edge_file = _write_edges(g, work_dir, base_name)
 
-                options = ['-u', '-v', '-z', '-i', 'link-list', '-s', str(seed)]
+                # v0.19.25
+                # options = ['-u', '-v', '-z', '-i', 'link-list', '-s', str(seed)]
+                # v1.3.0
+                options = ['--flow-model', 'undirected', '--verbose', '--seed', str(seed)]
                 if n_iter is None:
                     n_iter = 10
                 options.extend(['-N', str(n_iter)])
@@ -312,6 +319,7 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
     if coverage_file is not None:
         cov_data = pandas.read_csv(coverage_file, sep=',', index_col=0, skip_blank_lines=True,
                                    header=None, comment='#')
+        logger.info('Coverage file contained {} records'.format(len(cov_data)))
         depth_extractor = coverage_data_extractor(cov_data)
         logger.info('Supplied coverage file {} will override any information stored with input sequences'
                     .format(coverage_file))
@@ -345,9 +353,13 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
                 # get the sequence's external name and length
                 _name = seq_info[_seq_id].name
                 _len.append(seq_info[_seq_id].length)
+                _gc.append(seq_info[_seq_id].gc)
+
                 # fetch the SeqRecord object from the input fasta
+                # TODO we could easily have collected this information beforehand,
+                #      at the same time as length, sites and GC. This will require
+                #      users supply missing coverage infomration at mkmap time.
                 _seq = seq_db[_name]
-                _gc.append(SeqUtils.GC(_seq.seq))
                 if depth_extractor is not None:
                     _cov.append(depth_extractor(_seq))
 
@@ -374,7 +386,7 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
 
 
 def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='internal',
-             clustering=None, cl_list=None, norm_method='sites'):
+             clustering=None, cl_list=None, exclude_names=None, norm_method='sites'):
     """
     Convert the seq_map to a undirected Networkx Graph.
 
@@ -407,6 +419,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     :param node_id_type: select the node id type (filtered, complete, external)
     :param clustering: bin3C clustering solution, required for subsets of the total map
     :param cl_list: list of clusters to include in the graph (0-based internal ids)
+    :param exclude_names: a collection of sequences (by external name) to exclude when clustering
     :param norm_method: normalisation method to apply to contact map
     :return: graph of contigs
     """
@@ -430,26 +443,47 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     except KeyError:
         raise ApplicationException('unknown node_id_type {}'.format(node_id_type))
 
-    def _attr_with_cov():
-        return {'cluster': _to_clid[i],
-                'length': int(_to_report[i]['length']),
-                'gc': float(_to_report[i]['gc']),
-                'cov': float(_to_report[i]['cov'])}
+    def _attr_basic(ix):
+        return {'length': contact_map.seq_info[_to_seqid[ix]].length}
 
-    def _attr_without_cov():
-        return {'cluster': _to_clid[i],
-                'length': int(_to_report[i]['length']),
-                'gc': float(_to_report[i]['gc'])}
+    def _attr_with_cov(ix):
+        return {'cluster': _to_clid[ix],
+                'length': int(_to_report[ix]['length']),
+                'gc': float(_to_report[ix]['gc']),
+                'cov': float(_to_report[ix]['cov'])}
+
+    def _attr_without_cov(ix):
+        return {'cluster': _to_clid[ix],
+                'length': int(_to_report[ix]['length']),
+                'gc': float(_to_report[ix]['gc'])}
 
     report_map = {True: _attr_with_cov,
                   False: _attr_without_cov}
+
+    def add_nodes_and_edges():
+        """
+        Helper function for adding all nodes and edges and associated attributes. This function makes heavy
+        use of local scope rather than pass parameters.
+        """
+        for i, j, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
+            # node ids
+            u = _nn(i)
+            v = _nn(j)
+            if not g.has_node(u):
+                g.add_node(u, _node_attr(i))
+            if not g.has_node(v):
+                g.add_node(v, _node_attr(j))
+            # create the edge
+            g.add_edge(u, v, weight=float(w * scl))
 
     if cl_list is not None and not clustering:
         raise ApplicationException('When cl_list is specified, a clustering solution is required')
 
     contact_map.prepare_seq_map(norm=norm, bisto=bisto, norm_method=norm_method)
 
+    _node_attr = _attr_basic
     if cl_list is not None:
+        # TODO this is brittle as it checks only the first cluster for presence of 'cov' key.
         _node_attr = report_map['cov' in clustering[0]['report'].dtype.names]
         cl_list = sorted(cl_list)
         cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=False)
@@ -477,33 +511,37 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
 
         n_expected = len(_to_seqid)
         logger.info('Graph will have {} nodes'.format(n_expected))
-
-        for i, j, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
-
-            # node ids
-            u = _nn(i)
-            v = _nn(j)
-
-            if not g.has_node(u):
-                g.add_node(u, _node_attr())
-
-            if not g.has_node(v):
-                g.add_node(v, _node_attr())
-
-            # create the edge
-            g.add_edge(u, v, weight=float(w * scl))
-
+        add_nodes_and_edges()
     else:
         logger.info('Graph will contain all sequences that passed minimum length and signal criteria')
+        # create a lookup from the dense indices of the filtered subspace to
+        #   the original (potentially sparse) full map indices.
+        _to_seqid = contact_map.order.remap_gapless(np.arange(_map.shape[0]))
         n_expected = contact_map.order.count_accepted()
-
-        # the full graph is not annotated for the sake of size
-        for i, j, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
-            # no node attributes here, so we leave their creation to be implicit part of edge creation
-            g.add_edge(_nn(i), _nn(j), weight=float(w * scl))
+        add_nodes_and_edges()
 
     assert g.degree() != n_expected, \
         'order(graph) did not equal number of expected sequences'
+
+    # disconnect any node mentioned in exclusion list
+    if exclude_names:
+        # do this one at a time so we can report about missing ids
+        name_to_seqid = contact_map.make_reverse_index('name')
+        n_failed = 0
+        for _name in exclude_names:
+            u = name_to_seqid[_name]
+            # pedantically check that this mess of cross-referencing is valid.
+            assert contact_map.seq_info[u].name == _name, 'Conflict between name records'
+            if not g.has_node(u):
+                logger.debug('disconnecting {} failed as no corresponding node in graph'.format(_name))
+                n_failed += 1
+                continue
+            g.remove_edges_from([(u, v) for v in g.neighbors(u)])
+        if n_failed > 0:
+            logger.warning('{} nodes were not found during exclusion'.format(n_failed))
+        if n_failed == len(exclude_names):
+            logger.warning('None of excluded_ids were found in graph. '
+                           'They must be of type "node_type_id"')
 
     logger.info('Finished: {}'.format(nx.info(g).replace('\n', ' ')))
 
@@ -620,6 +658,7 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
     cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=ordered_only,
                               min_extent=min_extent)
     if simple or contact_map.bin_size is None:
+        assert not show_sequences, 'show_sequences=True is not supported for simple contact maps'
         # tick spacing simple the number of sequences in the cluster
         tick_locs = np.cumsum([0] + [len(clustering[k]['seq_ids']) for k in cl_list])
         if contact_map.is_tipbased() and flatten:

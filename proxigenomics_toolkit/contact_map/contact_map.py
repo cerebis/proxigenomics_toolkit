@@ -5,9 +5,10 @@ from .. import ordering
 from ..seq_utils.seq_utils import *
 from collections import OrderedDict, namedtuple, defaultdict
 from functools import partial
-from scipy.stats import binom
+from scipy.stats import binom, poisson
 import numba as nb
 import Bio.SeqIO as SeqIO
+import Bio.SeqUtils as SeqUtils
 import logging
 import numpy as np
 import pysam
@@ -23,12 +24,14 @@ import seaborn
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.INFO)
 
-SeqInfo = namedtuple('SeqInfo', ['offset', 'refid', 'name', 'length', 'sites'])
+SeqInfo = namedtuple('SeqInfo', ['offset', 'refid', 'name', 'length', 'sites', 'gc'])
 
 
 """
 Basic Mean functions
 """
+
+
 @nb.jit(nopython=True)
 def geometric_mean(x, y):
     return (x*y)**0.5
@@ -127,7 +130,103 @@ def poisson_cdf(x, n, p):
     return sum * np.exp(-L)
 
 
-def fast_norm_gothic(rows, cols, data, rel_cov, total_links, is_sig):
+@nb.jit(nopython=True)
+def max_interactions(_ir, _breaks, _indices, _values):
+
+    cols = []
+    sums = []
+    for _ic in xrange(len(_breaks)-1):
+
+        if _ic == _ir:
+            continue
+
+        _a, _b = _breaks[_ic], _breaks[_ic+1]
+
+        # func
+        # _val = _values[(_indices >= _a) & (_indices < _b)].sum()
+        _val = _values[(_indices >= _a) & (_indices < _b)]
+
+        if len(_val) != 0:
+            cols.append(_ic)
+            sums.append(_val.max())
+
+    return cols, sums
+
+
+def reduce_seqmap_to_accepted(_map, contact_map, _min_sig=None, _min_len=None):
+    return sparse_utils.compress(_map.tocoo(), contact_map.get_primary_acceptance_mask())
+
+
+def gothic_extent_to_seqmap(contact_map, gothic_method):
+    """
+    Reduce the extent map to a sequence map, where the the most significant locus<->locus interaction
+    between two contigs is taken as the indicator of overall significant for the contig<->contig interaction.
+
+    The extent map splits contigs into small windows. This is how GotHiC was originally conceived, as there
+    is no accounting for difference in interaction length between sequences. Therefore, here we use the
+    binned extent map, calculate the interaction significances between all windows (loci) and then
+    select a representative interactions between entire contigs via a summary statistic.
+
+    :param contact_map: the contact map to use
+    :param gothic_method: GotHiC normalisation method (binomial, poisson, effect)
+    :return: seq_map where each element represents the maximally significant locus<->locus interaction between contigs
+    """
+
+    assert gothic_method in {'gothic-binomial', 'gothic-poisson'}, \
+        'Normalisation method must be either gothic-binomial or gothic-poisson'
+
+    # for now, we want to act on the complete contact map not a fitlered version
+    _mask = contact_map.set_primary_acceptance_mask(min_sig=0, min_len=0, update=True)
+    contact_map.order.set_mask_only(_mask)
+    # get the full extent map and the bins
+    _extent_map = contact_map.get_extent_map(norm=True, norm_method=gothic_method)
+    # TODO to support filtered maps, we need to handle filtered bins
+    _extent_bins = contact_map.grouping.bins
+
+    if not sp.isspmatrix_csr(_extent_map):
+        _extent_map = _extent_map.tocsr()
+
+    _num_bins = len(_extent_bins)
+
+    # cumulative extent bins, including 0
+    _cbins = np.concatenate(([0], np.cumsum(_extent_bins)))
+
+    _rows = []
+    _cols = []
+    _data = []
+
+    # this method is kind of slow, so we've got a progress par
+    for ix in tqdm.tqdm(xrange(_num_bins)):
+
+        # diagonal (self bin)
+        a0, a1 = _cbins[ix], _cbins[ix+1]
+
+        _bin_slice = _extent_map[a0:a1, :]
+
+        # just the upper triangle along the diagonal
+        c = [ix]
+
+        # check if tocsc() prior to slicing here is faster
+        # TODO decide how best to handle multiple interaction terms.
+        d = [sp.triu(_bin_slice.T[a0:a1]).mean()]
+
+        _bin_slice = _bin_slice.tocoo()
+        c_others, d_others = max_interactions(ix, _cbins, _bin_slice.col, _bin_slice.data)
+
+        c += c_others
+        d += d_others
+
+        _rows.extend([ix] * len(c))
+        _cols.extend(c)
+        _data.extend(d)
+
+    # construct a sparse output map, where each element is now a contig<->contig contact
+    _out_map = sp.coo_matrix((_data, (_rows, _cols)), shape=(_num_bins, _num_bins), dtype=np.float64)
+    _out_map.eliminate_zeros()
+    return _out_map
+
+
+def fast_norm_gothic(rows, cols, data, rel_cov, total_links, frac_random, mode='binomial'):
     """
     Inplace application of GOTHiC link significance. Here, modifications have been
     made to approximate the Binomial using the Poisson for large N and small p.
@@ -137,19 +236,25 @@ def fast_norm_gothic(rows, cols, data, rel_cov, total_links, is_sig):
     :param data: COO matrix data values to modify
     :param rel_cov: relative coverages
     :param total_links: total number of links (pairs) in the map
-    :param is_sig: calculate (- log significance), otherwise (effect-size)
+    :param frac_random: the fraction of read-pairs in the Hi-C library arising from spurious ligation
+    :param mode: 'binomial': -log binnom signif, 'poisson': -log poisson signif, 'effect': effect-size
     """
     # we will cap the smallest values to tiny, preventing log errors
     tiny = np.finfo(data.dtype).tiny
-    if is_sig:
-        pij = rel_cov[rows] * rel_cov[cols]
-        pr = binom.sf(data, total_links, pij)
-        data[:] = - np.log2(np.where(pr < tiny, tiny, pr))
-    else:
-        data /= rel_cov[rows] * rel_cov[cols] * total_links
+    pij = 2 * rel_cov[rows] * rel_cov[cols] * frac_random
+    if mode == 'binomial':
+        pr = binom.sf(data - 1, total_links, pij)
+        data[:] = - np.log(np.where(pr < tiny, tiny, pr))
+    elif mode == 'poisson':
+        # assume for large N and small Pr that Poisson and Binomial are very similar
+        pr = poisson.sf(data - 1, total_links * pij)
+        data[:] = - np.log(np.where(pr < tiny, tiny, pr))
+    elif mode == 'effect':
+        data /= pij * total_links
         data += 1
         data[:] = np.log2(data)
-
+    else:
+        raise ApplicationException('unsupported mode [{}]'.format(mode))
 
 @nb.jit(nopython=True)
 def fast_norm_fullseq_bysite(rows, cols, data, sites):
@@ -231,8 +336,8 @@ class ExtentGrouping(object):
 
     def get_bin_lengths(self):
         """
-        Compuate the width of each bin. The bin widths vary slightly, as the grouping algorithm
-        attempts to disperse extra extect across all bins.
+        Compute the width of each bin. The bin widths vary slightly, as the grouping algorithm
+        attempts to disperse extra extent across all bins.
         :return: bin lengths
         """
         bin_len = np.zeros(self.total_bins, dtype=np.int64)
@@ -608,8 +713,8 @@ class ContactMap(object):
         # the number of sites is likely a decent proxy for comparing actual sequences
         # Note: we also assume the sequence orders are the same, which greatly simplifies
         # combining arrays.
-        a_info = [(si.name, si.length, si.sites) for si in self.seq_info]
-        b_info = [(si.name, si.length, si.sites) for si in other.seq_info]
+        a_info = [(si.name, si.length, si.sites, si.gc) for si in self.seq_info]
+        b_info = [(si.name, si.length, si.sites, si.gc) for si in other.seq_info]
         if a_info != b_info:
             logger.error('Cannot combine contact maps with differing sets of DNA sequences.')
 
@@ -625,7 +730,7 @@ class ContactMap(object):
         logger.debug('Reinitializing primary acceptance mask')
         self.set_primary_acceptance_mask(update=True)
 
-    def __init__(self, bam_file, enzymes, seq_file, min_insert, min_mapq=0, min_len=0, min_sig=1, min_extent=0,
+    def __init__(self, bam_file, enzymes, seq_file, min_separation, min_mapq=0, min_len=0, min_sig=1, min_extent=0,
                  min_size=0, max_edist=2, min_alen=25, max_fold=None, random_seed=None, bin_size=None, tip_size=None,
                  no_duplicates=True, precount=False, threads=4):
 
@@ -635,7 +740,7 @@ class ContactMap(object):
         self.min_mapq = min_mapq
         self.max_edit_distance = max_edist
         self.min_align_length = min_alen
-        self.min_insert = min_insert
+        self.min_separation = min_separation
         self.min_len = min_len
         self.min_sig = min_sig
         self.min_extent = min_extent
@@ -657,26 +762,33 @@ class ContactMap(object):
         self.enzymes = enzymes
         self.site_counter = None
 
-        # build a dictionary of sites in each reference first
+        # prepare the site counter for the given experimental conditions
+        assert 0 < len(enzymes) <= 2, 'no more than two enzymes can be specified'
+        self.site_counter = SiteCounter(*enzymes, tip_size=tip_size, is_linear=True)
+
+        # build a dictionary of reference features
         fasta_info = {}
         with io_utils.open_input(seq_file) as multi_fasta:
-            # prepare the site counter for the given experimental conditions
-            assert 0 < len(enzymes) <= 2, 'only 1 or 2 enzymes can be specified'
-            self.site_counter = SiteCounter(*enzymes, tip_size=tip_size, is_linear=True)
             # get an estimate of sequences for progress
             fasta_count = count_fasta_sequences(seq_file)
-            for seqrec in tqdm.tqdm(SeqIO.parse(multi_fasta, 'fasta'), total=fasta_count, desc='Analyzing sites'):
+            for n_seq, seqrec in tqdm.tqdm(enumerate(SeqIO.parse(multi_fasta, 'fasta')),
+                                    total=fasta_count, desc='Analyzing reference sequences'):
                 if len(seqrec) < min_len:
                     continue
                 fasta_info[seqrec.id] = {'sites': self.site_counter.count_sites(seqrec.seq),
-                                         'length': len(seqrec)}
+                                         'length': len(seqrec),
+                                         'gc': SeqUtils.GC(seqrec.seq)}
+            logger.info('From FASTA, {} of {} sequences were accepted'.format(n_seq, len(fasta_info)))
 
-        # now parse the header information from bam file
+        # now inspect the BAM header
         with pysam.AlignmentFile(bam_file, 'rb', threads=threads) as bam:
 
             # test that BAM file is the correct sort order
             if 'SO' not in bam.header['HD'] or bam.header['HD']['SO'] != 'queryname':
                 raise IOError('BAM file must be sorted by read name')
+
+            # keep a record of all reference lengths
+            self.refid_to_reflen = np.array([li for li in bam.lengths], dtype=np.int64)
 
             # determine the set of active sequences
             # where the first filtration step is by length
@@ -693,14 +805,14 @@ class ContactMap(object):
                 try:
                     fa = fasta_info[rname]
                 except KeyError:
-                    logger.info('Sequence: "{}" was not present in reference fasta'.format(rname))
+                    logger.info('From BAM, reference {} was not present in supplied fasta'.format(rname))
                     ref_count['seq_missing'] += 1
                     continue
 
                 assert fa['length'] == rlen, \
-                    'Sequence lengths in {} do not agree: bam {} fasta {}'.format(rname, fa['length'], rlen)
+                    'BAM and FASTA lengths do not agree for reference {}: {} != {}'.format(rname, fa['length'], rlen)
 
-                self.seq_info.append(SeqInfo(offset, n, rname, rlen, fa['sites']))
+                self.seq_info.append(SeqInfo(offset, n, rname, rlen, fa['sites'], fa['gc']))
 
                 offset += rlen
 
@@ -758,7 +870,7 @@ class ContactMap(object):
             :return: True - the read mapping is accepted, False - it is rejected
             """
 
-            if r.mapping_quality < _mapq:
+            if r.mapping_quality < _min_mapq:
                 counts['mapq'] += 1
                 return False
 
@@ -868,7 +980,7 @@ class ContactMap(object):
             return True, 1
 
         # lookup table for reference lengths
-        _refid_to_reflen = self.make_reverse_index('refid')
+        _refid_to_reflen = self.refid_to_reflen
         # set read acceptance method
         _accept_read = _strict_acceptance
         # prepare method which checks that alignments strings end in a vestigial cut-site.
@@ -900,8 +1012,8 @@ class ContactMap(object):
         with tqdm.tqdm(total=self.total_reads) as progress_bar:
 
             # locals for read filtering
-            _min_sep = self.min_insert
-            _mapq = self.min_mapq
+            _min_sep = self.min_separation
+            _min_mapq = self.min_mapq
             _min_alen = self.min_align_length
             _max_edist = self.max_edit_distance
 
@@ -957,8 +1069,8 @@ class ContactMap(object):
                     r1, r2 = r2, r1
 
                 # use 5-prime base depending on orientation
-                r1pos = r1.pos if not r1.is_reverse else r1.pos + r1.alen
-                r2pos = r2.pos if not r2.is_reverse else r2.pos + r2.alen
+                r1pos = r1.reference_start if not r1.is_reverse else r1.reference_end
+                r2pos = r2.reference_start if not r2.is_reverse else r2.reference_end
 
                 if pair_store is not None:
                     # calculate a map identifier (map_id) from the pair
@@ -970,9 +1082,16 @@ class ContactMap(object):
                         continue
 
                 # filter inserts deemed "short" which tend to be heavily WGS signal
-                if _min_sep and r1.is_proper_pair:
-                    ins_len = r2.pos - r1.pos
-                    if ins_len < _min_sep:
+                if _min_sep:
+                    if r1.reference_id == r2.reference_id:
+                        _pair_sep = r2pos - r1pos if r1pos <= r2pos else r1pos - r2pos
+                    else:
+                        # take the minimum distance each read lies from the ends of its reference
+                        r1_shortest_edge = min(_refid_to_reflen[r1.reference_id] - r1.reference_end, r1.reference_start)
+                        r2_shortest_edge = min(_refid_to_reflen[r2.reference_id] - r2.reference_end, r2.reference_start)
+                        # attribute the least possible separation
+                        _pair_sep = r1_shortest_edge + r2_shortest_edge
+                    if _pair_sep < _min_sep:
                         counts['short_insert'] += 1
                         continue
 
@@ -1229,7 +1348,7 @@ class ContactMap(object):
         self.processed_map = _map
 
     def get_subspace(self, permute=False, external_mask=None, marginalise=False, flatten=True,
-                     dtype=np.float):
+                     dtype=np.float64):
         """
         Using an already normalized full seq_map, return a subspace as indicated by an external
         mask or if none is supplied, the full map without filtered elements.
@@ -1290,13 +1409,13 @@ class ContactMap(object):
         :param bisto: make map bistochastic
         :param permute: permute the map using current order
         :param mean_type: length normalisation mean (geometric, harmonic, arithmetic)
-        :param norm_method: methods used to normalise the matrix (length, gothic-es, gothic-sig)
+        :param norm_method: methods used to normalise the matrix (length, gothic-effect, gothic-binomial, gothic-poisson)
         :return: processed extent map
         """
 
         logger.info('Preparing extent map with full dimension: {}'.format(self.extent_map.shape))
 
-        _map = self.extent_map.astype(np.float)
+        _map = self.extent_map.astype(np.float64)
 
         # apply length normalisation if requested
         if norm:
@@ -1329,24 +1448,26 @@ class ContactMap(object):
 
         :return: a seq_map representing all counts across each sequence
         """
-        m = self.extent_map.tocsr()
-        m_out = sparse_utils.Sparse2DAccumulator(self.total_seq)
-        cbins = np.cumsum(self.grouping.bins)
+        _map = self.extent_map.tocsr()
+        _bins = self.grouping.bins
+        _cbins = np.cumsum(_bins)
+        _out = sparse_utils.Sparse2DAccumulator(self.total_seq)
+
         a0 = 0
-        for i in xrange(len(self.grouping.bins)):
-            a1 = cbins[i]
+        for i in xrange(len(_bins)):
+            a1 = _cbins[i]
             # sacrifice memory for significant speed up slicing below
-            row_i = m[a0:a1, :].todense()
+            row_i = _map[a0:a1, :].A
             b0 = 0
-            for j in xrange(i, len(self.grouping.bins)):
-                b1 = cbins[j]
+            for j in xrange(i, len(_bins)):
+                b1 = _cbins[j]
                 mij = row_i[:, b0:b1].sum()
                 if mij == 0:
                     continue
-                m_out[i, j] = int(mij)
+                _out[i, j] = int(mij)
                 b0 = b1
             a0 = a1
-        return m_out.get_coo()
+        return _out.get_coo()
 
     def _reorder_seq(self, _map, flatten=False):
         """
@@ -1392,15 +1513,16 @@ class ContactMap(object):
         _sites[np.where(_sites == 0)] = 1
         return _sites
 
-    def _norm_seq(self, _map, tip_based, method='sites', mean_type='geometric'):
+    def _norm_seq(self, _map, tip_based, method='sites', mean_type='geometric', gothic_noself=True):
         """
         Normalise a simple sequence map in place by the geometric mean of interacting contig pairs lengths.
         The map is assumed to be in starting order.
 
         :param _map: the target map to apply normalisation
         :param tip_based: treat the supplied map as a tip-based tensor
-        :param method: the normalisation method to use [sites, length, gothic-sig, gothic-es]
+        :param method: the normalisation method to use [sites, length, gothic-effect, gothic-binomial, gothic-poisson]
         :param mean_type: for length normalisation, choice of mean (harmonic, geometric, arithmetic)
+        :param gothic_noself: exclude self-self interactions when calculating relative coverage.
         :return: normalized map
         """
         if method == 'sites':
@@ -1437,17 +1559,25 @@ class ContactMap(object):
             if tip_based:
                 raise ApplicationException('GOTHiC tip based normalisation not supported')
 
-            if method == 'gothic-es':
-                is_sig = False
+            if method == 'gothic-effect':
+                goth_mode = 'effect'
                 logger.debug('Doing GOTHiC based effect size normalisation')
-            elif method == 'gothic-sig':
-                is_sig = True
-                logger.debug('Doing GOTHiC based significance normalisation')
+            elif method == 'gothic-binomial':
+                goth_mode = 'binomial'
+                logger.debug('Doing GOTHiC based Binomial significance normalisation')
+            elif method == 'gothic-poisson':
+                goth_mode = 'poisson'
+                logger.debug('Doing GOTHiC based Poisson significance normalisation')
             else:
                 raise ApplicationException('Unknown method {} in GOTHiC normalisation'.format(method))
 
-            # take triangular sum as total number of links (pairs) in map
+            if gothic_noself:
+                _map = _map.tolil()
+                _map.setdiag(0)
+
             _map = _map.tocsr()
+
+            # take triangular sum as total number of links (pairs) in map
             total_links = sp.triu(_map).sum()
 
             # calculate relative length-normalized contig coverage
@@ -1456,20 +1586,23 @@ class ContactMap(object):
             rel_cov = np.asarray(rel_cov).squeeze()
             # gothic normalises this as reads_j / 2N
             # we introduce relative to the number of 5kb chunks
-            rel_cov /= 2 * total_links * seq_len / 5000.
+            rel_cov /= 2 * total_links * (seq_len / 5000.)
             _map = _map.tocoo().astype(np.float64)
-            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, is_sig)
+            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, 1., goth_mode)
 
         else:
             raise ApplicationException('unknown method {}'.format(method))
 
         return _map
 
-    def _norm_extent(self, _map, method='length', mean_type='geometric'):
+    def _norm_extent(self, _map, method='length', mean_type='geometric', gothic_noself=True):
         """
         Normalise a extent map in place by the geometric mean of interacting contig pairs lengths.
 
-        :return: a normalized extent map in lil_matrix format
+       :param method: the normalisation method to use [sites, length, gothic-sig, gothic-es]
+       :param mean_type: for length normalisation, choice of mean (harmonic, geometric, arithmetic)
+       :param gothic_noself: exclude self-self interactions when calculating relative coverage.
+       :return: a normalized extent map in lil_matrix format
         """
         assert sp.isspmatrix(_map), 'Extent matrix is not a scipy matrix type'
 
@@ -1493,17 +1626,30 @@ class ContactMap(object):
 
         elif method.startswith('gothic'):
 
-            if method == 'gothic-es':
-                is_sig = False
+            if method == 'gothic-effect':
+                goth_mode = 'effect'
                 logger.debug('Doing GOTHiC based effect size normalisation')
-            elif method == 'gothic-sig':
-                is_sig = True
-                logger.debug('Doing GOTHiC based significance normalisation')
+            elif method == 'gothic-binomial':
+                goth_mode = 'binomial'
+                logger.debug('Doing GOTHiC based Binomial significance normalisation')
+            elif method == 'gothic-poisson':
+                goth_mode = 'poisson'
+                logger.debug('Doing GOTHiC based Poisson significance normalisation')
             else:
                 raise ApplicationException('Unknown method {} in GOTHiC normalisation'.format(method))
 
+            # as we might change sparsity, using lil avoids a warning from scipy
+            _map = _map.tolil()
+            _seqmap = self.seq_map.tolil()
+
+            if gothic_noself:
+                _map.setdiag(0)
+                _seqmap.setdiag(0)
+
             # get total weight from seq_map as it is much faster
-            total_links = sp.triu(self.seq_map.tocsr()).sum()
+            total_links = sp.triu(_seqmap.tocsr()).sum()
+            del _seqmap
+
             # marginals represent total hits per bin
             _map = _map.tocsr()
             rel_cov = _map.sum(axis=1).astype(np.float64)
@@ -1512,7 +1658,7 @@ class ContactMap(object):
             rel_cov /= 2 * total_links
 
             _map = _map.tocoo().astype(np.float64)
-            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, is_sig)
+            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, 1., goth_mode)
 
         else:
             raise ApplicationException('unknown method {}'.format(method))

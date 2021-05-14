@@ -123,7 +123,7 @@ setup(
     zip_safe=False,
 
     ext_modules=[TarballExtension('infomap',
-                                  'https://github.com/mapequation/infomap/tarball/11bd312db1',
+                                  'https://github.com/mapequation/infomap/tarball/v1.3.0',
                                   'Infomap'),
                  TarballExtension('lkh',
                                   'https://github.com/cerebis/LKH3/tarball/master',
