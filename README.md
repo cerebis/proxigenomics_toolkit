@@ -21,19 +21,34 @@ A number of toolkit dependencies are built from source and as such bring along a
 
 ## Installation
 
-pgtk is not expected to be installed alone and, rather, is a simple shared API used in some of our Hi-C projects (bin3C, scaffold3C).
+###Requirements
+- Python 2.7
+- GNU C/C++ compiler (not clang)
 
-You can, however, install pgtk using recent versions (>19) of Pip as follows:
 
-Within a Python 2.7 virtual environment
+Step 1. install NumPy and Cython
 
 ```bash
-# first install NumPy<1.15 and Cython
 bin/pip install "numpy<1.15" cython
+```
 
-# install pgtk
+Step 2. install pgtk from github
+
+For Linux
+```
 bin/pip install git+https://github.com/cerebis/proxigenomics_toolkit
 ```
+
+For Mac OSX 
+
+External dependencies necessitate that we avoid the default OSX compiler clang and unfortunately it is also given the pseudonyms g++/gcc. Therefore, users must install a separate GNU C/C++ compiler (Homebrew, Macports). Assuming Homebrew has been used, you will find additional compilers choices in /usr/local/bin. The names of these binaries are disambiguated from the defaults with version suffixes. Eg. gcc-10, g++-10.
+
+With an alternative compiler installed, simply override the default choice as follows. Below it is assumed GNU C++ v10 was installed.
+
+```bash
+CXX=g++-10 bin/pip install git+https://github.com/cerebis/proxigenomics_toolkit
+```
+
 ### External tools
 
 The toolkit makes use of external software tools which are compiled from source. This step introduces the above mention additional requirements for the successful installation of pgtk, while the benefit of building these tools from source is that we can support a wider range of runtime environments.
