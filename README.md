@@ -3,11 +3,16 @@ A collection of classes and methods for the analysis of 3C-based sequencing data
 
 The toolkit forms the basis of the 3C-based tools [bin3C](https://github.com/cerebis/bin3C/tree/pgtk) and [scaffold3C](https://github.com/cerebis/scaffold3C).
 
-### Basic requirements:
-- Python 2.7
+## Change Log
+- **May 16th 2021**
+
+  This begins the conversion of pgtk to Python 3. The module is not tested and is not expected to work.
+
+## Basic requirements:
+- Python 3.9
 - Pip >=19
 
-#### Dependency based requirements
+### Dependency based requirements
 A number of toolkit dependencies are built from source and as such bring along additional dependencies. It is possible that your chosen system may already have these packages installed. They can be fulfilled using your distribution package manager (yum, apt-get) or through userland managers like Conda.
 
 - C/C++ compiler fully supporting C++ 11 (GCC >=4.8.1)
