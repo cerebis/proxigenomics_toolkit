@@ -39,9 +39,9 @@ class TarballExtension(Extension, object):
 
         # attempt to use GNU tar and not Mac OSX bsd tar or the like
         self.tar_cmd = 'tar'
-        if re.search(r'GNU', subprocess.check_output([self.tar_cmd, '--version'])) is None:
+        if re.search(r'GNU', subprocess.check_output([self.tar_cmd, '--version']).decode()) is None:
             self.tar_cmd = 'gtar'
-        if re.search(r'GNU', subprocess.check_output([self.tar_cmd, '--version'])) is None:
+        if re.search(r'GNU', subprocess.check_output([self.tar_cmd, '--version']).decode()) is None:
             raise IOError('GNU tar was not found and installation requires special features')
 
     @property
