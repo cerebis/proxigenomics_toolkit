@@ -76,7 +76,7 @@ def cluster(g, no_iso, method=None, ragbag=False, verbose=False):
 
     logger.info('Inverting partition map')
     revpart = {}
-    for ni, ci in partitions.iteritems():
+    for ni, ci in partitions.items():
         revpart.setdefault(ci, []).append((ni, 1.0))
 
     if verbose:
@@ -152,7 +152,7 @@ def write_output(communities, filename, ofmt='mcl'):
     elif ofmt == 'graphml':
         # convert communities to a graph
         cg = nx.DiGraph()
-        for k, v in communities.iteritems():
+        for k, v in communities.items():
             cg.add_node(k)
             for vi in v:
                 cg.add_edge(k, vi)

@@ -124,10 +124,10 @@ def fast_factorial(n):
 @nb.jit(nopython=True)
 def poisson_cdf(x, n, p):
     L = n * p
-    sum = 0
+    l_sum = 0
     for i in range(0, x+1):
-        sum += L**i / fast_factorial(i)
-    return sum * np.exp(-L)
+        l_sum += L**i / fast_factorial(i)
+    return l_sum * np.exp(-L)
 
 
 @nb.jit(nopython=True)
@@ -346,7 +346,7 @@ class ExtentGrouping(object):
         for i in range(len(self.map)):
             bin_len[n] = self.map[i][0, 0]
             n += 1
-            for j in range(1, len(self.map[i]) ):
+            for j in range(1, len(self.map[i])):
                 bin_len[n] = self.map[i][j, 0] - self.map[i][j-1, 0]
                 n += 1
         return bin_len
@@ -1222,9 +1222,10 @@ class ContactMap(object):
 
             if self.is_tipbased():
 
-                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=package_path('external', 'LKH'), precision=1,
-                                           seed=seed, runs=runs, pop_size=50, dist_func=dist_func, special=False,
-                                           stdout=stdout, fixed_edges=[(i, i+1) for i in range(1, _map.shape[0], 2)])
+                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=package_path('external', 'LKH'),
+                                           precision=1, seed=seed, runs=runs, pop_size=50, dist_func=dist_func,
+                                           special=False, stdout=stdout,
+                                           fixed_edges=[(i, i+1) for i in range(1, _map.shape[0], 2)])
 
                 # To solve this with TSP, doublet tips use a graph transformation, where each node comes a pair. Pairs
                 # possess fixed inter-connecting edges which must be included in any solution tour.
@@ -1239,9 +1240,9 @@ class ContactMap(object):
 
             else:
 
-                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=package_path('external', 'LKH'), precision=1,
-                                           seed=seed, runs=runs, pop_size=50, dist_func=dist_func, special=False,
-                                           stdout=stdout)
+                lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=package_path('external', 'LKH'),
+                                           precision=1, seed=seed, runs=runs, pop_size=50, dist_func=dist_func,
+                                           special=False, stdout=stdout)
 
                 # for singlet tours, no orientation can be inferred.
                 lkh_o = np.fromiter(((oi, 1) for oi in lkh_o), dtype=SeqOrder.INDEX_TYPE)

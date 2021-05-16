@@ -139,6 +139,7 @@ setup(
                       'networkx',
                       'numba',
                       'numpy',
+                      'pandas',
                       'python-louvain',
                       'pysam',
                       'PyYAML',

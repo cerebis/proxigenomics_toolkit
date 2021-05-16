@@ -5,10 +5,8 @@ from ..exceptions import *
 from .contact_map import SeqOrder
 from typing import Optional
 import Bio.SeqIO as SeqIO
-import Bio.SeqUtils as SeqUtils
 import decimal
 import contextlib
-import itertools
 import logging
 import networkx as nx
 import numpy as np
@@ -279,7 +277,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
     # standardise the results, where sequences in each cluster
     # are listed in ascending order
     clustering = {}
-    for cl_id, _seqs in cl_to_ids.iteritems():
+    for cl_id, _seqs in cl_to_ids.items():
         _ord = SeqOrder.asindex(np.sort(_seqs))
         # IMPORTANT!! sequences are remapped to their gapless indices
         _seqs = contact_map.order.remap_gapless(_ord)['index']
@@ -344,7 +342,7 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
     logger.info('Building random access index for input FASTA sequences')
     with contextlib.closing(IndexedFasta(source_fasta)) as seq_db:
         # iterate over the cluster set, in the existing order
-        for cl_id, cl_info in tqdm.tqdm(clustering.iteritems(), total=len(clustering),
+        for cl_id, cl_info in tqdm.tqdm(clustering.items(), total=len(clustering),
                                         desc='inspecting clusters'):
             _len = []
             _cov = []
@@ -725,7 +723,7 @@ def write_report(fname, clustering):
 
     df = []
     has_cov = False
-    for k, v in clustering.iteritems():
+    for k, v in clustering.items():
         try:
             sr = v['report']
 
@@ -775,7 +773,7 @@ def write_mcl(contact_map, fname, clustering):
         # track those sequences that were rejected during filtering
         lost = np.ones(contact_map.total_seq, dtype=np.bool)
         cl_soln = {}
-        for k, v in clustering.iteritems():
+        for k, v in clustering.items():
             # sequence wasn't lost to filtering
             lost[v['seq_ids']] = False
             cl_soln[k] = [seq_info[ix].name for ix in np.sort(v['seq_ids'])]
