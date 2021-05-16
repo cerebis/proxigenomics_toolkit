@@ -84,8 +84,10 @@ def simple_splitter(win_size, seq_file, out_file=None, threshold=0.333, fmt='fas
             # write out per input sequence
             SeqIO.write(out_seqs, out_h, fmt)
 
-        logger.debug('There were {} input sequences with mean size {:.0f} bp and max {} bp'.format(n_seqs, sum_seqs / float(n_seqs), max_seq))
-        logger.debug('Splitting produced {} fragments of mean size {:.0f} bp and max {} bp'.format(n_chunks, sum_x / float(n_x), max_x))
+        logger.debug('There were {} input sequences with mean size {:.0f} bp and max {} bp'.format(
+            n_seqs, sum_seqs / float(n_seqs), max_seq))
+        logger.debug('Splitting produced {} fragments of mean size {:.0f} bp and max {} bp'.format(
+            n_chunks, sum_x / float(n_x), max_x))
         logger.info('Resulting fragmented sequences written to {}'.format(out_file))
 
     return out_file

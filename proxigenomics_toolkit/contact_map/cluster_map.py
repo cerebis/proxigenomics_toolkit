@@ -6,7 +6,7 @@ from .contact_map import SeqOrder
 from typing import Optional
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
-import cdecimal
+import decimal
 import contextlib
 import itertools
 import logging
@@ -201,9 +201,9 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
         # using our own method to avoid unexpected side-effects on precision.
         # networkx write_edgelist is also slower, despite the use of Decimal here.
         with open(edge_file, 'wt') as out_h:
-            cdecimal.getcontext().prec = precision
-            dec = cdecimal.Decimal
-            for u, v in g.edges_iter():
+            decimal.getcontext().prec = precision
+            dec = decimal.Decimal
+            for u, v in g.edges():
                 out_h.write('{1}{0}{2}{0}{3}\n'.format(sep, u, v, dec(g[u][v]['weight']) * 1))
 
         return edge_file
@@ -465,14 +465,14 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
         Helper function for adding all nodes and edges and associated attributes. This function makes heavy
         use of local scope rather than pass parameters.
         """
-        for i, j, w in tqdm.tqdm(itertools.izip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
+        for i, j, w in tqdm.tqdm(zip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
             # node ids
             u = _nn(i)
             v = _nn(j)
             if not g.has_node(u):
-                g.add_node(u, _node_attr(i))
+                g.add_node(u, **_node_attr(i))
             if not g.has_node(v):
-                g.add_node(v, _node_attr(j))
+                g.add_node(v, **_node_attr(j))
             # create the edge
             g.add_edge(u, v, weight=float(w * scl))
 
@@ -520,7 +520,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
         n_expected = contact_map.order.count_accepted()
         add_nodes_and_edges()
 
-    assert g.degree() != n_expected, \
+    assert g.order() == n_expected, \
         'order(graph) did not equal number of expected sequences'
 
     # disconnect any node mentioned in exclusion list

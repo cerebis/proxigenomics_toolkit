@@ -197,7 +197,7 @@ def write_lkh(base_name, m, dim, max_trials=None, runs=None, seed=None, mat_fmt=
         out_h.write('EDGE_WEIGHT_TYPE: EXPLICIT\n')
         out_h.write('EDGE_WEIGHT_FORMAT: UPPER_ROW\n')
         out_h.write('EDGE_WEIGHT_SECTION\n')
-        for i in xrange(len(m)-1):
+        for i in range(len(m)-1):
             out_h.write(' '.join([str(int(vi)) for vi in m[i, i+1:]]))
             out_h.write('\n')
 
@@ -267,7 +267,7 @@ def read_lkh(fname):
             if line.startswith('TOUR_SECTION'):
                 in_tour = True
             elif not in_tour:
-                m = re.search('(\w+)[\s:=]+(\S+)', line)
+                m = re.search(r'(\w+)[\s:=]+(\S+)', line)
                 if not m:
                     continue
                 if m.group(1) == 'DIMENSION':

@@ -190,7 +190,7 @@ if __name__ == '__main__':
     else:
         g = nx.read_edgelist(args.input, data=(('weight', float), ))
 
-    print 'Initial statistics'
+    print('Initial statistics')
     print_info(g)
 
     if args.otype == 'soft':

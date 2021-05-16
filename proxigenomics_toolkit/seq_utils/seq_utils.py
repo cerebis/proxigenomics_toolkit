@@ -2,7 +2,7 @@ from ..exceptions import *
 from ..misc_utils import exe_exists
 from Bio.Restriction import Restriction
 from difflib import SequenceMatcher
-from collections import Iterable, Mapping, namedtuple
+from collections import Mapping, namedtuple
 from scipy.stats import mstats
 import Bio.SeqIO as SeqIO
 import heapq
@@ -11,7 +11,6 @@ import numpy as np
 import networkx as nx
 import os
 import re
-import string
 import subprocess
 import tempfile
 import uuid
@@ -21,10 +20,9 @@ import multiprocessing
 
 logger = logging.getLogger(__name__)
 
-
 # translation table used for complementation
-COMPLEMENT_TABLE = string.maketrans('acgtumrwsykvhdbnACGTUMRWSYKVHDBN',
-                                    'TGCAAnnnnnnnnnnnTGCAANNNNNNNNNNN')
+COMPLEMENT_TABLE = str.maketrans('acgtumrwsykvhdbnACGTUMRWSYKVHDBN',
+                                 'TGCAAnnnnnnnnnnnTGCAANNNNNNNNNNN')
 
 
 def revcomp(seq):
@@ -300,7 +298,7 @@ class SequenceAnalyzer(object):
         g = nx.Graph()
         n_seq = len(self.seq_info)
 
-        for i in xrange(n_seq):
+        for i in range(n_seq):
             si = self.seq_info[i]
             d = self.seq_report['seq_info'][si.name]
             if self.tip_size:
@@ -319,8 +317,8 @@ class SequenceAnalyzer(object):
         if self.tip_size:
             _m = _m.sum(axis=(2, 3))
 
-        for i in xrange(n_seq):
-            for j in xrange(i, n_seq):
+        for i in range(n_seq):
+            for j in range(i, n_seq):
                 if _m[i, j] > 0:
                     g.add_edge(i, j, weight=float(_m[i, j]))
 
@@ -366,17 +364,17 @@ class SequenceAnalyzer(object):
         g = self._contact_graph()
 
         degens = []
-        for u in g.nodes_iter():
-            if g.node[u]['_len'] < min_len or g.degree(u) == 0:
+        for u in g.nodes():
+            if g.nodes[u]['_len'] < min_len or g.degree[u] == 0:
                 continue
 
             signif_local_nodes = SequenceAnalyzer._nlargest(g, u, 4, 1)
-            local_mean_cov = mstats.gmean(np.array([g.node[v]['_cov'] for v in signif_local_nodes]))
-            fold_vs_local = g.node[u]['_cov'] / float(local_mean_cov)
+            local_mean_cov = mstats.gmean(np.array([g.nodes[v]['_cov'] for v in signif_local_nodes]))
+            fold_vs_local = g.nodes[u]['_cov'] / float(local_mean_cov)
 
             is_degen = True if fold_vs_local > fold_max else False
 
-            degens.append((u, is_degen, g.node[u]['_cov'], local_mean_cov, fold_vs_local))
+            degens.append((u, is_degen, g.nodes[u]['_cov'], local_mean_cov, fold_vs_local))
 
         degens = np.array(degens, dtype=SequenceAnalyzer.COV_TYPE)
 

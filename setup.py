@@ -132,26 +132,24 @@ setup(
         'build_ext': build_tarball
     },
 
-    setup_requires=['numpy<1.15.0'],
+    setup_requires=['numpy', 'cython'],
 
-    install_requires=['biopython==1.76',
-                      'matplotlib<3',
-                      'networkx<2',
-                      'numba<0.48',
-                      'numpy<1.15',
-                      'python-louvain==0.14',
-                      'pysam==0.15.4',
-                      'PyYAML<4',
-                      'scipy<1.3',
-                      'seaborn==0.9.1',
-                      'sparse==0.6.0',
-                      'tqdm==4.45.0',
+    install_requires=['biopython',
+                      'matplotlib',
+                      'networkx',
+                      'numba',
+                      'numpy',
+                      'python-louvain',
+                      'pysam',
+                      'PyYAML',
+                      'scipy',
+                      'seaborn',
+                      'sparse',
+                      'tqdm',
                       'typing',
-                      'llvmlite<0.32',
-                      'cython<0.30',
-                      'm3-cdecimal==2.3',
+                      'llvmlite',
+                      'cython',
                       'lap @ git+https://github.com/gatagat/lap@master#egg=lap-99',
-                      'polo @ git+https://github.com/adrianveres/polo@master#egg=polo-99'
                       ],
 
     dependency_links=['git+https://github.com/gatagat/lap@master#egg=lap-99',
@@ -159,12 +157,12 @@ setup(
                       ],
 
     classifiers=[
-        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.9',
         'License :: OSI Approved :: GNU Affero General Public License v3',
         'Operating System :: POSIX :: Linux',
         'Intended Audience :: Science/Research',
         'Topic :: Scientific/Engineering :: Bio-Informatics',
-        'Development Status :: 2 - Pre-Alpha'
+        'Development Status :: 4 - Beta'
     ]
 
 )

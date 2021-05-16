@@ -1,5 +1,5 @@
 import bz2
-import cPickle
+import pickle
 import gzip
 import json
 import io
@@ -18,7 +18,7 @@ def save_object(file_name, obj):
     :param obj: object to serialize
     """
     with open_output(file_name, compress='gzip') as out_h:
-        cPickle.dump(obj, out_h)
+        pickle.dump(obj, out_h)
 
 
 def load_object(file_name):
@@ -29,7 +29,7 @@ def load_object(file_name):
     :return: deserialzied object
     """
     with open_input(file_name) as in_h:
-        return cPickle.load(in_h)
+        return pickle.load(in_h)
 
 
 def open_input(file_name):
@@ -48,7 +48,7 @@ def open_input(file_name):
     return open(file_name, 'r')
 
 
-def open_output(file_name, append=False, compress=None, gzlevel=6):
+def open_output(file_name, append=False, compress=None):
     """
     Open a text stream for reading or writing. Compression can be enabled
     with either 'bzip2' or 'gzip'. Additional option for gzip compression
@@ -57,7 +57,6 @@ def open_output(file_name, append=False, compress=None, gzlevel=6):
     :param file_name: file name of output
     :param append: append to any existing file
     :param compress: gzip, bzip2
-    :param gzlevel: gzip level (default 6)
     :return:
     """
 
@@ -68,11 +67,11 @@ def open_output(file_name, append=False, compress=None, gzlevel=6):
             file_name += '.bz2'
         # bz2 missing method to be wrapped by BufferedWriter. Just directly
         # supply a buffer size
-        return bz2.BZ2File(file_name, mode, buffering=65536)
+        return bz2.open(file_name, mode)
     elif compress == 'gzip':
         if not file_name.endswith('.gz'):
             file_name += '.gz'
-        return io.BufferedWriter(gzip.GzipFile(file_name, mode, compresslevel=gzlevel))
+        return io.BufferedWriter(gzip.open(file_name, mode))
     else:
         return io.BufferedWriter(io.FileIO(file_name, mode))
 
@@ -192,7 +191,7 @@ def json_load_byteified(file_handle):
 
 def _byteify(data, ignore_dicts=False):
     # if this is a unicode string, return its string representation
-    if isinstance(data, unicode):
+    if isinstance(data, str):
         return data.encode('utf-8')
     # if this is a list of values, return list of byteified values
     if isinstance(data, list):
@@ -202,7 +201,7 @@ def _byteify(data, ignore_dicts=False):
     if isinstance(data, dict) and not ignore_dicts:
         return {
             _byteify(key, ignore_dicts=True): _byteify(value, ignore_dicts=True)
-            for key, value in data.iteritems()
+            for key, value in data.items()
             }
     # if it's anything else, return it in its original form
     return data

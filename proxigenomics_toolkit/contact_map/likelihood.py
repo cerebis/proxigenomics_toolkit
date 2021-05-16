@@ -29,8 +29,8 @@ def poisson_lpmf2(ob, ex):
     :return: log likelihood
     """
     s = 0.0
-    for i in xrange(ob.shape[0]):
-        for j in xrange(ob.shape[1]):
+    for i in range(ob.shape[0]):
+        for j in range(ob.shape[1]):
             aij = ob[i, j]
             bij = ex[i, j]
             if aij == 0:
@@ -49,8 +49,8 @@ def poisson_lpmf3(ob, ex):
     :return: log likelihood
     """
     s = 0.0
-    for i in xrange(ob.shape[0]):
-        for j in xrange(ob.shape[1]):
+    for i in range(ob.shape[0]):
+        for j in range(ob.shape[1]):
             aij = ob[i, j]
             bij = ex[i, j]
             if aij == 0:
@@ -77,7 +77,7 @@ def calc_likelihood(cm):
     ori = cm.order.order['ori']
 
     log_l = 0.0
-    for i, j in itertools.combinations(xrange(cm.total_seq), 2):
+    for i, j in itertools.combinations(range(cm.total_seq), 2):
 
         # inter-contig separation defined by cumulative
         # intervening contig length.

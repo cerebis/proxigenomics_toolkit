@@ -2,12 +2,10 @@ import logging
 import numpy as np
 import networkx as nx
 import community
-import polo
 import lap
 
-from scipy.cluster.hierarchy import ward, complete
+from scipy.cluster.hierarchy import linkage
 from scipy.cluster.hierarchy import dendrogram
-from scipy.spatial.distance import pdist
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +20,7 @@ def hc_order(g, metric='cityblock', method='ward', use_olo=True):
     :param use_olo: use optimal leaf ordering
     :return: an ordering
     """
-
-    d = pdist(nx.adjacency_matrix(g).todense(), metric=metric)
-    if method == 'ward':
-        z = ward(d)
-    elif method == 'complete':
-        z = complete(d)
-    else:
-        raise RuntimeError('unsupported method: {}'.format(method))
-
-    if use_olo:
-        z = polo.optimal_leaf_ordering(z, d)
-
+    z = linkage(nx.adjacency_matrix(g).todense(), method=method, metric=metric, optimal_ordering=use_olo)
     return np.array(dendrogram(z, no_plot=True)['leaves'])
 
 
@@ -127,13 +114,13 @@ def inter_weight_matrix(g, sg, norm=True):
         n = np.zeros_like(w, dtype=np.int)
 
     # for each subgraph i
-    for i in xrange(nsub):
+    for i in range(nsub):
 
         # for every node in subgraph i
         for u in sg[i].nodes_iter():
 
             # for every other subgraph j
-            for j in xrange(i+1, nsub):
+            for j in range(i+1, nsub):
 
                 # for every node in subgraph j
                 for v in sg[j].nodes_iter():

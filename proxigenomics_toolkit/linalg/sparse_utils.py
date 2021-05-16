@@ -26,7 +26,7 @@ def is_hermitian(m, tol=1e-6):
     :param tol: tolernace above zero for m - m.T < tol
     :return: True matrix is Hermitian
     """
-    return np.all(~((np.abs(m - m.H) >= tol).data))
+    return np.all(~(np.abs(m - m.H) >= tol).data)
 
 
 def tensor_print(T):
@@ -41,19 +41,19 @@ def tensor_print(T):
         pw = int(np.ceil(np.log10(T.max())))
     except OverflowError:
         pw = 1
-    for i in xrange(T.shape[0]):
-        for k in xrange(T.shape[2]):
-            print '|',
-            for j in xrange(T.shape[1]):
-                print '[',
-                for l in xrange(T.shape[3]):
-                    print '{0:{1}d}'.format(T[i, j, k, l], pw),
+    for i in range(T.shape[0]):
+        for k in range(T.shape[2]):
+            print('|', end='')
+            for j in range(T.shape[1]):
+                print('[', end='')
+                for l in range(T.shape[3]):
+                    print('{0:{1}d}'.format(T[i, j, k, l], pw), end='')
 
-                print ']',
-            print '|'
+                print(']', end='')
+            print('|')
         if i < T.shape[1] - 1:
-            print '+'
-    print
+            print('+')
+    print('')
 
 
 def downsample(m, block_size, method='mean'):
@@ -83,7 +83,7 @@ def downsample(m, block_size, method='mean'):
         m = scisp.dok_matrix(m)
     else:
         m = m.todok()
-    m.resize((m.shape[0] + pad_row, m.shape[1] + pad_col))
+    m.resize(m.shape[0] + pad_row, m.shape[1] + pad_col)
 
     # conversion to csr here appears necessary to properly preserve matrix
     m = sparse.COO(m.tocsr())
@@ -277,7 +277,7 @@ class Sparse2DAccumulator(object):
 
 
 @nb.jit(nopython=True)
-def _fast_offdiag(_data, _row, _col, _shape):
+def fast_offdiag(_data, _row, _col, _shape):
     """
     Determine the maximum off-diagonal elements using the
     internal attributes of a scipy coo matrix. The matrix
@@ -310,11 +310,11 @@ def max_offdiag(_m):
     assert scisp.isspmatrix(_m), 'Input matrix is not a scipy.sparse object'
     if not scisp.isspmatrix_coo(_m):
         _m = _m.tocoo()
-    return _fast_offdiag(_m.data, _m.row, _m.col, _m.shape[0])
+    return fast_offdiag(_m.data, _m.row, _m.col, _m.shape[0])
 
 
 @nb.jit(nopython=True)
-def _fast_retained(_data, _row, _col, _nnz, _mask):
+def fast_retained(_data, _row, _col, _nnz, _mask):
     """
     Given a mask, determine the elements of a coo matrix attributes
     data, row and column and the resulting shifts.
@@ -328,7 +328,7 @@ def _fast_retained(_data, _row, _col, _nnz, _mask):
     keep_row = []
     keep_col = []
     keep_data = []
-    for i in xrange(_nnz):
+    for i in range(_nnz):
         if _mask[_row[i]] and _mask[_col[i]]:
             keep_row.append(_row[i])
             keep_col.append(_col[i])
@@ -342,7 +342,7 @@ def _fast_retained(_data, _row, _col, _nnz, _mask):
     shift = np.cumsum(~_mask)
 
     # TODO move this in the above loop
-    for i in xrange(len(keep_row)):
+    for i in range(len(keep_row)):
         keep_row[i] -= shift[keep_row[i]]
         keep_col[i] -= shift[keep_col[i]]
 
@@ -353,6 +353,7 @@ def compress(_m, _mask):
     """
     Remove rows and columns using a 1d boolean mask.
 
+    :param _m: matrix
     :param _mask: True (keep), False (drop)
     :return: a coo_matrix of only the accepted rows/columns
     """
@@ -361,7 +362,7 @@ def compress(_m, _mask):
     if not scisp.isspmatrix_coo(_m):
         _m = _m.tocoo()
 
-    _data, _row, _col, _shift = _fast_retained(_m.data, _m.row, _m.col, _m.nnz, _mask)
+    _data, _row, _col, _shift = fast_retained(_m.data, _m.row, _m.col, _m.nnz, _mask)
 
     return scisp.coo_matrix((_data, (_row, _col)), shape=np.array(_m.shape) - _shift[-1])
 
@@ -453,10 +454,10 @@ class Sparse4DAccumulator(object):
         :return: a new symmetric version
         """
         # collect indices of diagonal elements along primary axes (0 and 1)
-        ix = np.where(~np.apply_along_axis(lambda x: x[0]==x[1], 0, _m.coords))[0]
+        ix = np.where(~np.apply_along_axis(lambda x: x[0] == x[1], 0, _m.coords))[0]
         # append every non-zero, non-diag coord and accompanying data to a new sparse object
         # and also perform the transpose (i,j), (k,l) -> (j,i), (l,k)
-        _coords = np.hstack((_m.coords, np.apply_along_axis(Sparse4DAccumulator._flip, 0, _m.coords[:,ix])))
+        _coords = np.hstack((_m.coords, np.apply_along_axis(Sparse4DAccumulator._flip, 0, _m.coords[:, ix])))
         _data = np.hstack((_m.data, _m.data[ix]))
         return sparse.COO(_coords, _data, shape=_m.shape, has_duplicates=True)
 
@@ -483,7 +484,7 @@ def flatten_tensor_4d(_m):
     """
     _coords = [[], []]
     _data = []
-    for n in xrange(_m.nnz):
+    for n in range(_m.nnz):
         i, j, k, l = _m.coords[:, n]
         ii = 2*i
         jj = 2*j
@@ -502,6 +503,7 @@ def compress_4d(_m, _mask):
     of sparse.COO type, it will be cast. An exception is raised if the matrix is not of
      sparse.DOK or sparse.COO type. The returned matrix is of type sparse.COO.
 
+    :param _m: matrix
     :param _mask: True (keep), False (drop)
     :return: a sparse.COO of only the accepted rows/columns
     """
@@ -513,7 +515,7 @@ def compress_4d(_m, _mask):
     keep_coords = []
     keep_data = []
     accept_index = set(np.where(_mask)[0])
-    for i in xrange(_m.nnz):
+    for i in range(_m.nnz):
         if _m.coords[0, i] in accept_index and _m.coords[1, i] in accept_index:
             keep_coords.append(_m.coords[:, i])
             keep_data.append(_m.data[i])
@@ -538,7 +540,7 @@ def dotdot(_m, _a):
     :param _a: the 1d trace of a diagonal matrix
     :return: the in-place modified matrix
     """
-    for n in xrange(_m.nnz):
+    for n in range(_m.nnz):
         i, j = _m.coords[:2, n]
         _m.data[n] *= _a[i] * _a[j]
     return _m
@@ -558,4 +560,3 @@ def kr_biostochastic_4d(m4d, **kwargs):
     m2d = m4d.astype(np.float).sum(axis=(2, 3)).tocsr()
     _, scl = kr_biostochastic(m2d, **kwargs)
     return dotdot(m4d.astype(np.float), scl), scl
-

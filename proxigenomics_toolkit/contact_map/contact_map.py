@@ -88,7 +88,7 @@ def fast_norm_tipbased_bylength(coords, data, tip_lengths, tip_size):
     :param tip_lengths: per-element min(sequence_length, tip_size)
     :param tip_size: tip size used in map
     """
-    for ii in xrange(coords.shape[1]):
+    for ii in range(coords.shape[1]):
         i, j = coords[:2, ii]
         data[ii] *= tip_size**2 / (tip_lengths[i] * tip_lengths[j])
 
@@ -105,7 +105,7 @@ def fast_norm_tipbased_bysite(coords, data, sites):
     :param data:  the COO matrix data member variable (1xN array)
     :param sites: per-element min(sequence_length, tip_size)
     """
-    for n in xrange(coords.shape[1]):
+    for n in range(coords.shape[1]):
         i, j, k, l = coords[:, n]
         data[n] *= 1.0/(sites[i, k] * sites[j, l])
 
@@ -135,7 +135,7 @@ def max_interactions(_ir, _breaks, _indices, _values):
 
     cols = []
     sums = []
-    for _ic in xrange(len(_breaks)-1):
+    for _ic in range(len(_breaks)-1):
 
         if _ic == _ir:
             continue
@@ -196,7 +196,7 @@ def gothic_extent_to_seqmap(contact_map, gothic_method):
     _data = []
 
     # this method is kind of slow, so we've got a progress par
-    for ix in tqdm.tqdm(xrange(_num_bins)):
+    for ix in tqdm.tqdm(range(_num_bins)):
 
         # diagonal (self bin)
         a0, a1 = _cbins[ix], _cbins[ix+1]
@@ -256,6 +256,7 @@ def fast_norm_gothic(rows, cols, data, rel_cov, total_links, frac_random, mode='
     else:
         raise ApplicationException('unsupported mode [{}]'.format(mode))
 
+
 @nb.jit(nopython=True)
 def fast_norm_fullseq_bysite(rows, cols, data, sites):
     """
@@ -266,7 +267,7 @@ def fast_norm_fullseq_bysite(rows, cols, data, sites):
     :param data:  the COO matrix data member variable (1xN array)
     :param sites: per-element min(sequence_length, tip_size)
     """
-    for n in xrange(data.shape[0]):
+    for n in range(data.shape[0]):
         i = rows[n]
         j = cols[n]
         data[n] *= 1.0/(sites[i] * sites[j])
@@ -379,7 +380,7 @@ class SeqOrder(object):
         self._positions = None
         _ord = np.arange(len(seq_info), dtype=np.int32)
         self.order = np.array(
-            [(_ord[i], SeqOrder.FORWARD, SeqOrder.ACCEPTED, seq_info[i].length) for i in xrange(len(_ord))],
+            [(_ord[i], SeqOrder.FORWARD, SeqOrder.ACCEPTED, seq_info[i].length) for i in range(len(_ord))],
             dtype=SeqOrder.STRUCT_TYPE)
 
         self._update_positions()
@@ -772,7 +773,7 @@ class ContactMap(object):
             # get an estimate of sequences for progress
             fasta_count = count_fasta_sequences(seq_file)
             for n_seq, seqrec in tqdm.tqdm(enumerate(SeqIO.parse(multi_fasta, 'fasta')),
-                                    total=fasta_count, desc='Analyzing reference sequences'):
+                                           total=fasta_count, desc='Analyzing reference sequences'):
                 if len(seqrec) < min_len:
                     continue
                 fasta_info[seqrec.id] = {'sites': self.site_counter.count_sites(seqrec.seq),
@@ -1223,7 +1224,7 @@ class ContactMap(object):
 
                 lkh_o = ordering.lkh_order(_map, control_base_name, lkh_exe=package_path('external', 'LKH'), precision=1,
                                            seed=seed, runs=runs, pop_size=50, dist_func=dist_func, special=False,
-                                           stdout=stdout, fixed_edges=[(i, i+1) for i in xrange(1, _map.shape[0], 2)])
+                                           stdout=stdout, fixed_edges=[(i, i+1) for i in range(1, _map.shape[0], 2)])
 
                 # To solve this with TSP, doublet tips use a graph transformation, where each node comes a pair. Pairs
                 # possess fixed inter-connecting edges which must be included in any solution tour.
@@ -1409,7 +1410,8 @@ class ContactMap(object):
         :param bisto: make map bistochastic
         :param permute: permute the map using current order
         :param mean_type: length normalisation mean (geometric, harmonic, arithmetic)
-        :param norm_method: methods used to normalise the matrix (length, gothic-effect, gothic-binomial, gothic-poisson)
+        :param norm_method: methods used to normalise the matrix (length, gothic-effect,
+        gothic-binomial, gothic-poisson)
         :return: processed extent map
         """
 
@@ -1454,12 +1456,12 @@ class ContactMap(object):
         _out = sparse_utils.Sparse2DAccumulator(self.total_seq)
 
         a0 = 0
-        for i in xrange(len(_bins)):
+        for i in range(len(_bins)):
             a1 = _cbins[i]
             # sacrifice memory for significant speed up slicing below
             row_i = _map[a0:a1, :].A
             b0 = 0
-            for j in xrange(i, len(_bins)):
+            for j in range(i, len(_bins)):
                 b1 = _cbins[j]
                 mij = row_i[:, b0:b1].sum()
                 if mij == 0:
@@ -1485,7 +1487,7 @@ class ContactMap(object):
 
         assert _map.shape[0] == _order.shape[0], 'supplied map and unmasked order are different sizes'
         p = sp.lil_matrix(_map.shape)
-        for i in xrange(len(_order)):
+        for i in range(len(_order)):
             p[i, _order[i]] = 1.
         p = p.tocsr()
         return p.dot(_map.tocsr()).dot(p.T)
@@ -1549,9 +1551,9 @@ class ContactMap(object):
                 _mean_func = mean_selector(mean_type)
                 _len = self.order.lengths().astype(np.float)
                 _map = _map.tolil().astype(np.float)
-                for i in xrange(_map.shape[0]):
+                for i in range(_map.shape[0]):
                     _map[i, :] /= np.fromiter((1e-3 * _mean_func(_len[i],  _len[j])
-                                               for j in xrange(_map.shape[0])), dtype=np.float)
+                                               for j in range(_map.shape[0])), dtype=np.float)
                 _map = _map.tocsr()
 
         elif method.startswith('gothic'):
@@ -1618,7 +1620,7 @@ class ContactMap(object):
             _bins = self.grouping.bins
             _len = self.order.lengths()
             _len_lookup = []
-            for i in xrange(len(_bins)):
+            for i in range(len(_bins)):
                 _len_lookup.extend([_len[i]] * _bins[i])
             _len_lookup = np.array(_len_lookup, dtype=np.float64)
 
@@ -1682,12 +1684,12 @@ class ContactMap(object):
             j_off = _bins[:oi].sum()
             i_off = _shuf_bins[:i].sum()
             if _ori[i] > 0:
-                for k in xrange(_bins[oi]):
+                for k in range(_bins[oi]):
                     p[i_off+k, j_off+k] = 1
             else:
                 # rot90 those with reverse orientation
                 _nb = _bins[oi]
-                for k in xrange(_nb):
+                for k in range(_nb):
                     p[i_off+_nb-(k+1), j_off+k] = 1
 
         # permute the extent_map
@@ -1713,16 +1715,16 @@ class ContactMap(object):
         s = 0
         accept_bins = []
         # accept_index = set(np.where(_mask)[0])
-        for i in xrange(len(_order)):
+        for i in range(len(_order)):
             # if i in accept_index:
             if _order[i]['mask']:
-                accept_bins.extend([j+s for j in xrange(_bins[i])])
+                accept_bins.extend([j+s for j in range(_bins[i])])
             s += _bins[i]
 
         _mask = np.zeros(self.grouping.total_bins, dtype=np.bool)
         _mask[np.array(accept_bins)] = True
 
-        _data, _row, _col, _shift = sparse_utils._fast_retained(_map.data, _map.row, _map.col, _map.nnz, _mask)
+        _data, _row, _col, _shift = sparse_utils.fast_retained(_map.data, _map.row, _map.col, _map.nnz, _mask)
 
         return sp.coo_matrix((_data, (_row, _col)), shape=np.array(_map.shape) - _shift[-1])
 
@@ -1739,7 +1741,7 @@ class ContactMap(object):
         if permute:
             seq_id_iter = self.order.accepted_positions()
         else:
-            seq_id_iter = xrange(self.order.count_accepted())
+            seq_id_iter = range(self.order.count_accepted())
 
         tick_labs = []
         for i in seq_id_iter:
@@ -1750,7 +1752,7 @@ class ContactMap(object):
 
         if simple:
             step = 2 if self.is_tipbased() else 1
-            tick_locs = xrange(2, step*self.order.count_accepted()+step, step)
+            tick_locs = range(2, step*self.order.count_accepted()+step, step)
         else:
             if permute:
                 _cbins = np.cumsum(self.grouping.bins[self.order.accepted_positions()])

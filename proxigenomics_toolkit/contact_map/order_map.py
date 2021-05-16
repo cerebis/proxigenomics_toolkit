@@ -23,6 +23,7 @@ def order_clusters(contact_map, clustering, seed, cl_list=None, min_len=None, mi
     :param min_extent: skip clusters whose total extent (bp) is too short
     :param work_dir: working directory
     :param dist_method: method to use in transforming the contact map to a distance matrix
+    :param bisto: perform bistochastic matrix balancing
     :param norm_method: normalisation method to apply to contact map
     :return: map of cluster orders, by cluster id
     """
@@ -75,9 +76,9 @@ def order_clusters(contact_map, clustering, seed, cl_list=None, min_len=None, mi
             clustering[cl_id]['order'] = _ord
 
         except NoneAcceptedException as e:
-            logger.warning('{} : cluster {} will be masked'.format(e.message, cl_info['name']))
+            logger.warning('{} : cluster {} will be masked'.format(e, cl_info['name']))
             continue
         except TooFewException as e:
-            logger.warning('{} : ordering not possible for cluster {}'.format(e.message, cl_info['name']))
+            logger.warning('{} : ordering not possible for cluster {}'.format(e, cl_info['name']))
 
     return clustering
