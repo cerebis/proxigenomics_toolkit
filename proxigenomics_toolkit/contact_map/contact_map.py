@@ -839,7 +839,7 @@ class ContactMap(object):
 
             if self.precount:
                 logger.info('Counting reads in bam file for ETA projection...')
-                self.total_reads = count_bam_reads(bam_file)
+                self.total_reads = count_bam_reads(bam_file, threads)
                 logger.info('BAM file contains {0} alignments'.format(self.total_reads))
             else:
                 logger.info('Skipping pre-count of BAM file, no ETA will be offered')
