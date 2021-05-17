@@ -15,7 +15,7 @@ def piecewise_3c(s):
     pr = MIN_FIELD
     if s < 500e3:
         # Pareto2
-        pr = P2ALPHA / P2LAMBDA * (1 + (s - P2MU)/P2LAMBDA)**(- P2ALPHA - 1)
+        pr = P2ALPHA / P2LAMBDA * (1 + (s - P2MU) / P2LAMBDA)**(- P2ALPHA - 1)
     return pr
 
 
@@ -35,7 +35,7 @@ def poisson_lpmf2(ob, ex):
             bij = ex[i, j]
             if aij == 0:
                 continue
-            s += aij * log(aij/bij) + bij - aij + 0.5 * log(2.0 * pi * aij)
+            s += aij * log(aij / bij) + bij - aij + 0.5 * log(2.0 * pi * aij)
     return -s
 
 
@@ -56,7 +56,7 @@ def poisson_lpmf3(ob, ex):
             if aij == 0:
                 s += bij
             else:
-                s += aij * log(aij/bij) + bij - aij + 0.5 * log(2.0 * pi * aij)
+                s += aij * log(aij / bij) + bij - aij + 0.5 * log(2.0 * pi * aij)
     return -s
 
 

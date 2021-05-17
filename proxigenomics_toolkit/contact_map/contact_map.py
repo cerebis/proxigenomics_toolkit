@@ -35,17 +35,17 @@ Basic Mean functions
 
 @nb.jit(nopython=True)
 def geometric_mean(x, y):
-    return (x*y)**0.5
+    return (x * y)**0.5
 
 
 @nb.jit(nopython=True)
 def harmonic_mean(x, y):
-    return 2*x*y/(x+y)
+    return 2 * x * y / (x + y)
 
 
 @nb.jit(nopython=True)
 def arithmetic_mean(x, y):
-    return 0.5*(x+y)
+    return 0.5 * (x + y)
 
 
 def mean_selector(name):
@@ -108,7 +108,7 @@ def fast_norm_tipbased_bysite(coords, data, sites):
     """
     for n in range(coords.shape[1]):
         i, j, k, l = coords[:, n]
-        data[n] *= 1.0/(sites[i, k] * sites[j, l])
+        data[n] *= 1.0 / (sites[i, k] * sites[j, l])
 
 
 # first 30 factorial values as approx as floats
@@ -271,7 +271,7 @@ def fast_norm_fullseq_bysite(rows, cols, data, sites):
     for n in range(data.shape[0]):
         i = rows[n]
         j = cols[n]
-        data[n] *= 1.0/(sites[i] * sites[j])
+        data[n] *= 1.0 / (sites[i] * sites[j])
 
 
 @nb.jit(nopython=True, parallel=True)
@@ -310,15 +310,15 @@ class ExtentGrouping(object):
                 raise ZeroLengthException(seq.id)
 
             # integer bin estimation
-            num_bins = seq.length / bin_size
+            num_bins = seq.length // bin_size
             if num_bins == 0:
                 num_bins += 1
             # handle non-integer discrepancy by contracting/expanding all bins equally
             # the threshold between contract/expand being half a bin size
-            if seq.length % bin_size != 0 and seq.length/float(bin_size) - num_bins >= 0.5:
+            if seq.length % bin_size != 0 and seq.length / float(bin_size) - num_bins >= 0.5:
                 num_bins += 1
 
-            edges = np.linspace(0, seq.length, num_bins+1, endpoint=True, dtype=np.int)
+            edges = np.linspace(0, seq.length, num_bins+1, endpoint=True, dtype=np.int64)
 
             self.bins.append(num_bins)
 
@@ -326,7 +326,7 @@ class ExtentGrouping(object):
             first_bin = self.total_bins
             last_bin = first_bin + num_bins
             self.map.append(np.vstack((edges[1:], np.arange(first_bin, last_bin))).T)
-            self.borders.append(np.array([first_bin, last_bin], dtype=np.int))
+            self.borders.append(np.array([first_bin, last_bin], dtype=np.int64))
 
             self.total_bins += num_bins
 
@@ -586,7 +586,7 @@ class SeqOrder(object):
         :return: an INDEX_TYPE array of the order and orientation of the currently accepted sequences.
         """
         idx = np.where(self.order['mask'])
-        ori = np.ones(self.count_accepted(), dtype=np.int)
+        ori = np.ones(self.count_accepted(), dtype=np.int64)
         return np.fromiter(zip(idx, ori), dtype=SeqOrder.INDEX_TYPE)
 
     def mask_vector(self):
@@ -1234,10 +1234,10 @@ class ContactMap(object):
                 # is traversed, defines the orientation of the sequence.
 
                 # 1.  pair adjacent nodes by reshape the 1D array into a two-column array of half the length
-                lkh_o = lkh_o.reshape(lkh_o.shape[0]/2, 2)
+                lkh_o = lkh_o.reshape(lkh_o.shape[0] // 2, 2)
                 # 2. convert to surrogate ids and infer orientation from paths taken through doublets.
                 #   0->1 forward (+1): 1->0 reverse (-1).
-                lkh_o = np.fromiter(((oi[0]/2, oi[1]-oi[0]) for oi in lkh_o), dtype=SeqOrder.INDEX_TYPE)
+                lkh_o = np.fromiter(((oi[0] // 2, oi[1]-oi[0]) for oi in lkh_o), dtype=SeqOrder.INDEX_TYPE)
 
             else:
 
@@ -1511,7 +1511,7 @@ class ContactMap(object):
         return _map, scl
 
     def _get_sites(self):
-        _sites = np.array([si.sites for si in self.seq_info], dtype=np.float)
+        _sites = np.array([si.sites for si in self.seq_info], dtype=np.float64)
         # all sequences are assumed to have a minimum of 1 site -- even if not observed
         # TODO test whether it would be more accurate to assume that all sequences are under counted by 1.
         _sites[np.where(_sites == 0)] = 1
@@ -1533,7 +1533,7 @@ class ContactMap(object):
 
             logger.debug('Doing site based normalisation')
             _sites = self._get_sites()
-            _map = _map.astype(np.float)
+            _map = _map.astype(np.float64)
             if tip_based:
                 fast_norm_tipbased_bysite(_map.coords, _map.data, _sites)
             else:
@@ -1545,17 +1545,17 @@ class ContactMap(object):
 
             logger.debug('Doing length based normalisation')
             if tip_based:
-                _tip_lengths = np.minimum(self.tip_size, self.order.lengths()).astype(np.float)
+                _tip_lengths = np.minimum(self.tip_size, self.order.lengths()).astype(np.float64)
                 fast_norm_tipbased_bylength(_map.coords, _map.data, _tip_lengths, self.tip_size)
             else:
                 # TODO convert this to numba or remove
                 logger.warning('length normalisation is not optimised and therefore very slow')
                 _mean_func = mean_selector(mean_type)
-                _len = self.order.lengths().astype(np.float)
-                _map = _map.tolil().astype(np.float)
+                _len = self.order.lengths().astype(np.float64)
+                _map = _map.tolil().astype(np.float64)
                 for i in range(_map.shape[0]):
                     _map[i, :] /= np.fromiter((1e-3 * _mean_func(_len[i],  _len[j])
-                                               for j in range(_map.shape[0])), dtype=np.float)
+                                               for j in range(_map.shape[0])), dtype=np.float64)
                 _map = _map.tocsr()
 
         elif method.startswith('gothic'):
@@ -1831,7 +1831,7 @@ class ContactMap(object):
                     # downsample the map
                     _map = sparse_utils.downsample(_map, reduce_factor)
                     # ticks adjusted to match
-                    tick_locs = np.floor(tick_locs.astype(np.float) / reduce_factor)
+                    tick_locs = np.floor(tick_locs.astype(np.float64) / reduce_factor)
                     logger.info('Map has been reduced from {} to {}'.format(full_size, _map.shape))
 
             _map = _map.toarray()

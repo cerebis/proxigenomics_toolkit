@@ -111,7 +111,7 @@ def inter_weight_matrix(g, sg, norm=True):
     nsub = len(sg)
     w = np.zeros((nsub, nsub))
     if norm:
-        n = np.zeros_like(w, dtype=np.int)
+        n = np.zeros_like(w, dtype=np.int64)
 
     # for each subgraph i
     for i in range(nsub):

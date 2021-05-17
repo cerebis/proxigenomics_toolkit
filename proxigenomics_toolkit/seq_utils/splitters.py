@@ -57,7 +57,7 @@ def simple_splitter(win_size, seq_file, out_file=None, threshold=0.333, fmt='fas
             if l > max_seq:
                 max_seq = l
 
-            n = int(l / win_size + threshold)
+            n = int(l // win_size + threshold)
             if n == 0:
                 n = 1
 

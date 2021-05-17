@@ -153,7 +153,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
                     seq_id, cl_id = int(t[seq_col]), int(t[cl_col])
                 cl_map.setdefault(cl_id, []).append(seq_id)
             for k in cl_map:
-                cl_map[k] = np.array(cl_map[k], dtype=np.int)
+                cl_map[k] = np.array(cl_map[k], dtype=np.int64)
             return cl_map
 
     def _read_tree(pathname):
@@ -180,7 +180,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
             # rename clusters and order descending in size
             desc_key = sorted(cl_map, key=lambda x: len(cl_map[x]), reverse=True)
             for n, k in enumerate(desc_key):
-                cl_map[n] = np.array(cl_map.pop(k), dtype=np.int)
+                cl_map[n] = np.array(cl_map.pop(k), dtype=np.int64)
 
         return cl_map
 
@@ -372,13 +372,13 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
 
             if len(_cov) > 0:
                 report = np.fromiter(zip(_len, _gc, _cov),
-                                     dtype=[('length', np.int),
-                                            ('gc', np.float),
-                                            ('cov', np.float)])
+                                     dtype=[('length', np.int64),
+                                            ('gc', np.float64),
+                                            ('cov', np.float64)])
             else:
                 report = np.fromiter(zip(_len, _gc),
-                                     dtype=[('length', np.int),
-                                            ('gc', np.float)])
+                                     dtype=[('length', np.int64),
+                                            ('gc', np.float64)])
 
             clustering[cl_id]['report'] = report
 
@@ -494,7 +494,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
         _map = _map.tocoo()
 
     # normalise weights, assuming strictly positive
-    scl = 1.0/_map.max() if scale else 1
+    scl = 1.0 / _map.max() if scale else 1
 
     logger.debug('Building graph from edges')
     g = nx.Graph(name='contact_graph')
@@ -671,14 +671,14 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
                 _oi = contact_map.order.order[clustering[k]['seq_ids']]
                 # count the cumulative bins at each cluster for those sequences which are not masked
                 csbins.extend(contact_map.grouping.bins[clustering[k]['seq_ids'][_oi['mask']]])
-            tick_locs = np.array(np.array(csbins).cumsum(), dtype=np.int)
+            tick_locs = np.array(np.array(csbins).cumsum(), dtype=np.int32)
         else:
             for k in cl_list:
                 # get the order records for the sequences in cluster k
                 _oi = contact_map.order.order[clustering[k]['seq_ids']]
                 # count the cumulative bins at each cluster for those sequences which are not masked
                 csbins.append(contact_map.grouping.bins[clustering[k]['seq_ids'][_oi['mask']]].sum() + csbins[-1])
-            tick_locs = np.array(csbins, dtype=np.int)
+            tick_locs = np.array(csbins, dtype=np.int32)
 
     if show_sequences:
         _labels = [contact_map.seq_info[si].name for cl_id in cl_list for si in clustering[cl_id]['seq_ids']]

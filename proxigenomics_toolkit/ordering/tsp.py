@@ -89,7 +89,7 @@ def similarity_to_distance(M, method, alpha=2, beta=1, headroom=1):
     logger.debug('Largest available integer: {:d}'.format(int(largest)))
 
     # copy input matrix and remove diagonal
-    M = M.astype(np.float)
+    M = M.astype(np.float64)
     np.fill_diagonal(M, 0)
 
     # remember where zeros were
@@ -152,7 +152,7 @@ def lkh_order(m, base_name, precision=1, lkh_exe=None, runs=None, seed=None, dis
     """
     if sparse.isspmatrix(m):
         m = m.toarray()
-    m = dist_func(m.astype(np.float))
+    m = dist_func(m.astype(np.float64))
 
     try:
         write_lkh(base_name, m, len(m), max_trials=2*len(m), runs=runs, seed=seed, fixed_edges=fixed_edges,

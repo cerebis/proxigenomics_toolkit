@@ -211,8 +211,8 @@ class SiteCounter(object):
             seq_len = len(seq)
             if seq_len < 2*self.tip_size:
                 # small contigs simply divide their extent in half
-                l_tip = seq[:seq_len/2]
-                r_tip = seq[-seq_len/2:]
+                l_tip = seq[:seq_len / 2]
+                r_tip = seq[-seq_len / 2:]
             else:
                 l_tip = seq[:self.tip_size]
                 r_tip = seq[-self.tip_size:]
@@ -281,8 +281,8 @@ class SiteCounter(object):
 
 class SequenceAnalyzer(object):
 
-    COV_TYPE = np.dtype([('index', np.int16), ('status', np.bool), ('node', np.float),
-                         ('local', np.float), ('fold', np.float)])
+    COV_TYPE = np.dtype([('index', np.int16), ('status', np.bool), ('node', np.float64),
+                         ('local', np.float64), ('fold', np.float64)])
 
     @staticmethod
     def read_report(file_name):

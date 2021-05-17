@@ -90,10 +90,12 @@ def downsample(m, block_size, method='mean'):
 
     # TODO using mean does not handle zero-padded edge effect on mean values
     if method == 'mean':
-        m = m.reshape((m.shape[0]/block_size, block_size, m.shape[1]/block_size, block_size)).sum(axis=(1, 3)).tocsr()
-        m *= 1.0/block_size**2
+        m = m.reshape((m.shape[0] // block_size, block_size,
+                       m.shape[1] // block_size, block_size)).sum(axis=(1, 3)).tocsr()
+        m *= 1.0 / block_size**2
     elif method == 'max':
-        m = m.reshape((m.shape[0]/block_size, block_size, m.shape[1]/block_size, block_size)).max(axis=(1, 3)).tocsr()
+        m = m.reshape((m.shape[0] // block_size, block_size,
+                       m.shape[1] // block_size, block_size)).max(axis=(1, 3)).tocsr()
 
     return m
 
@@ -245,7 +247,7 @@ class Sparse2DAccumulator(object):
 
     def __setitem__(self, index, value):
         assert len(index) == 2 and index[0] >= 0 and index[1] >= 0, 'invalid index: {}'.format(index)
-        assert isinstance(value, (int, np.int)), 'values must be integers'
+        assert isinstance(value, (int, np.int64)), 'values must be integers'
         self.mat[index] = value
 
     def __getitem__(self, index):
@@ -519,10 +521,10 @@ def compress_4d(_m, _mask):
         if _m.coords[0, i] in accept_index and _m.coords[1, i] in accept_index:
             keep_coords.append(_m.coords[:, i])
             keep_data.append(_m.data[i])
-    keep_coords = np.array(keep_coords, dtype=np.int).T
+    keep_coords = np.array(keep_coords, dtype=np.int64).T
 
     # remaining data needs adjustments to compensate for removed rows/column indices
-    shift = np.cumsum(~_mask, dtype=np.int)
+    shift = np.cumsum(~_mask, dtype=np.int64)
     keep_coords[:2, :] -= shift[keep_coords[:2, :]]
 
     # create new smaller matrix
@@ -557,6 +559,6 @@ def kr_biostochastic_4d(m4d, **kwargs):
     :return: a scaled matrix, scale-factors
     """
     # reduce to a 2D array, where we're summing the 2x2 submatrices
-    m2d = m4d.astype(np.float).sum(axis=(2, 3)).tocsr()
+    m2d = m4d.astype(np.float64).sum(axis=(2, 3)).tocsr()
     _, scl = kr_biostochastic(m2d, **kwargs)
-    return dotdot(m4d.astype(np.float), scl), scl
+    return dotdot(m4d.astype(np.float64), scl), scl
