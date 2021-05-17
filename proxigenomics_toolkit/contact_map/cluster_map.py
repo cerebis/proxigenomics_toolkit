@@ -929,7 +929,7 @@ def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clo
 
     def _next_informative(_bam_iter, _pbar):
         while True:
-            r = _bam_iter.next()
+            r = next(_bam_iter)
             _pbar.update()
             if not r.is_unmapped and not r.is_secondary and not r.is_supplementary:
                 return r

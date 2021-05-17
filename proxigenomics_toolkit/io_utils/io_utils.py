@@ -41,20 +41,21 @@ def load_object(file_name):
             return pickle.load(in_h, encoding='latin1')
 
 
-def open_input(file_name):
+def open_input(file_name, mode='rb'):
     """
     Open a text file for input. The filename is used to indicate if it has been
     compressed. Recognising gzip and bz2.
 
     :param file_name: the name of the input file
+    :param mode: file access mode
     :return: open file handle, possibly wrapped in a decompressor
     """
     suffix = file_name.split('.')[-1].lower()
     if suffix == 'bz2':
-        return bz2.BZ2File(file_name, 'rb')
+        return bz2.BZ2File(file_name, mode)
     elif suffix == 'gz':
-        return gzip.GzipFile(file_name, 'rb')
-    return open(file_name, 'rb')
+        return gzip.GzipFile(file_name, mode)
+    return open(file_name, mode)
 
 
 def open_output(file_name, append=False, compress=None):

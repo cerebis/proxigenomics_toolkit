@@ -769,7 +769,7 @@ class ContactMap(object):
 
         # build a dictionary of reference features
         fasta_info = {}
-        with io_utils.open_input(seq_file) as multi_fasta:
+        with io_utils.open_input(seq_file, 'rt') as multi_fasta:
             # get an estimate of sequences for progress
             fasta_count = count_fasta_sequences(seq_file)
             for n_seq, seqrec in tqdm.tqdm(enumerate(SeqIO.parse(multi_fasta, 'fasta')),
@@ -929,7 +929,7 @@ class ContactMap(object):
 
         def _next_informative(_bam_iter, _pbar):
             while True:
-                r = _bam_iter.next()
+                r = next(_bam_iter)
                 _pbar.update()
                 if r.is_unmapped or r.is_secondary or r.is_supplementary or r.is_duplicate:
                     continue
