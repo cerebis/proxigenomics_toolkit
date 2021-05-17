@@ -1142,7 +1142,7 @@ class ContactMap(object):
         # calculate the proportion of duplicate pair mappings and
         # a truncated histogram covering observed duplicates between 0 to 10+ times
         if self.no_duplicates:
-            map_count = np.bincount(pair_store.values(), minlength=11)
+            map_count = np.bincount(list(pair_store.values()), minlength=11)
             dupe_rate = map_count[2:].sum() / map_count.sum(dtype=np.float64)
             map_count[10] = map_count[10:].sum()
             del pair_store

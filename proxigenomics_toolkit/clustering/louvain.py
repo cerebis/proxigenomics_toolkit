@@ -19,7 +19,7 @@ def decompose_graph(g):
     """
     decomposed = []
     p = com.best_partition(g)
-    partition_labels = np.unique(p.values())
+    partition_labels = np.unique(list(p.values()))
 
     # for each partition, create the sub-graph
     for pi in partition_labels:
@@ -71,7 +71,7 @@ def cluster(g, no_iso, method=None, ragbag=False, verbose=False):
 
     # build a dictionary of classification from the partitioning result
     # this is effectively a hard clustering answer to the problem
-    com_ids = set(partitions.values())
+    com_ids = set(list(partitions.values()))
     logger.info('There were {0} communities in decomposition'.format(len(com_ids)))
 
     logger.info('Inverting partition map')

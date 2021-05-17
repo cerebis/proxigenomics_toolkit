@@ -83,7 +83,7 @@ def decompose_graph(g, reso=1.0):
 
     decomposed = []
     part = community.best_partition(g, resolution=reso)
-    part_labels = np.unique(part.values())
+    part_labels = np.unique(list(part.values()))
 
     # for each partition, create the sub-graph
     for pi in part_labels:
