@@ -858,19 +858,16 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
 
                 # iterate simply over sequence ids, while imposing ascending numerical order
                 for n, _seq_id in enumerate(np.sort(cl_info['seq_ids']), 1):
-
-                    # get the sequence's external name and length
-                    _name = seq_info[_seq_id].name
-                    _length = seq_info[_seq_id].length
+                    # fetch the SeqRecord object from the input fasta
+                    _name = seq_info[_oi['index']].name
                     # fetch the SeqRecord object from the input fasta
                     _seq = seq_db[_name]
-                    # orientations are listed as unknown
-                    _ori_symb = 'UNKNOWN'
-
-                    # add a new name and description
-                    _seq.id = '{0}_{1:0{2}d}'.format(cl_info['name'], n, num_width)
-                    _seq.name = _seq.id
-                    _seq.description = 'contig:{} ori:{} length:{}'.format(_name, _ori_symb, _length)
+                    # add a description
+                    _cl_desc = 'cluster:{}'.format(cl_info['name'])
+                    if _seq.description is None or not _seq.description.strip():
+                        _seq.description = _cl_desc
+                    else:
+                        _seq.description = '{} {}'.format(_seq.description, _cl_desc)
                     SeqIO.write(_seq, output_h, 'fasta')
 
             # write a separate ordered fasta as this is often a subset of all sequences
@@ -888,13 +885,10 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
 
                     # iterate over cluster members, in the determined order
                     for n, _oi in enumerate(cl_info['order'], 1):
-
-                        # get the sequence's external name and length
+                        # get the sequence's external name
                         _name = seq_info[_oi['index']].name
-                        _length = seq_info[_oi['index']].length
                         # fetch the SeqRecord object from the input fasta
                         _seq = seq_db[_name]
-
                         # reverse complement as needed
                         if _oi['ori'] == SeqOrder.REVERSE:
                             _seq = _seq.reverse_complement()
@@ -904,10 +898,12 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
                         else:
                             raise UnknownOrientationStateException(_oi['ori'])
 
-                        # add a new name and description
-                        _seq.id = '{0}_{1:0{2}d}'.format(cl_info['name'], n, num_width)
-                        _seq.name = _seq.id
-                        _seq.description = 'contig:{} ori:{} length:{}'.format(_name, _ori_symb, _length)
+                        # add a description
+                        _cl_desc = 'cluster:{} ori:{}'.format(cl_info['name'], _ori_symb)
+                        if _seq.description is None or not _seq.description.strip():
+                            _seq.description = _cl_desc
+                        else:
+                            _seq.description = '{} {}'.format(_seq.description, _cl_desc)
                         SeqIO.write(_seq, output_h, 'fasta')
 
 
