@@ -371,14 +371,14 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
                     'Did you declare the correct assembler?'
 
             if len(_cov) > 0:
-                report = np.array(zip(_len, _gc, _cov),
-                                  dtype=[('length', np.int),
-                                         ('gc', np.float),
-                                         ('cov', np.float)])
+                report = np.fromiter(zip(_len, _gc, _cov),
+                                     dtype=[('length', np.int),
+                                            ('gc', np.float),
+                                            ('cov', np.float)])
             else:
-                report = np.array(zip(_len, _gc),
-                                  dtype=[('length', np.int),
-                                         ('gc', np.float)])
+                report = np.fromiter(zip(_len, _gc),
+                                     dtype=[('length', np.int),
+                                            ('gc', np.float)])
 
             clustering[cl_id]['report'] = report
 

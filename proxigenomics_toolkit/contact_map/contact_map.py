@@ -20,9 +20,10 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import seaborn
 
-# package logger
+# logging setup
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.INFO)
+logging.getLogger("matplotlib").setLevel(logging.INFO)
 
 SeqInfo = namedtuple('SeqInfo', ['offset', 'refid', 'name', 'length', 'sites', 'gc'])
 
@@ -394,7 +395,7 @@ class SeqOrder(object):
         :return: INDEX_TYPE array
         """
         assert isinstance(_ord, (list, np.ndarray)), 'input must be a list or ndarray'
-        return np.array(list(zip(_ord, np.ones_like(_ord, dtype=np.bool))), dtype=SeqOrder.INDEX_TYPE)
+        return np.fromiter(zip(_ord, np.ones_like(_ord, dtype=np.bool)), dtype=SeqOrder.INDEX_TYPE)
 
     def _update_positions(self):
         """
@@ -586,7 +587,7 @@ class SeqOrder(object):
         """
         idx = np.where(self.order['mask'])
         ori = np.ones(self.count_accepted(), dtype=np.int)
-        return np.array(zip(idx, ori), dtype=SeqOrder.INDEX_TYPE)
+        return np.fromiter(zip(idx, ori), dtype=SeqOrder.INDEX_TYPE)
 
     def mask_vector(self):
         """
@@ -1856,8 +1857,8 @@ class ContactMap(object):
 
                 min_ticks = ticker.FixedLocator(tick_locs[:-1] + 0.5 * np.diff(tick_locs))
 
-                ax.yaxis.set_minor_formatter(min_labels)
                 ax.yaxis.set_minor_locator(min_ticks)
+                ax.yaxis.set_minor_formatter(min_labels)
 
             # seaborn will not display the grid, so we make our own.
             ax.hlines(tick_locs, *ax.get_xlim(), color='grey', linewidth=0.2, linestyle='-.')
