@@ -3,7 +3,10 @@ import pickle
 import gzip
 import json
 import io
+import logging
 import yaml
+
+logger = logging.getLogger(__name__)
 
 # default buffer for incremental read/write
 DEF_BUFFER = 16384
@@ -29,7 +32,13 @@ def load_object(file_name):
     :return: deserialzied object
     """
     with open_input(file_name) as in_h:
-        return pickle.load(in_h)
+        try:
+            return pickle.load(in_h)
+        except UnicodeError:
+            in_h.seek(0)
+            logger.warning('Error loading pickled object {}. '
+                           'Retrying assuming it was created under Python 2'.format(file_name))
+            return pickle.load(in_h, encoding='latin1')
 
 
 def open_input(file_name):
@@ -42,10 +51,10 @@ def open_input(file_name):
     """
     suffix = file_name.split('.')[-1].lower()
     if suffix == 'bz2':
-        return bz2.BZ2File(file_name, 'r')
+        return bz2.BZ2File(file_name, 'rb')
     elif suffix == 'gz':
-        return gzip.GzipFile(file_name, 'r')
-    return open(file_name, 'r')
+        return gzip.GzipFile(file_name, 'rb')
+    return open(file_name, 'rb')
 
 
 def open_output(file_name, append=False, compress=None):

@@ -394,7 +394,7 @@ class SeqOrder(object):
         :return: INDEX_TYPE array
         """
         assert isinstance(_ord, (list, np.ndarray)), 'input must be a list or ndarray'
-        return np.array(zip(_ord, np.ones_like(_ord, dtype=np.bool)), dtype=SeqOrder.INDEX_TYPE)
+        return np.array(list(zip(_ord, np.ones_like(_ord, dtype=np.bool))), dtype=SeqOrder.INDEX_TYPE)
 
     def _update_positions(self):
         """
