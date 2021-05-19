@@ -859,9 +859,7 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
                 # iterate simply over sequence ids, while imposing ascending numerical order
                 for n, _seq_id in enumerate(np.sort(cl_info['seq_ids']), 1):
                     # fetch the SeqRecord object from the input fasta
-                    _name = seq_info[_oi['index']].name
-                    # fetch the SeqRecord object from the input fasta
-                    _seq = seq_db[_name]
+                    _seq = seq_db[seq_info[_seq_id].name]
                     # add a description
                     _cl_desc = 'cluster:{}'.format(cl_info['name'])
                     if _seq.description is None or not _seq.description.strip():
