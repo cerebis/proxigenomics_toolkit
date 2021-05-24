@@ -3,8 +3,10 @@ from ..misc_utils import package_path, make_dir
 from ..seq_utils import IndexedFasta
 from ..exceptions import *
 from .contact_map import SeqOrder
+from collections import defaultdict
 from typing import Optional
 import Bio.SeqIO as SeqIO
+import Bio.SeqUtils as SeqUtils
 import decimal
 import contextlib
 import logging
@@ -88,7 +90,7 @@ def add_cluster_names(clustering, prefix='CL'):
 
 
 def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
-                exclude_names=None, norm_method='sites'):
+                exclude_names=None, norm_method='sites', append_singletons=True):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -99,6 +101,8 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
     :param n_iter: for method supporting iterations, specify a non-default number
     :param exclude_names: a collection of sequence identifiers to exclude when clustering
     :param norm_method: noramlisation method to apply to contact map
+    :param append_singletons: append additional clusters for isolated sequences not subjected
+    to clustering.
     :return: a dictionary detailing the full clustering of the contact map
     """
 
@@ -135,7 +139,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
         """
         assert seq_col != cl_col, 'sequence and cluster columns must be different'
         with open(pathname, 'r') as h_in:
-            cl_map = {}
+            cl_map = defaultdict(list)
             n = 0
             for line in h_in:
                 line = line.strip()
@@ -151,7 +155,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
                         logger.warning('invalid line encountered when reading cluster table: {}'.format(line))
 
                     seq_id, cl_id = int(t[seq_col]), int(t[cl_col])
-                cl_map.setdefault(cl_id, []).append(seq_id)
+                cl_map[cl_id].append(seq_id)
             for k in cl_map:
                 cl_map[k] = np.array(cl_map[k], dtype=np.int64)
             return cl_map
@@ -164,7 +168,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
         :return: dict of cluster_id to array of seq_ids
         """
         with open(pathname, 'r') as in_h:
-            cl_map = {}
+            cl_map = defaultdict(list)
             for line in in_h:
                 line = line.strip()
                 if not line:
@@ -172,10 +176,9 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
                 if line.startswith('#'):
                     continue
                 fields = line.split()
-                hierarchy = fields[0].split(':')
-                # take everything in the cluster assignment string except for the final token,
-                # which is the object's id within the cluster.
-                cl_map.setdefault(tuple(['orig'] + hierarchy[:-1]), []).append(fields[-1])
+                # the cluster is identified by the first N-1 terms in the label (: delimited)
+                _cl_id = fields[0][:fields[0].rindex(':')]
+                cl_map[_cl_id].append(fields[-1])
 
             # rename clusters and order descending in size
             desc_key = sorted(cl_map, key=lambda x: len(cl_map[x]), reverse=True)
@@ -238,10 +241,7 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
         elif method == 'infomap':
             with open(os.path.join(work_dir, 'infomap.log'), 'w+') as stdout:
                 edge_file = _write_edges(g, work_dir, base_name)
-
-                # v0.19.25
-                # options = ['-u', '-v', '-z', '-i', 'link-list', '-s', str(seed)]
-                # v1.3.0
+                # Infomap v1.3.0 interface
                 options = ['--flow-model', 'undirected', '--verbose', '--seed', str(seed)]
                 if n_iter is None:
                     n_iter = 10
@@ -288,6 +288,17 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
             # TODO add other details for clusters here
             # - residual modularity, permanence
         }
+
+    # append singletons
+    if append_singletons:
+        lost_seq = find_lost_singletons(contact_map, clustering)
+        for cl_id, _seq in enumerate(lost_seq, start=len(clustering)):
+            clustering[cl_id] = {
+                'seq_ids': np.array([_seq]),
+                'extent': contact_map.seq_info[_seq].length
+            }
+        logger.info('Appended {} isolated sequences as singleton clusters'.format(len(lost_seq)))
+        logger.info('Total cluster count now {}'.format(len(clustering)))
 
     # reestablish clusters in descending order of extent
     sorted_keys = sorted(clustering, key=lambda k: clustering[k]['extent'], reverse=True)
@@ -347,19 +358,32 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             _len = []
             _cov = []
             _gc = []
+            _missing_gc = 0
             for n, _seq_id in enumerate(np.sort(cl_info['seq_ids']), 1):
+
+                # TODO we could easily have collected much of this information beforehand,
+                #      This would require supplying missing coverage infomration at mkmap time.
+
                 # get the sequence's external name and length
                 _name = seq_info[_seq_id].name
-                _len.append(seq_info[_seq_id].length)
-                _gc.append(seq_info[_seq_id].gc)
 
                 # fetch the SeqRecord object from the input fasta
-                # TODO we could easily have collected this information beforehand,
-                #      at the same time as length, sites and GC. This will require
-                #      users supply missing coverage infomration at mkmap time.
                 _seq = seq_db[_name]
+
+                _len.append(seq_info[_seq_id].length)
+                try:
+                    _gc_i = seq_info[_seq_id].gc
+                except IndexError:
+                    _missing_gc += 1
+                    # handle older contact maps without GC data in seq_info
+                    _gc_i = SeqUtils.GC(_seq.seq)
+                _gc.append(_gc_i)
+
                 if depth_extractor is not None:
                     _cov.append(depth_extractor(_seq))
+
+            if _missing_gc > 0:
+                logger.warning('GC values missing from {} records were recovered from FASTA sequences'.format(_missing_gc))
 
             if depth_extractor is None:
                 assert len(_len) == len(_gc), \
@@ -759,6 +783,21 @@ def write_report(fname, clustering):
     df.to_csv(fname, sep=',')
 
 
+def find_lost_singletons(contact_map, clustering):
+    """
+    Return the seq_ids of any sequence which was excluded from clustering. These sequences
+    will have been excluded for being too or with too few Hi-C observations.
+
+    :param contact_map: the contact map in question
+    :param clustering: a clustering solution for this contact map.
+    :return: the sequence ids for each excluded sequence.
+    """
+    _lost = np.ones(contact_map.total_seq, dtype=np.bool)
+    for k, v in clustering.items():
+        _lost[v['seq_ids']] = False
+    return np.where(_lost)[0]
+
+
 def write_mcl(contact_map, fname, clustering):
     """
     Write out the clustering solution in the format used by MCL. Each line represents a cluster
@@ -770,18 +809,9 @@ def write_mcl(contact_map, fname, clustering):
     """
     with open(fname, 'w') as outh:
         seq_info = contact_map.seq_info
-        # track those sequences that were rejected during filtering
-        lost = np.ones(contact_map.total_seq, dtype=np.bool)
         cl_soln = {}
         for k, v in clustering.items():
-            # sequence wasn't lost to filtering
-            lost[v['seq_ids']] = False
             cl_soln[k] = [seq_info[ix].name for ix in np.sort(v['seq_ids'])]
-
-        # create singleton clusters for all the lost sequences.
-        # if these are left out, scoring measures aren't happy
-        for n, ix in enumerate(np.argwhere(lost), len(cl_soln)):
-            cl_soln[n] = [seq_info[ix[0]].name]
 
         clid_ascending = sorted(cl_soln.keys())
         for k in clid_ascending:
