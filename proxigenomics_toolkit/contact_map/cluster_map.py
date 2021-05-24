@@ -757,6 +757,7 @@ def write_report(fname, clustering):
                         v['name'],
                         len(v['seq_ids']),
                         v['extent'],
+                        v['rescue'],
                         _n50(sr['length']),
                         _expect(sr['length'], sr['gc']),
                         sr['gc'].mean(),
@@ -776,7 +777,7 @@ def write_report(fname, clustering):
         except KeyError:
             raise NoReportException(k)
 
-    _cols = ['id', 'name', 'size', 'extent', 'n50', 'gc_expect', 'gc_mean', 'gc_median', 'gc_std']
+    _cols = ['id', 'name', 'size', 'extent', 'rescued', 'n50', 'gc_expect', 'gc_mean', 'gc_median', 'gc_std']
     if has_cov:
         _cols.extend(['cov_expect', 'cov_mean', 'cov_median', 'cov_std'])
 
