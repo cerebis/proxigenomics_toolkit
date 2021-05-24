@@ -284,7 +284,8 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
 
         clustering[cl_id] = {
             'seq_ids': _seqs,
-            'extent': contact_map.order.lengths()[_seqs].sum()
+            'extent': contact_map.order.lengths()[_seqs].sum(),
+            'rescue': False
             # TODO add other details for clusters here
             # - residual modularity, permanence
         }
@@ -295,7 +296,8 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
         for cl_id, _seq in enumerate(lost_seq, start=len(clustering)):
             clustering[cl_id] = {
                 'seq_ids': np.array([_seq]),
-                'extent': contact_map.seq_info[_seq].length
+                'extent': contact_map.seq_info[_seq].length,
+                'rescue': True
             }
         logger.info('Appended {} isolated sequences as singleton clusters'.format(len(lost_seq)))
         logger.info('Total cluster count now {}'.format(len(clustering)))
@@ -585,7 +587,7 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
 
     # start with all clusters if unspecified
     if cl_list is None:
-        cl_list = clustering.keys()
+        cl_list = [k for k, v in clustering.items() if 'rescue' not in v or not v['rescue']]
 
     # use instance criterion if not explicitly set
     if min_extent is None:
