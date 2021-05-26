@@ -179,12 +179,9 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
                 # which is the object's id within the cluster.
                 cl_map.setdefault(tuple(['orig'] + hierarchy[:-1]), []).append(fields[-1])
 
-            # rename clusters and order descending in size
-            desc_key = sorted(cl_map, key=lambda x: len(cl_map[x]), reverse=True)
-            for n, k in enumerate(desc_key):
-                cl_map[n] = np.array(cl_map.pop(k), dtype=np.int)
-
-        return cl_map
+        # rename clusters and order them in descending size (number of members in each cluster)
+        return {n: np.array(v, dtype=np.int64)
+                for n, v in enumerate(sorted(cl_map.values(), key=lambda x: len(x), reverse=True))}
 
     def _write_edges(g, parent_dir, base_name, sep=' ', precision=16):
         """
