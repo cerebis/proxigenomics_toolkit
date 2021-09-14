@@ -1843,7 +1843,7 @@ class ContactMap(object):
             _map = np.log(_map + alpha)
 
             logger.debug('Making raster image')
-            seaborn.heatmap(_map, robust=robust, square=True, linewidths=0, ax=ax, cbar=False)
+            plt.imshow(_map, cmap=seaborn.color_palette("rocket", as_cmap=True), interpolation=None)
 
         if tick_locs is not None:
 
@@ -1860,9 +1860,9 @@ class ContactMap(object):
                 ax.yaxis.set_minor_locator(min_ticks)
                 ax.yaxis.set_minor_formatter(min_labels)
 
-            # seaborn will not display the grid, so we make our own.
-            ax.hlines(tick_locs, *ax.get_xlim(), color='grey', linewidth=0.2, linestyle='-.')
-            ax.vlines(tick_locs, *ax.get_ylim(), color='grey', linewidth=0.2, linestyle='-.')
+            ax.yaxis.set_major_locator(ticker.FixedLocator(tick_locs))
+            ax.xaxis.set_major_locator(ticker.FixedLocator(tick_locs))
+            ax.grid(True, which='major', axis='both', color='grey', linewidth=0.2, linestyle='-.')
 
         logger.debug('Saving plot')
         fig.tight_layout()
