@@ -52,9 +52,9 @@ def open_input(file_name, mode='rb'):
     """
     suffix = file_name.split('.')[-1].lower()
     if suffix == 'bz2':
-        return bz2.BZ2File(file_name, mode)
+        return bz2.open(file_name, mode)
     elif suffix == 'gz':
-        return gzip.GzipFile(file_name, mode)
+        return gzip.open(file_name, mode)
     return open(file_name, mode)
 
 
