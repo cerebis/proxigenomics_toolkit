@@ -1443,13 +1443,13 @@ class ContactMap(object):
 
         return _map
 
-    def extent_to_seq(self):
+    def extent_to_seq(self, agg_func=np.sum):
         """
         Convert the extent map into a single-pixel per sequence "seq_map". This method
         is useful when only a tip based seq_map has been produced, and an analysis would be
         better done on a full accounting of mapping interactions across each sequences full
         extent.
-
+        :param agg_func: aggregation function (default sum). Needs to act on numpy arrays
         :return: a seq_map representing all counts across each sequence
         """
         _map = self.extent_map.tocsr()
@@ -1465,7 +1465,7 @@ class ContactMap(object):
             b0 = 0
             for j in range(i, len(_bins)):
                 b1 = _cbins[j]
-                mij = row_i[:, b0:b1].sum()
+                mij = agg_func(row_i[:, b0:b1])
                 if mij == 0:
                     continue
                 _out[i, j] = int(mij)
