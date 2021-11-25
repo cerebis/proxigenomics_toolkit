@@ -1,3 +1,4 @@
 include proxigenomics_toolkit/external/mcl
 include proxigenomics_toolkit/external/ModularityOptimizer.jar
 include proxigenomics_toolkit/external/simap-1.0.0.jar
+include proxigenomics_toolkit/contact_map/model_fit.R

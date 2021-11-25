@@ -546,25 +546,42 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
 
     # disconnect any node mentioned in exclusion list
     if exclude_names:
+        assert node_id_type == 'internal', 'Exclusion only supports graphs using internal node ids'
+
+        logger.info('Before exclusion: {:,} nodes, {:,} edges'.format(g.order(), g.size()))
+
         # do this one at a time so we can report about missing ids
-        name_to_seqid = contact_map.make_reverse_index('name')
+        name_to_matindex = {contact_map.seq_info[_id].name: _ix for _ix, _id in enumerate(_to_seqid)}
         n_failed = 0
+        n_missing = 0
+        n_removed_edges = 0
         for _name in exclude_names:
-            u = name_to_seqid[_name]
+            try:
+                u = name_to_matindex[_name]
+            except KeyError as ex:
+                logger.debug('while excluding nodes from clustering, no sequence named {} found'.format(_name))
+                n_missing += 1
+                continue
             # pedantically check that this mess of cross-referencing is valid.
-            assert contact_map.seq_info[u].name == _name, 'Conflict between name records'
+            #assert contact_map.seq_info[u].name == _name, 'Conflict between name records'
             if not g.has_node(u):
                 logger.debug('disconnecting {} failed as no corresponding node in graph'.format(_name))
                 n_failed += 1
                 continue
-            g.remove_edges_from([(u, v) for v in g.neighbors(u)])
+            to_remove = [(u, v) for v in g.neighbors(u)]
+            n_removed_edges += len(to_remove)
+            g.remove_edges_from(to_remove)
+        if n_missing > 0:
+            logger.warning('{} sequences mentioned for clustering exclusion were not found'.format(n_missing))
         if n_failed > 0:
             logger.warning('{} nodes were not found during exclusion'.format(n_failed))
         if n_failed == len(exclude_names):
-            logger.warning('None of excluded_ids were found in graph. '
-                           'They must be of type "node_type_id"')
+            logger.warning('None of excluded sequences were found in graph. '
+                           'Check that you did not mix datasets or garble excluded id list"')
+        if n_removed_edges > 0:
+            logger.info('Excluded sequences resulted in the deletion of {:,} edges'.format(n_removed_edges))
 
-    logger.info('Finished: {}'.format(nx.info(g).replace('\n', ' ')))
+    logger.info('Final graph: {:,} nodes, {:,} edges'.format(g.order(), g.size()))
 
     return g
 

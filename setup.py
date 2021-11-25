@@ -134,7 +134,8 @@ setup(
 
     setup_requires=['numpy', 'cython'],
 
-    install_requires=['biopython',
+    install_requires=['astropy',
+                      'biopython',
                       'matplotlib',
                       'networkx',
                       'numba',
@@ -143,9 +144,12 @@ setup(
                       'python-louvain',
                       'pysam',
                       'PyYAML',
+                      'rpy2',
                       'scipy',
                       'seaborn',
+                      'scikit-learn',
                       'sparse',
+                      'statsmodels',
                       'tqdm',
                       'typing',
                       'llvmlite',
