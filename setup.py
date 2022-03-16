@@ -103,7 +103,7 @@ setup(
 
     setup_requires=['numpy<1.15.0'],
 
-    install_requires=['biopython',
+    install_requires=['biopython<1.77',
                       'matplotlib<3',
                       'networkx<2',
                       'numba<=0.42.0',
