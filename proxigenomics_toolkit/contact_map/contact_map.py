@@ -1371,7 +1371,8 @@ class ContactMap(object):
             _map, scl = self._bisto_seq(_map)
             # retain the scale factors
             self.bisto_scale = scl
-            logger.debug('Map balanced')
+            qlo, qmed, qhi = np.quantile(scl, q=[0.025,0.5,0.975])
+            logger.debug(f'Map balanced, scale factor range median:{qmed:.3f}, 95%:[{qlo:.3f},{qhi:.3f}]')
 
         # cache the results for optional quick access
         self.processed_map = _map
@@ -1484,7 +1485,8 @@ class ContactMap(object):
         # make map bistochastic if requested
         if bisto:
             _map, scl = sparse_utils.kr_biostochastic(_map, delta=1e-3, Delta=1e2, tol=1e-8, max_iter=10000)
-            logger.debug('Map balanced')
+            qlo, qmed, qhi = np.quantile(scl, q=[0.025,0.5,0.975])
+            logger.debug(f'Map balanced, scale factor range median:{qmed:.3f}, 95%:[{qlo:.3f},{qhi:.3f}]')
 
         if add_blocks:
             # _edge_weight = 0.01 * np.median(_map.data)
@@ -1586,7 +1588,7 @@ class ContactMap(object):
         if self.is_tipbased():
             _map, scl = sparse_utils.kr_biostochastic_4d(_map)
         else:
-            _map, scl = sparse_utils.kr_biostochastic(_map)
+            _map, scl = sparse_utils.kr_biostochastic(_map, delta=1e-3, Delta=1e2, tol=1e-8, max_iter=10000)
         return _map, scl
 
     def _get_sites(self):

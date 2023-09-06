@@ -165,6 +165,7 @@ def kr_biostochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
 
     rk = 1 - v
     rho_km1 = rk.T.dot(rk)  # transpose possibly implicit
+    rho_km2 = 1
     rout = rho_km1
     rold = rout
 
@@ -178,7 +179,6 @@ def kr_biostochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
         y[:] = e
 
         inner_tol = max(rout * eta ** 2, rt)
-
         while rho_km1 > inner_tol:
 
             k += 1
@@ -217,8 +217,8 @@ def kr_biostochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
             Z = rk * v
             rho_km1 = np.dot(rk.T, Z)
 
-            if np.any(np.isnan(x)):
-                raise RuntimeError('scale vector has developed invalid values (NANs)!')
+            if np.any(np.isnan(x)) or np.any(np.isinf(x)):
+                raise RuntimeError('scale vector has developed invalid values (NAN or Inf)!')
 
         x *= y
         v = x * m.dot(x)
