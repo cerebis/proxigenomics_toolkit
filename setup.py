@@ -123,7 +123,7 @@ setup(
     zip_safe=False,
 
     ext_modules=[TarballExtension('infomap',
-                                  'https://github.com/mapequation/infomap/tarball/v1.3.0',
+                                  'https://github.com/mapequation/infomap/tarball/v2.7.1',
                                   'Infomap'),
                  TarballExtension('lkh',
                                   'https://github.com/cerebis/LKH3/tarball/master',
@@ -136,8 +136,9 @@ setup(
 
     install_requires=['astropy',
                       'biopython',
+                      'gfa_io @ git+https://github.com/cerebis/gfa_io#egg=gfa_io-99',
                       'matplotlib',
-                      'networkx',
+                      'networkx>=3.1',
                       'numba',
                       'numpy',
                       'pandas',

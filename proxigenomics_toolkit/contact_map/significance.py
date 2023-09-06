@@ -1,6 +1,6 @@
+from ..exceptions import InvalidSequenceException
 import logging
-from collections import Counter, namedtuple
-from collections import defaultdict
+from collections import Counter, namedtuple, OrderedDict, defaultdict
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -42,14 +42,14 @@ def sequence_details(contact_map, coverage_info, clustering):
     seq_info = pandas.DataFrame(seq_info).drop(['refid', 'offset'], axis=1)
     seq_info.index.name = 'seq_id'
 
-    # 3. prepare a lookup table from seq_id to sequence length and number of sites
-    # - this is used for removing the contribution of an excluded
-    #   sequence from its cluster.
-    _ix2info = seq_info.loc[:, ['length', 'sites']].to_dict(orient='records')
-
-    # 4. join the table of coverage, using sequence name as the key
+    # 3. join the table of coverage, using sequence name as the key
     seq_info = seq_info.reset_index(drop=False)
     seq_info = seq_info.set_index('name', drop=False).join(coverage_info)
+
+    # 4. prepare a lookup table from seq_id to sequence length and number of sites
+    # - this is used for removing the contribution of an excluded
+    #   sequence from its cluster.
+    _ix2info = seq_info.set_index('seq_id').loc[:, ['length', 'sites', 'gc', 'coverage']].to_dict(orient='records')
 
     # create a cluster id column, with isolated sequences assigned -1
     _nm2cl = [(contact_map.seq_info[_si].name, _cl) for _cl, _d in clustering.items() for _si in _d['seq_ids']]
@@ -66,7 +66,7 @@ def sequence_details(contact_map, coverage_info, clustering):
     return seq_info, _ix2info, _id2cl
 
 
-def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_length):
+def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_length, tidy=True):
     """
     Create bipartite graph
 
@@ -74,6 +74,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_len
     :param clustering:
     :param coverage_info:
     :param min_seq_length:
+    :param tidy: remove collections of member attributes
     :return:
     """
 
@@ -105,7 +106,6 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_len
     # Steps in building the graph
     # 1. add cluster nodes
     # 2. add sequence nodes
-    # 3. accumulate sequence-->cluster edges as follows:
     #   a. for all sequences u:
     #   b.   for all sequences ui which interact with (are neighbors of) the source node u
     #   c.     find the owning cluster for neighbour sequence ui, which becomes the destination node v
@@ -121,78 +121,104 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_len
         nattr['bipartite'] = 0
         g.add_node(('c', _cl), **nattr)
 
+    def validate_sequence(ix, track_removed=False):
+        """
+        Check that a sequence belongs to a cluster and is sufficiently long. In addition, the
+        method keeps track of accepted/rejected sequences and their attributes for each cluster.
+        This is later used to calculate updated cluster attributes. As a consequence, this methods
+        modifies nodes within the graph.
+        :ix: sequence index
+        :track_removed: when true, attributes of removed sequences are stored with each cluster node
+        :return: cluster_id
+        :raise: InvalidSequenceException for rejected sequences
+        """
+        cl = _ix2cl[ix]
+        if cl == -1:
+            no_clust.add(ix)
+            raise InvalidSequenceException
+
+        cluster_id = ('c', cl)
+        assert g.has_node(cluster_id), f'cluster node {cluster_id} is missing from graph'
+
+        if ix in removed_seqs:
+            raise InvalidSequenceException
+
+        info = _ix2info[ix]
+        if info['length'] < min_seq_length:
+            if track_removed:
+                cl_node = g.nodes[cluster_id]
+                cl_node.setdefault('removed', {})[ix] = info
+            removed_seqs.add(ix)
+            raise InvalidSequenceException
+
+        cl_node = g.nodes[cluster_id]
+        cl_node.setdefault('members', {})[ix] = info
+
+        return cluster_id
+
     # create sequence nodes and link to clusters through Hi-C interactions
     # where their ids follow the syntax "('n', int)"
     removed_seqs = set()
-    no_clust = 0
+    no_clust = set()
     # we will iterate over sequences using the table of per-sequence annotation details
     seq_info_array = seq_info.loc[:, ['seq_id', 'name', 'length', 'sites', 'coverage', 'gc', 'cluster']].values
     for _si, _name, _len, _sites, _cov, _gc, _clust in tqdm.tqdm(seq_info_array):
-        # sequence node definition with attributes
-        nattr = {'name':  _name,
-                 'length': _len,
-                 'sites': _sites,  # assign 1 site to those sequences with 0
-                 'coverage': _cov,  # flye can report 0 depth on assembly graph segments
-                 'membership': _clust,
-                 'gc': _gc,
-                 'bipartite': 1}
-        node_id = ('n', _name)
-        g.add_node(node_id, **nattr)
 
-        # get interactions between this sequence (i) and any other sequence in the map (j)
+        try:
+            validate_sequence(_si)
+
+            # sequence node definition with attributes
+            node_from = ('n', _name)
+            nattr = {'name':  _name,
+                     'length': _len,
+                     'sites': _sites,  # assign 1 site to those sequences with 0
+                     'coverage': _cov,  # flye can report 0 depth on assembly graph segments
+                     'membership': _clust,
+                     'gc': _gc,
+                     'bipartite': 1}
+            g.add_node(node_from, **nattr)
+
+        except InvalidSequenceException:
+            continue
+
+        # iterate over all interactions between sequence _si and any other sequence in the map _sj
         _contacts = _map[_si].tocoo()
         for _sj, _contacts_ij in zip(_contacts.col, _contacts.data):
 
-            # lookup cluster of destination sequence (j)
-            _cl_j = _ix2cl[_sj]
+            try:
+                cluster_to = validate_sequence(_sj)
 
-            # we are only interested in interactions between (i) and
-            # the defined clusters, therefore continue to the next
-            # sequence if (j) is an isolate (not a member of a cluster)
-            #
-            # TODO there is the possibility of (j) being a complete genome
-            #      and therefore a legitimate cluster of size 1.
-            if _cl_j == -1:
-                no_clust += 1
+                # add the edge if new
+                if not g.has_edge(node_from, cluster_to):
+                    g.add_edge(node_from, cluster_to, contacts=0)
+
+                # accumulate these new contacts between sequence and members of cluster
+                # - this comes into effect when a sequence interacts with many sequences in
+                #   the same cluster.
+                g[node_from][cluster_to]['contacts'] += _contacts_ij
+            except InvalidSequenceException:
                 continue
 
-            # cluster membership
-            cluster_id = ('c', _cl_j)
-            assert g.has_node(cluster_id), 'incomplete graph'
-
-            # TODO ** add more justification for why we ignore short sequences in clusters **
-
-            # don't consider the link (i,j) when j is too short.
-            # also remove j's contribution to its cluster
-
-            info_j = _ix2info[_sj]
-            if _sj in removed_seqs:
-                continue
-            elif info_j['length'] < min_seq_length:
-                # since we're skipping it, delete its contribution from cluster -- HMMM! am I sure?
-                # - one answer to this is in the limit, what does it mean to ignore nearly all of a cluster
-                #   and yet use the original totality in later calculations of length, # sites, etc.
-                # - note also that we have not recalculated GC or coverage after removal !! ** !!
-                v = g.nodes[cluster_id]
-                v['length'] -= info_j['length']
-                v['sites'] -= info_j['sites']
-                v['size'] -= 1
-                removed_seqs.add(_sj)
-                continue
-
-            # add the edge if new
-            if not g.has_edge(node_id, cluster_id):
-                g.add_edge(node_id, cluster_id, contacts=0)
-
-            # accumulate these new contacts between sequence and members of cluster
-            # - this comes into effect when a seaquence interacts with many sequences in
-            #   the same cluster.
-            g[node_id][cluster_id]['contacts'] += _contacts_ij
+    # update cluster nodes to reflect loss of rejected sequences
+    cluster_nodes = [u for u in g.nodes() if u[0] == 'c']
+    for u in cluster_nodes:
+        if 'members' in g.nodes[u]:
+            df_attribs = pandas.DataFrame(g.nodes[u]['members']).T
+            g.nodes[u].update({'size': len(df_attribs),
+                               'length': df_attribs.length.sum(),
+                               'sites': df_attribs.sites.sum(),
+                               'gc': (df_attribs.gc * df_attribs.length / df_attribs.length.sum()).sum(),
+                               'coverage': (df_attribs.coverage * df_attribs.length / df_attribs.length.sum()).sum()})
+            if tidy:
+                del g.nodes[u]['members']
+        if tidy and 'removed' in g.nodes[u]:
+            del g.nodes[u]['removed']
 
     logger.info('{:,} sequences were too short to be destinations (< {:,} bp)'.format(
         len(removed_seqs), min_seq_length))
     logger.info('{:,} inter-sequence associations did not involve a cluster'.format(
-        no_clust))
+        len(no_clust)))
+
     return g
 
 
@@ -260,10 +286,10 @@ def simple_spurious_estimation(seq2cl_graph):
 
 def calculate_rejection_thresholds(seq2cl_graph, prob_outlier=0.98):
     """
-    Calculate the rejection threshold for interacting sequences, whose characteristics would
-    suggest that they are very likely to non-spurious interactions. Here, we consider the ratio of
+    Calculate the rejection threshold for observed interacting sequences, whose characteristics would
+    suggest that they are likely to be significant (true) interactions. Here, we consider the ratio of
     contacts to number of sites (cps) and length to number of sites (lps). High values of either
-    quantity indicates sequences which statistical we would expect to interact strongly. These sequences
+    quantity indicates sequences which statistically we would expect to interact strongly. These sequences
     are often long, abundant and with high density of sites.
 
     :param seq2cl_graph: the bipartite sequence to cluster graph
@@ -322,11 +348,11 @@ def calculate_rejection_thresholds(seq2cl_graph, prob_outlier=0.98):
     return cps_max, lps_max
 
 
-def zeros_to_ones(df, columns):
+def fill_zeros(df, columns, value):
     for cn in columns:
         zix = df[cn] == 0
-        logger.info('For {} replacing {} zeros with ones'.format(cn, zix.sum()))
-        df.loc[zix, cn] = 1
+        logger.info('For {} replacing {} zeros with {}'.format(cn, zix.sum(), value))
+        df.loc[zix, cn] = value
 
 
 def rmatrix2pandas(_rmat):
@@ -351,6 +377,25 @@ def rvector2dict(_rvec):
     :return: dictionary
     """
     return dict(_rvec.items())
+
+
+def robust_read_csv(csv_name, sep=','):
+    """
+    Read CSV file whether or not it has a header. If a non-numeric row-0 is
+    found, drop it from the table.
+
+    :param csv_name: csv file name
+    :param sep: separator used
+    :return: pandas.DataFrame
+    """
+    _col_def = OrderedDict({'name': str, 'coverage': np.float64})
+    try:
+        df = pandas.read_csv(csv_name, header=None, sep=sep, names=list(_col_def), dtype=_col_def)
+        pandas.to_numeric(df.iloc[0])
+    except ValueError:
+        # first row was not numeric, re-read assuming the CSV file had a header
+        df = pandas.read_csv(csv_name, sep=sep, skiprows=1, names=list(_col_def), dtype=_col_def)
+    return df
 
 
 class SignificantLinks(object):
@@ -381,12 +426,10 @@ class SignificantLinks(object):
         robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
         return robjects.globalenv[func_name]
 
-    def create_seq2cluster_graph(self, seq_col=0, cov_col=1, sep=',', min_seq_length=5000):
+    def create_seq2cluster_graph(self, sep=',', min_seq_length=5000):
         """
-        Create the bipartite graph between sequences as genome_bins (clusters).
+        Create the bipartite graph between sequences and genome_bins (clusters).
 
-        :param seq_col: seq_id column integer index
-        :param cov_col: coverage column integer index
         :param sep: variable separator for csv file
         :param min_seq_length: minimum length for a sequence to be considered
         :return:
@@ -396,9 +439,7 @@ class SignificantLinks(object):
         clustering = load_object(self.clustering_file)
 
         logger.info('Extracting coverage info')
-        coverage_info = pandas.read_csv(
-            self.coverage_file, header=None, sep=sep).iloc[:, [seq_col, cov_col]].rename(
-            columns={seq_col: 'seq_name', cov_col: 'coverage'}).set_index('seq_name')
+        coverage_info = robust_read_csv(self.coverage_file, sep=sep).set_index('name')
 
         logger.info('Creating bipartite graph between clusters and sequences')
         seq2cl_graph = create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_length)
@@ -550,14 +591,14 @@ class SignificantLinks(object):
         logger.info('After outlier filtering, {:,} observations passed'.format(len(self.spurious)))
 
     def create_spurious_table(self, min_bin_size=5, min_bin_length=100000,
-                              min_single_length=1000000, big_threshold=0.8):
+                              min_single_length=1000000, big_threshold=0.8, small_value=1):
 
         # begin with a copy, since we will make some inplace changes
         spurious = self.all_contacts.copy()
 
-        # upgrade zeros to ones when they occur in certain columns
-        # TODO check why Flye does this. Should we be dropping them instead?
-        zeros_to_ones(spurious, ['cov_v', 'cov_u', 'sites_v', 'sites_u'])
+        # Replace zeros with a small value when they occur in certain columns
+        # TODO check why Flye reports zero coverage occasionally. Should we be dropping them instead?
+        fill_zeros(spurious, ['cov_v', 'cov_u', 'sites_v', 'sites_u'], small_value)
 
         # initial mask accepts all interactions
         ix_accepted = pandas.Series(np.ones(len(spurious), dtype='bool'))
@@ -569,12 +610,12 @@ class SignificantLinks(object):
             ix_accepted &= ~ix_big_member
 
         ix_short_bin = spurious['length_v'] < min_bin_length
-        logger.info('{:,} observations involved a very short bin (<{:,} bp)'.format(
+        logger.info('{:,} observations involved a bin of very short extent (<{:,} bp)'.format(
             ix_short_bin.sum(), min_bin_length))
         ix_accepted &= ~ix_short_bin
 
         ix_small_bin = spurious['size_v'] < min_bin_size
-        logger.info('{:,} observations involved a very small bin (<{} members)'.format(
+        logger.info('{:,} observations involved a bin with very few members (<{} members)'.format(
             ix_small_bin.sum(), min_bin_size))
         ix_accepted &= ~ix_small_bin
 
@@ -607,7 +648,7 @@ class SignificantLinks(object):
         Estimate the parameters of a Zero-Inflated Negative Binomial model for the interactions
         involving contigs and genome_bins for which the contigs are suspected of _not_ belonging.
         The dominant form of these interactions _should_ be spurious. To maximise the proportion,
-        outlier rejection is use to remove strong interactions -- identified as those where
+        outlier rejection is used to remove strong interactions -- identified as those where
         contacts/(site_u*site_v) or contacts/(cov_u*cov_v) is large.
 
         Exogenous variables are the product value pairs for the variables: length, sites, coverage,
@@ -617,9 +658,9 @@ class SignificantLinks(object):
         Exogenous variables: length_z, sites_z, coverage_z, gc_z
         Endogenous variable is: contacts - 1
 
-        The model is then used to predict responses for all interactions, which is then
-        used to assign the probability that the observed contact count was produced by
-        spurious interaction.
+        After fitting the model to selected "non-local/spurious" observations, the model is then used to
+        predict responses for all observed interactions. Comparison of model predictions to actual values
+        is then used to assign p-values that the observed interaction is non-local/spurious.
 
         The modelling is current carried out in R using the glmmTMB package, but could potentially
         be done using statsmodels.
@@ -646,7 +687,7 @@ class SignificantLinks(object):
             for df in dataframes:
                 df.drop(columns=[
                     'contacts1m', 'length_z', 'sites_z', 'cov_z',
-                    'gc_z', 'response', 'pvalue', 'qvalue'], errors='ignore', inplace=True)
+                    'gc_z', 'response', 'pvalue'], errors='ignore', inplace=True)
 
         logger.info('Total observation pool: {:,}'.format(len(self.spurious)))
         assert len(self.spurious.query('intra == True')) == 0, 'There are intra-genome_bin entries in the table'
@@ -699,7 +740,7 @@ class SignificantLinks(object):
 
         # Convert the returned tables from R back into pandas
         # these tables now have extra columns pertaining to:
-        # significance: 'pvalue, qvalue, response'
+        # significance: 'pvalue, response'
         # scaled exogenous: 'length_z, sites_z, cov_z, gc_z'
         # endogenous: contacts1m (contacts - 1)
         with localconverter(robjects.default_converter + pandas2ri.converter):
@@ -710,8 +751,8 @@ class SignificantLinks(object):
 
     def fdr_correction(self, pr_signif=0.05):
         """
-        Apply Benjamini-Hochberge false-discovery rate correction. The adjusted q-values will
-        appear as a new column `adj_qvalue` in the all_contacts table.
+        Apply Benjamini-Hochberge false-discovery rate correction. The adjusted p-values will
+        appear as a new column `adj_pvalue` in the all_contacts table.
 
         Currently two-step BH is used.
 
@@ -719,21 +760,19 @@ class SignificantLinks(object):
         """
         logger.info('Performing FDR correction')
 
-        self.all_contacts['adj_qvalue'] = multipletests(
-            self.all_contacts.qvalue, alpha=pr_signif, method='fdr_tsbh')[1]
+        self.all_contacts['adj_pvalue'] = multipletests(
+            self.all_contacts.pvalue, alpha=pr_signif, method='fdr_tsbh')[1]
 
-        n_signif = len(self.all_contacts.query('adj_qvalue < 0.05'))
-        logger.info('Using adjusted q-values there were {:,} significant interactions ({:.1f}%)'.format(
+        n_signif = len(self.all_contacts.query('adj_pvalue < 0.05'))
+        logger.info('Using adjusted p-values there were {:,} significant interactions ({:.1f}%)'.format(
             n_signif, n_signif/len(self.all_contacts)))
 
-    def prepare_data(self, seq_col=0, cov_col=1, sep=',', min_seq_length=5000, min_bin_size=5,
+    def prepare_data(self, sep=',', min_seq_length=5000, min_bin_size=5,
                      min_bin_length=100000, min_single_length=1000000, big_threshold=0.8,
-                     initial_sigma=3, pr_cutoff=0.0004, n_samples=10000):
+                     initial_sigma=3, pr_cutoff=0.0004, n_samples=10000, small_value=1):
         """
         From the Hi-C dataset, prepare the input data for significance testing
 
-        :param seq_col: seq_id column integer index
-        :param cov_col: coverage column integer index
         :param sep: variable separator for coverage csv file
         :param min_seq_length: minimum sequence length to be considered
         :param min_bin_size: minimum bin size (number of sequences) to be considered
@@ -743,17 +782,18 @@ class SignificantLinks(object):
         :param initial_sigma: sigma clipping sigma used in outlier removal stage-1
         :param pr_cutoff: probability minimum for outlier stage-2
         :param n_samples: number of samples to use in fitting model
+        :param small_value: small value for replacing observed zeros
         """
-        self.create_seq2cluster_graph(seq_col=seq_col, cov_col=cov_col, sep=sep, min_seq_length=min_seq_length)
+        self.create_seq2cluster_graph(sep=sep, min_seq_length=min_seq_length)
         self.graph_to_table()
         self.create_spurious_table(min_bin_size, min_bin_length,
-                                   min_single_length, big_threshold)
+                                   min_single_length, big_threshold, small_value)
         self.outlier_removal(initial_sigma, pr_cutoff, n_samples)
 
     def fit_model(self, n_samples=10000, pr_signif=0.05, fixed_model=None, disp_model=None, zif_model=None):
         """
         Using the prepared data, fit the Zinb model and adjust
-        the resulting q-values for FDR.
+        the resulting p-values for FDR.
 
         :param n_samples: the number of samples to use in fitting
         :param pr_signif: the threshold probability at which to control FDR

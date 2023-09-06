@@ -7,6 +7,7 @@ suppressMessages(library(glmmTMB))
 suppressMessages(library(car))
 suppressMessages(library(PerformanceAnalytics))
 suppressMessages(library(DHARMa))
+# requires KernSmooth library
 
 transform_data = function(data) {
 
@@ -96,11 +97,13 @@ find_significant = function(fitted, all_contacts, output_path, distrib_func, n_s
                     histogram=TRUE, pch=19)
   dev.off()
 
+
   writeLines('Fitting model')
   modfit = glmmTMB(fixed_model,
                    ziformula = zif_model,
                    dispformula = disp_model,
                    family = distrib_func,
+                   control = glmmTMBControl(parallel = 8),
                    data=dfit, verbose=F)
 
   # some quality control
@@ -115,21 +118,31 @@ find_significant = function(fitted, all_contacts, output_path, distrib_func, n_s
   sink()
 
   # simulate residuals plot for model quality inspection
+  writeLines('\nSimulating residuals')
   png(paste0(output_path, '_R_simulated-residuals.png'), width=1200, height=800)
   par(mfrow=c(1,2))
-  simulateResiduals(modfit, plot=T, seed=seed)
+  simOut = simulateResiduals(modfit, plot=T, seed=seed)
   dev.off()
 
-  # predict contact response from model and assign p/q values of observed contacts
+  writeLines('\nTesting outliers with boostrapping')
+  png(paste0(output_path, '_R_test-outliers.png'), width=1200, height=800)
+  print(testOutliers(simOut, type='bootstrap'))
+  dev.off()
+
+  writeLines('\nTesting dispersion')
+  png(paste0(output_path, '_R_test-dispersion.png'), width=1200, height=800)
+  print(testDispersion(simOut))
+  dev.off()
+
+  # predict expeced contacts (response) from model
   fitted['response'] = predict(modfit, fitted, type='response')
-  fitted['pvalue'] = pnbinom(fitted$contacts1m, size=sigma(modfit), mu=fitted$response)
-  fitted['qvalue'] = 1 - fitted$pvalue
-  
+  # Define p-value as P(X>=expected), where "expected" is that predicted from model
+  fitted['pvalue'] = 1 - pnbinom(fitted$contacts1m, size=sigma(modfit), mu=fitted$response)
+
   writeLines('Calculating significance for all contacts')
   all_contacts = transform_data(all_contacts)
   all_contacts['response'] = predict(modfit, all_contacts, type='response')
-  all_contacts['pvalue'] = pnbinom(all_contacts$contacts1m, size=sigma(modfit), mu=all_contacts$response)
-  all_contacts['qvalue'] = 1 - all_contacts$pvalue
+  all_contacts['pvalue'] = 1 - pnbinom(all_contacts$contacts1m, size=sigma(modfit), mu=all_contacts$response)
 
   list(fitted=fitted, all_contacts=all_contacts, 
     fixef=unlist(fixef(modfit)), sigma=sigma(modfit), 

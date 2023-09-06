@@ -6,6 +6,7 @@ from ..seq_utils.seq_utils import *
 from collections import OrderedDict, namedtuple, defaultdict
 from functools import partial
 from scipy.stats import binom, poisson
+from statsmodels.stats.multitest import multipletests
 import numba as nb
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
@@ -158,76 +159,7 @@ def reduce_seqmap_to_accepted(_map, contact_map, _min_sig=None, _min_len=None):
     return sparse_utils.compress(_map.tocoo(), contact_map.get_primary_acceptance_mask())
 
 
-def gothic_extent_to_seqmap(contact_map, gothic_method):
-    """
-    Reduce the extent map to a sequence map, where the the most significant locus<->locus interaction
-    between two contigs is taken as the indicator of overall significant for the contig<->contig interaction.
-
-    The extent map splits contigs into small windows. This is how GotHiC was originally conceived, as there
-    is no accounting for difference in interaction length between sequences. Therefore, here we use the
-    binned extent map, calculate the interaction significances between all windows (loci) and then
-    select a representative interactions between entire contigs via a summary statistic.
-
-    :param contact_map: the contact map to use
-    :param gothic_method: GotHiC normalisation method (binomial, poisson, effect)
-    :return: seq_map where each element represents the maximally significant locus<->locus interaction between contigs
-    """
-
-    assert gothic_method in {'gothic-binomial', 'gothic-poisson'}, \
-        'Normalisation method must be either gothic-binomial or gothic-poisson'
-
-    # for now, we want to act on the complete contact map not a fitlered version
-    _mask = contact_map.set_primary_acceptance_mask(min_sig=0, min_len=0, update=True)
-    contact_map.order.set_mask_only(_mask)
-    # get the full extent map and the bins
-    _extent_map = contact_map.get_extent_map(norm=True, norm_method=gothic_method)
-    # TODO to support filtered maps, we need to handle filtered bins
-    _extent_bins = contact_map.grouping.bins
-
-    if not sp.isspmatrix_csr(_extent_map):
-        _extent_map = _extent_map.tocsr()
-
-    _num_bins = len(_extent_bins)
-
-    # cumulative extent bins, including 0
-    _cbins = np.concatenate(([0], np.cumsum(_extent_bins)))
-
-    _rows = []
-    _cols = []
-    _data = []
-
-    # this method is kind of slow, so we've got a progress par
-    for ix in tqdm.tqdm(range(_num_bins)):
-
-        # diagonal (self bin)
-        a0, a1 = _cbins[ix], _cbins[ix+1]
-
-        _bin_slice = _extent_map[a0:a1, :]
-
-        # just the upper triangle along the diagonal
-        c = [ix]
-
-        # check if tocsc() prior to slicing here is faster
-        # TODO decide how best to handle multiple interaction terms.
-        d = [sp.triu(_bin_slice.T[a0:a1]).mean()]
-
-        _bin_slice = _bin_slice.tocoo()
-        c_others, d_others = max_interactions(ix, _cbins, _bin_slice.col, _bin_slice.data)
-
-        c += c_others
-        d += d_others
-
-        _rows.extend([ix] * len(c))
-        _cols.extend(c)
-        _data.extend(d)
-
-    # construct a sparse output map, where each element is now a contig<->contig contact
-    _out_map = sp.coo_matrix((_data, (_rows, _cols)), shape=(_num_bins, _num_bins), dtype=np.float64)
-    _out_map.eliminate_zeros()
-    return _out_map
-
-
-def fast_norm_gothic(rows, cols, data, rel_cov, total_links, frac_random, mode='binomial'):
+def fast_norm_gothic(rows, cols, data, rel_cov, total_obs, frac_random, mode='binomial'):
     """
     Inplace application of GOTHiC link significance. Here, modifications have been
     made to approximate the Binomial using the Poisson for large N and small p.
@@ -236,30 +168,44 @@ def fast_norm_gothic(rows, cols, data, rel_cov, total_links, frac_random, mode='
     :param cols: COO matrix cols
     :param data: COO matrix data values to modify
     :param rel_cov: relative coverages
-    :param total_links: total number of links (pairs) in the map
+    :param total_obs: total number of links (pairs) in the map
     :param frac_random: the fraction of read-pairs in the Hi-C library arising from spurious ligation
     :param mode: 'binomial': -log binnom signif, 'poisson': -log poisson signif, 'effect': effect-size
     """
     # we will cap the smallest values to tiny, preventing log errors
     tiny = np.finfo(data.dtype).tiny
+
+    # estimate the probability of observing a link between two loci is proportional
+    # to the relative coverage of the loci and the fraction of random ligation events
     pij = 2 * rel_cov[rows] * rel_cov[cols] * frac_random
+
     if mode == 'binomial':
-        pr = binom.sf(data - 1, total_links, pij)
-        data[:] = - np.log(np.where(pr < tiny, tiny, pr))
+        pr = binom.sf(data, total_obs, pij)
+        # avoid float precision errors for extremely small values
+        data[:] = np.where(pr < tiny, tiny, pr)
+
+    # for large N and small Pr the Poisson and Binomial are very similar
     elif mode == 'poisson':
-        # assume for large N and small Pr that Poisson and Binomial are very similar
-        pr = poisson.sf(data - 1, total_links * pij)
-        data[:] = - np.log(np.where(pr < tiny, tiny, pr))
-    elif mode == 'effect':
-        data /= pij * total_links
-        data += 1
-        data[:] = np.log2(data)
+        pr = poisson.sf(data, total_obs * pij)
+        # avoid float precision errors for extremely small values
+        data[:] = np.where(pr < tiny, tiny, pr)
+
     else:
         raise ApplicationException('unsupported mode [{}]'.format(mode))
 
+@nb.jit(nopython=True)
+def count_bin_sites(coords, bins):
+    """
+    For a set of genomic coordinates, representing cut-site locations, and a set of borders
+    in the same coordinate space, count the number of sites in each bin.
+    :param coords: genomic coords of cut-sites in a sequence
+    :param bins: borders of the bins for a sequence
+    :return: 1d-array of counts for each bin
+    """
+    return np.array([((coords >= bi[0]) & (coords < bi[1])).sum() for bi in bins], dtype='int')
 
 @nb.jit(nopython=True)
-def fast_norm_fullseq_bysite(rows, cols, data, sites):
+def fast_norm_bysite(rows, cols, data, sites):
     """
     In-place normalisation of the scipy.coo_matrix for full sequences
 
@@ -292,6 +238,19 @@ def fast_length_norm(row, col, data, nnz, len_lookup, mean_func):
     for n in nb.prange(nnz):
         w_ij = 1e-3 * mean_func(len_lookup[row[n]], len_lookup[col[n]])
         data[n] /= w_ij
+
+@nb.jit(nopython=True)
+def bin_indices(i, j, cumu_bins):
+    """
+    Convert an index pair from the extent-map to an index pair on the sequence map.
+    :param i: a row index from the extent map
+    :param j: a column index from the extent map
+    :param cumu_bins: the extent map's cumulative bin borders
+    :return: (bi, bj) the corresponding row and column indices on the sequence map
+    """
+    bi = np.searchsorted(cumu_bins, i, side='right')
+    bj = np.searchsorted(cumu_bins, j, side='right')
+    return bi, bj
 
 
 class ExtentGrouping(object):
@@ -336,6 +295,15 @@ class ExtentGrouping(object):
 
         self.bins = np.array(self.bins)
 
+    def calc_borders(self, _seq_id):
+        """
+        Calculate the bin borders in genomic coordinates for a given sequence
+        :param _seq_id: the sequence index to consider
+        :return: 2d list of [[bin0_begin,bin0_end],[bin1_begin, bin1_end],...]
+        """
+        coord_borders = np.hstack([[0], self.map[_seq_id][:, 0]])
+        return np.array([[coord_borders[i], coord_borders[i+1]] for i in range(len(coord_borders)-1)], dtype='int')
+
     def get_bin_lengths(self):
         """
         Compute the width of each bin. The bin widths vary slightly, as the grouping algorithm
@@ -361,7 +329,7 @@ class SeqOrder(object):
     ACCEPTED = True
     EXCLUDED = False
 
-    STRUCT_TYPE = np.dtype([('pos', np.int32), ('ori', np.int8), ('mask', np.bool), ('length', np.int32)])
+    STRUCT_TYPE = np.dtype([('pos', np.int32), ('ori', np.int8), ('mask', bool), ('length', np.int32)])
     INDEX_TYPE = np.dtype([('index', np.int32), ('ori', np.int8)])
 
     def __init__(self, seq_info):
@@ -395,7 +363,7 @@ class SeqOrder(object):
         :return: INDEX_TYPE array
         """
         assert isinstance(_ord, (list, np.ndarray)), 'input must be a list or ndarray'
-        return np.fromiter(zip(_ord, np.ones_like(_ord, dtype=np.bool)), dtype=SeqOrder.INDEX_TYPE)
+        return np.fromiter(zip(_ord, np.ones_like(_ord, dtype=bool)), dtype=SeqOrder.INDEX_TYPE)
 
     def _update_positions(self):
         """
@@ -509,7 +477,7 @@ class SeqOrder(object):
 
         :param _mask: mask array or list, boolean or 0/1 valued
         """
-        _mask = np.asarray(_mask, dtype=np.bool)
+        _mask = np.asarray(_mask, dtype=bool)
         assert len(_mask) == len(self.order), 'supplied mask must be the same length as existing order'
         assert np.all((_mask == SeqOrder.ACCEPTED) | (_mask == SeqOrder.EXCLUDED)), \
             'new mask must be {} or {}'.format(SeqOrder.ACCEPTED, SeqOrder.EXCLUDED)
@@ -556,8 +524,9 @@ class SeqOrder(object):
             # some sanity checks
             assert implicit_excl, 'Use implicit_excl=True for automatic handling ' \
                                   'of orders only mentioning accepted sequences'
-            assert len(_ord) == self.count_accepted(), 'new order must mention all ' \
-                                                       'currently accepted sequences'
+            assert len(_ord) == len(set(_ord['index'])), 'new order must not contain duplicate indices'
+            assert set(_ord['index']) == set(self.accepted()), 'new order must mention all ' \
+                                                               'currently accepted sequences'
             # those surrogate ids mentioned in the order
             mentioned = set(_ord['index'])
             assert len(mentioned & set(self.excluded())) == 0, 'new order and excluded must not ' \
@@ -568,7 +537,7 @@ class SeqOrder(object):
             self.order['pos'][_ord['index']] = np.arange(len(_ord), dtype=np.int32)
             self.order['ori'][_ord['index']] = _ord['ori']
             # mask remaining, unmentioned indices
-            _mask = np.zeros_like(self.mask_vector(), dtype=np.bool)
+            _mask = np.zeros_like(self.mask_vector(), dtype=bool)
             _mask[_ord['index']] = True
             self.set_mask_only(_mask)
         else:
@@ -603,6 +572,15 @@ class SeqOrder(object):
         """
         self.order[_id]['mask'] = False
         self._update_positions()
+
+    def new_mask(self, default=True):
+        """
+        Create a new mask, where all sequences begin M
+        :return:
+        """
+        _mask = np.empty_like(self.mask_vector(), dtype=bool)
+        _mask[:] = default
+        return _mask
 
     def count_accepted(self):
         """
@@ -687,12 +665,15 @@ class SeqOrder(object):
 
 class ContactMap(object):
 
+    # SEQINFO_TYPE = np.dtype([('offset', np.uint64), ('refid', np.uint64), ('name', np.object_),
+    #                          ('length', np.uint64), ('sites', np.uint64), ('gc', np.float64)])
+
     def append_map(self, other):
         if not isinstance(other, ContactMap):
             raise ValueError('ContactMap value is required')
 
-        if self.extent_map is not None or other.extent_map is not None:
-            logger.error('Appending contact maps with extent mapping not implemented')
+        assert not self.has_extent_map() and not other.has_extent_map(), \
+            'Appending contact maps with extent mapping not implemented'
 
         # issue debug warnings if the following attributes are different
         for _attr in ['min_mapq', 'min_insert', 'min_len', 'min_sig', 'min_extent',
@@ -750,6 +731,7 @@ class ContactMap(object):
         self.max_fold = max_fold
         self.random_state = np.random.RandomState(random_seed)
         self.seq_info = []
+        self.seq_sites = []
         self.seq_map = None
         self.seq_file = seq_file
         self.grouping = None
@@ -769,18 +751,7 @@ class ContactMap(object):
         self.site_counter = SiteCounter(*enzymes, tip_size=tip_size, is_linear=True)
 
         # build a dictionary of reference features
-        fasta_info = {}
-        with io_utils.open_input(seq_file, 'rt') as multi_fasta:
-            # get an estimate of sequences for progress
-            fasta_count = count_fasta_sequences(seq_file)
-            for n_seq, seqrec in tqdm.tqdm(enumerate(SeqIO.parse(multi_fasta, 'fasta')),
-                                           total=fasta_count, desc='Analyzing reference sequences'):
-                if len(seqrec) < min_len:
-                    continue
-                fasta_info[seqrec.id] = {'sites': self.site_counter.count_sites(seqrec.seq),
-                                         'length': len(seqrec),
-                                         'gc': SeqUtils.GC(seqrec.seq)}
-            logger.info('From FASTA, {} of {} sequences were accepted'.format(n_seq, len(fasta_info)))
+        fasta_info = self.initialise_fasta_info()
 
         # now inspect the BAM header
         with pysam.AlignmentFile(bam_file, 'rb', threads=threads) as bam:
@@ -815,16 +786,13 @@ class ContactMap(object):
                     'BAM and FASTA lengths do not agree for reference {}: {} != {}'.format(rname, fa['length'], rlen)
 
                 self.seq_info.append(SeqInfo(offset, n, rname, rlen, fa['sites'], fa['gc']))
+                self.seq_sites.append(fa['coords'])
 
                 offset += rlen
 
             # total extent covered
             self.total_len = offset
             self.total_seq = len(self.seq_info)
-
-            # all sequences begin as active in mask
-            # when filtered, mask[i] = False
-            self.current_mask = np.ones(self.total_seq, dtype=np.bool)
 
             if self.total_seq == 0:
                 logger.info('No sequences in BAM found in FASTA')
@@ -853,6 +821,46 @@ class ContactMap(object):
             # create an initial acceptance mask
             self.set_primary_acceptance_mask()
 
+    def initialise_fasta_info(self):
+        """
+        Scan the reference fasta file and extract information about each sequence.
+
+        :param min_len: minimum length threshold
+        :param seq_file: fasta file
+        :return: dict of dicts, keyed by sequence name
+        """
+        fasta_info = {}
+        with io_utils.open_input(self.seq_file, 'rt') as multi_fasta:
+            # get an estimate of sequences for progress
+            fasta_count = count_fasta_sequences(self.seq_file)
+            for n_seq, seqrec in tqdm.tqdm(enumerate(SeqIO.parse(multi_fasta, 'fasta')),
+                                           total=fasta_count, desc='Analyzing reference sequences'):
+                if len(seqrec) < self.min_len:
+                    continue
+                cs_coords = self.site_counter.find_sites(seqrec.seq)
+                fasta_info[seqrec.id] = {'sites': len(cs_coords),
+                                         'length': len(seqrec),
+                                         'gc': SeqUtils.GC(seqrec.seq),
+                                         'coords': cs_coords}
+
+            logger.info(f'From FASTA, {n_seq} of {len(fasta_info)} sequences were accepted')
+
+        return fasta_info
+
+    def refresh_seqsites(self, fasta_path=None):
+        """
+        Refresh the list of cut-site coordinates for each sequence.
+        This can be used with older contact maps prior to the introduction of the
+        class member "seq_sites".
+
+        :param fasta_path: path to the reference fasta file
+        """
+        # assume that the path to the reference fasta is still correct
+        if fasta_path is not None:
+            self.seq_file = fasta_path
+        fasta_info = self.initialise_fasta_info()
+        self.seq_sites = [fasta_info[si.name]['coords'] for si in self.seq_info]
+
     def _bin_map(self, bam):
         """
         Accumulate read-pair observations from the supplied BAM file.
@@ -880,7 +888,7 @@ class ContactMap(object):
                 counts['cigar'] += 1
                 return False
 
-            if r.query_length < _min_alen:
+            if r.query_alignment_length < _min_alen:
                 counts['alen'] += 1
                 return False
 
@@ -920,7 +928,7 @@ class ContactMap(object):
                 seq = r.seq
                 aln_seq = seq[r.query_alignment_start: r.query_alignment_end]
 
-            # accept alignments which terminate at cute-site remnant
+            # accept alignments which terminate at cut-site remnant
             _match = _endswith_vestigial(aln_seq)
             if _match is None:
                 counts['cs_end'] += 1
@@ -1196,6 +1204,12 @@ class ContactMap(object):
         """
         return self.tip_size is not None
 
+    def has_extent_map(self):
+        """
+        :return: True if the map has an extent-based map
+        """
+        return self.extent_map is not None
+
     def find_order(self, _map, seed, inverse_method='inverse', runs=5, work_dir='.'):
         """
         Using LKH TSP solver, find the best ordering of the sequence map in terms of proximity ligation counts.
@@ -1290,7 +1304,7 @@ class ContactMap(object):
             logger.debug('Using existing mask')
             return self.get_primary_acceptance_mask()
 
-        acceptance_mask = np.ones(self.total_seq, dtype=np.bool)
+        acceptance_mask = np.ones(self.total_seq, dtype=bool)
 
         # mask for sequences shorter than limit
         _mask = self.order.lengths() >= min_len
@@ -1313,7 +1327,8 @@ class ContactMap(object):
 
         return self.get_primary_acceptance_mask()
 
-    def prepare_seq_map(self, norm=True, bisto=False, mean_type='geometric', norm_method='sites'):
+    def prepare_seq_map(self, norm=True, bisto=False, mean_type='geometric', norm_method='sites',
+                        from_extent=False, fdr_alpha=0.05):
         """
         Prepare the sequence map (seq_map) by application of various filters and normalisations.
 
@@ -1321,22 +1336,33 @@ class ContactMap(object):
         :param bisto: make the output matrix bistochastic
         :param mean_type: when performing normalisation, use "geometric, harmonic or arithmetic" mean.
         :param norm_method: normalisation method to apply to contact map
+        :param from_extent: when normalising, condense the normalised extent map rather than act on the sequence map
+        :param fdr_alpha: FDR alpha used in gothic normalisation
         """
-
-        logger.info('Preparing sequence map with full dimensions: {}'.format(self.seq_map.shape))
 
         _mask = self.get_primary_acceptance_mask()
 
         self.order.set_mask_only(_mask)
-
         if self.order.count_accepted() < 1:
             raise NoneAcceptedException()
 
         _map = self.seq_map.astype(np.float64)
+        logger.info('Full sequence map dimensions: {}, {} nnz'.format(_map.shape, _map.nnz))
 
-        # apply length normalisation if requested
         if norm:
-            _map = self._norm_seq(_map, self.is_tipbased(), mean_type=mean_type, method=norm_method)
+            if from_extent:
+                logger.debug('Using extent map as a basis for normalisation')
+                assert not self.is_tipbased(), 'Condensing tip based maps from extent is not implemented'
+                _map = self.get_extent_map(norm=True, bisto=False, norm_method=norm_method,
+                                           mean_type=mean_type, apply_mask=False, fdr_alpha=fdr_alpha)
+                _map = self.extent_to_seq(_map, make_symmetric=True, summary_func=np.sum)
+                logger.info(f'Normalised from_extent {_map.shape} with {_map.nnz} nnz')
+            else:
+                logger.debug('Using sequence map as a basis for normalisation')
+                # tmp trial of removing weak off-diagonal elements
+                # _map = sparse_utils.zero_weak_offdiag(_map, 2)
+                # apply length normalisation if requested
+                _map = self._norm_seq(_map, self.is_tipbased(), method=norm_method, mean_type=mean_type)
             logger.debug('Map normalized')
 
         # make map bistochastic if requested
@@ -1404,7 +1430,8 @@ class ContactMap(object):
 
         return _map
 
-    def get_extent_map(self, norm=True, bisto=False, permute=False, mean_type='geometric', norm_method='length'):
+    def get_extent_map(self, norm=True, bisto=False, permute=False, mean_type='geometric', norm_method='sites',
+                       add_blocks=False, apply_mask=True, fdr_alpha=0.05):
         """
         Return the extent map after applying specified processing steps. Masked sequences are always removed.
 
@@ -1412,29 +1439,65 @@ class ContactMap(object):
         :param bisto: make map bistochastic
         :param permute: permute the map using current order
         :param mean_type: length normalisation mean (geometric, harmonic, arithmetic)
-        :param norm_method: methods used to normalise the matrix (length, gothic-effect,
+        :param norm_method: methods used to normalise the matrix (length, sites, gothic-effect,
         gothic-binomial, gothic-poisson)
+        :param add_blocks: add eulerian blocks to the map for contiguity during clustering
+        :param apply_mask: apply the current primary acceptance mask
+        :param fdr_alpha: FDR alpha used in gothic normalisation
         :return: processed extent map
         """
+
+        def calculate_blockweights(_map, _borders):
+            """
+            Rather than a single weight for all blocks, use weights relative
+            to the intensity of interactions of the block (intra and inter)
+
+            :param _map: extent map
+            :param _borders: borders of blocks
+            :return weights for each block
+            """
+            # use this for weights when a block has no interactions.
+            _global = np.median(_map.data)
+            # prepare triangular matrices for slicing
+            _t = sp.triu(_map, k=0)
+            # row slicing
+            _trow = _t.tocsr()
+            # col slicing
+            _tcol = _t.tocsc()
+            weights = []
+            for a, b in _borders:
+                _all_interactions = np.hstack([_tcol[:, a:b].data, _trow[a:b, :].data])
+                weights.append(0.5 * _global if len(_all_interactions) == 0 else 0.5 * np.median(_all_interactions))
+            return np.array(weights)
+
+        assert self.has_extent_map(), 'this instance of ContactMap does not contain an extent-based map.'
 
         logger.info('Preparing extent map with full dimension: {}'.format(self.extent_map.shape))
 
         _map = self.extent_map.astype(np.float64)
 
-        # apply length normalisation if requested
+        # normalise map if requested
         if norm:
-            _map = self._norm_extent(_map, method=norm_method, mean_type=mean_type)
+            _map = self._norm_extent(_map, method=norm_method, mean_type=mean_type, fdr_alpha=fdr_alpha)
             logger.debug('Map normalized')
-
-        # if there are sequences to mask, remove them from the map
-        if self.order.count_accepted() < self.total_seq:
-            _map = self._compress_extent(_map)
-            logger.info('After removing filtered sequences map dimensions: {}'.format(_map.shape))
 
         # make map bistochastic if requested
         if bisto:
-            _map, scl = sparse_utils.kr_biostochastic(_map)
+            _map, scl = sparse_utils.kr_biostochastic(_map, delta=1e-3, Delta=1e2, tol=1e-8, max_iter=10000)
             logger.debug('Map balanced')
+
+        if add_blocks:
+            # _edge_weight = 0.01 * np.median(_map.data)
+            _edge_weight = calculate_blockweights(_map, self.grouping.borders)
+            _blocks = sp.block_diag([_edge_weight[i] * np.ones((nn, nn)) for i, nn in enumerate(self.grouping.bins)])
+            logger.debug(f'Eulerian block matrix dimensions: {_blocks.shape} and {_blocks.nnz:,} non-zero entries')
+            _map += _blocks
+            logger.debug(f'Augmented full map dimensions now: {_map.shape} and {_map.nnz:,} non-zero entries')
+
+        # if there are sequences to mask, remove them from the map
+        if apply_mask and self.order.count_accepted() < self.total_seq:
+            _map = self._compress_extent(_map)
+            logger.info('After removing filtered sequences, map dimensions: {}'.format(_map.shape))
 
         # reorder using current order state
         if permute:
@@ -1443,35 +1506,51 @@ class ContactMap(object):
 
         return _map
 
-    def extent_to_seq(self, agg_func=np.sum):
+    def extent_to_seq(self, _ext_map, make_symmetric=False, summary_func=np.sum):
         """
-        Convert the extent map into a single-pixel per sequence "seq_map". This method
-        is useful when only a tip based seq_map has been produced, and an analysis would be
-        better done on a full accounting of mapping interactions across each sequences full
-        extent.
-        :param agg_func: aggregation function (default sum). Needs to act on numpy arrays
-        :return: a seq_map representing all counts across each sequence
-        """
-        _map = self.extent_map.tocsr()
-        _bins = self.grouping.bins
-        _cbins = np.cumsum(_bins)
-        _out = sparse_utils.Sparse2DAccumulator(self.total_seq)
+        Convert the extent map to a simple sequence map. This is done by summing coincident interactions.
 
-        a0 = 0
-        for i in range(len(_bins)):
-            a1 = _cbins[i]
-            # sacrifice memory for significant speed up slicing below
-            row_i = _map[a0:a1, :].A
-            b0 = 0
-            for j in range(i, len(_bins)):
-                b1 = _cbins[j]
-                mij = agg_func(row_i[:, b0:b1])
-                if mij == 0:
-                    continue
-                _out[i, j] = int(mij)
-                b0 = b1
-            a0 = a1
-        return _out.get_coo()
+        :param _ext_map: the extent map to convert
+        :param make_symmetric: make the output map a full symmetric matrix
+        :param summary_func: function to produce summary values for sequences that span
+        multiple bins within the extent map.
+        :return: seqmap
+        """
+        logger.info('Condensing extent map to sequence map')
+        _map_dim = self.grouping.bins.shape[0]
+        _cbins = np.cumsum(self.grouping.bins)
+        # this is a symmetric matrix, hence we use only the upper half
+        _ext_map = sp.triu(_ext_map.tocoo())
+
+        # iterate over the nonzero elements, summing within each bin
+        _seq_map = defaultdict(list)
+        for i, j, v in zip(_ext_map.row, _ext_map.col, _ext_map.data):
+            _seq_map[bin_indices(i, j, _cbins)].append(v)
+
+        # convert the dictionary representation to a sparse matrix
+        _seq_map = sp.coo_matrix(([summary_func(v) for v in _seq_map.values()],
+                                  ([row[0] for row in _seq_map], [col[1] for col in _seq_map])),
+                                 shape=(_map_dim, _map_dim),
+                                 dtype=np.float64)
+
+        if make_symmetric:
+            _seq_map = sparse_utils.make_symmetric(_seq_map)
+
+        # if log_space:
+        #     logger.debug('Extent-to-seq: Converting to log-space')
+        #     _seq_map.data[:] = - np.log(_seq_map.data)
+
+        # update the acceptance mask, as it is possible that operations on the extent matrix
+        # have resulted in sequences with zero interactions. These sequences will fail to be
+        # represented in a edge-list format graph
+        _mask = self.get_primary_acceptance_mask()
+        reject_mask = _seq_map.sum(axis=0).A.squeeze() > 0
+        logger.debug('Extent-to-seq: there were {} non-interacting sequences'.format((~reject_mask).sum()))
+        # _mask &= reject_mask
+        # self.order.set_mask_only(_mask)
+        # self.primary_acceptance_mask = _mask
+
+        return _seq_map.tocoo()
 
     def _reorder_seq(self, _map, flatten=False):
         """
@@ -1539,7 +1618,7 @@ class ContactMap(object):
             else:
                 if not sp.isspmatrix_coo(_map):
                     _map = _map.tocoo()
-                fast_norm_fullseq_bysite(_map.row, _map.col, _map.data, _sites)
+                fast_norm_bysite(_map.row, _map.col, _map.data, _sites)
 
         elif method == 'length':
 
@@ -1599,13 +1678,15 @@ class ContactMap(object):
 
         return _map
 
-    def _norm_extent(self, _map, method='length', mean_type='geometric', gothic_noself=True):
+    def _norm_extent(self, _map, method='length', mean_type='geometric', fdr_alpha=0.01,
+                     reject_insig=True):
         """
         Normalise a extent map in place by the geometric mean of interacting contig pairs lengths.
 
        :param method: the normalisation method to use [sites, length, gothic-sig, gothic-es]
        :param mean_type: for length normalisation, choice of mean (harmonic, geometric, arithmetic)
-       :param gothic_noself: exclude self-self interactions when calculating relative coverage.
+       :param fdr_alpha: the FDR-BH alpha value to use for GOTHiC significance normalisation
+       :param reject_insig: reject insignificant interactions as determined after FDR correction -- for GOTHiC only.
        :return: a normalized extent map in lil_matrix format
         """
         assert sp.isspmatrix(_map), 'Extent matrix is not a scipy matrix type'
@@ -1616,7 +1697,7 @@ class ContactMap(object):
         # normalised data array
         if method == 'length':
 
-            logger.debug('Doing length based normalisation')
+            logger.debug('Extent_map: doing length based normalisation')
 
             # prepare the lookup array mapping contig length to any index of extent map
             _bins = self.grouping.bins
@@ -1628,41 +1709,78 @@ class ContactMap(object):
 
             fast_length_norm(_map.row, _map.col, _map.data, _map.nnz, _len_lookup, mean_selector(mean_type))
 
+        elif method == 'sites':
+
+            logger.debug('Extent_map: doing site based normalisation')
+
+            if not hasattr(self, 'seq_sites') or self.seq_sites is None:
+                logger.warning('The contact map did not contain cut-site coords, attempting to refresh.')
+                self.refresh_seqsites()
+
+            # for all sequences, count the number of sites falling into each bin
+            _nz = 0
+            _cs_lookup = []
+            for _seq_id, _sites in enumerate(self.seq_sites):
+                _count = count_bin_sites(np.array(_sites), self.grouping.calc_borders(_seq_id))
+                _nz += (_count == 0).sum()
+                _cs_lookup.append(_count)
+
+            logger.debug(f'Number of bins with 0 observed cut-sites: {_nz:,}')
+
+            # flatten the nested list of counts, this covers the full extent map dimensions.
+            _cs_lookup = np.fromiter((_bin_count for _seq in _cs_lookup for _bin_count in _seq), dtype=int)
+            # Adjust all bins by 1 to avoid div-zero: "smoothing" approach
+            _cs_lookup += 1
+            logger.debug(f'There were {len(_cs_lookup):,} bins containing {_cs_lookup.sum():,} predicted sites')
+
+            fast_norm_bysite(_map.row, _map.col, _map.data, _cs_lookup)
+
         elif method.startswith('gothic'):
 
-            if method == 'gothic-effect':
-                goth_mode = 'effect'
-                logger.debug('Doing GOTHiC based effect size normalisation')
-            elif method == 'gothic-binomial':
+            if method == 'gothic-binomial':
                 goth_mode = 'binomial'
-                logger.debug('Doing GOTHiC based Binomial significance normalisation')
+                logger.debug('Extent_map: doing GOTHiC based Binomial significance normalisation')
             elif method == 'gothic-poisson':
                 goth_mode = 'poisson'
-                logger.debug('Doing GOTHiC based Poisson significance normalisation')
+                logger.debug('Extent_map: doing GOTHiC based Poisson significance normalisation')
             else:
                 raise ApplicationException('Unknown method {} in GOTHiC normalisation'.format(method))
 
-            # as we might change sparsity, using lil avoids a warning from scipy
-            _map = _map.tolil()
-            _seqmap = self.seq_map.tolil()
-
-            if gothic_noself:
-                _map.setdiag(0)
-                _seqmap.setdiag(0)
-
-            # get total weight from seq_map as it is much faster
-            total_links = sp.triu(_seqmap.tocsr()).sum()
-            del _seqmap
+            # total number of off-diagonal observations
+            total_obs = sp.triu(_map, k=1).sum()
 
             # marginals represent total hits per bin
             _map = _map.tocsr()
-            rel_cov = _map.sum(axis=1).astype(np.float64)
-            rel_cov = np.asarray(rel_cov).squeeze()
-            # gothic normalises this as reads_j / 2N
-            rel_cov /= 2 * total_links
+            # per-bin relative number of observations -- without diagonal elements
+            rel_cov = _map.sum(axis=0) - _map.diagonal()
+            rel_cov = rel_cov.astype(np.float64) / (2 * total_obs)
+            # make the result a simple array
+            rel_cov = rel_cov.A.squeeze()
+            # just consider cross-bin interactions
+            _map = sp.triu(_map.tocoo().astype(np.float64), k=1)
+            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_obs, 1., goth_mode)
+            logger.debug(f'Extent_map: revising p-values using Benjamini-Hochberg FDR correction. alpha={fdr_alpha}')
+            reject_h0,  pv_corr, _, _,  = multipletests(_map.data,
+                                                        method='fdr_bh',
+                                                        alpha=fdr_alpha,
+                                                        is_sorted=False,
+                                                        returnsorted=False)
+            # revise p-values post-FDR
+            _map.data[:] = pv_corr
+            if reject_insig:
+                _n_insig = (~reject_h0).sum()
+                _p_insig = _n_insig / len(reject_h0) * 100
+                logger.info(f'Extent_map: {_n_insig:,} insignificant interactions were removed ({_p_insig:.2f}%)')
+                _map.data[~reject_h0] = 0
+                _map.eliminate_zeros()
 
-            _map = _map.tocoo().astype(np.float64)
-            fast_norm_gothic(_map.row, _map.col, _map.data, rel_cov, total_links, 1., goth_mode)
+            # convert to log space, representing larger values as more significant
+            # _map.data[:] = - np.log(_map.data)
+            _map.data[:] =  1 -_map.data
+
+            _map = sparse_utils.make_symmetric(_map)
+            # clear-up any lingering zeroed elements
+            _map = _map.tocoo()
 
         else:
             raise ApplicationException('unknown method {}'.format(method))
@@ -1723,7 +1841,7 @@ class ContactMap(object):
                 accept_bins.extend([j+s for j in range(_bins[i])])
             s += _bins[i]
 
-        _mask = np.zeros(self.grouping.total_bins, dtype=np.bool)
+        _mask = np.zeros(self.grouping.total_bins, dtype=bool)
         _mask[np.array(accept_bins)] = True
 
         _data, _row, _col, _shift = sparse_utils.fast_retained(_map.data, _map.row, _map.col, _map.nnz, _mask)
@@ -1765,8 +1883,8 @@ class ContactMap(object):
         self.plot(fname, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=tick_labs, **kwargs)
 
     def plot(self, fname, simple=False, tick_locs=None, tick_labs=None, norm=True, permute=False, pattern_only=False,
-             dpi=180, width=25, height=22, zero_diag=True, alpha=0.01, robust=False, max_image_size=None,
-             flatten=False, norm_method=None):
+             dpi=180, width=25, height=22, zero_diag=True, alpha=0.001, robust=False, max_image_size=None,
+             flatten=False, norm_method=None, bisto=True):
         """
         Plot the contact map. This can either be as a sparse pattern (requiring much less memory but without visual
         cues about intensity), simple sequence or full binned map and normalized or permuted.
@@ -1802,14 +1920,14 @@ class ContactMap(object):
             # prepare the map if not already done. This overwrites
             # any current ordering mask beyond the primary acceptance mask
             if self.processed_map is None:
-                self.prepare_seq_map(norm=norm, bisto=True, norm_method=norm_method)
+                self.prepare_seq_map(norm=norm, bisto=bisto, norm_method=norm_method)
             _map = self.get_subspace(permute=permute, marginalise=False if flatten else True, flatten=flatten)
             # amplify values for plotting
             _map *= 10
         else:
             if norm_method is None:
                 norm_method = 'length'
-            _map = self.get_extent_map(norm=norm, bisto=True, permute=permute, norm_method=norm_method)
+            _map = self.get_extent_map(norm=norm, bisto=bisto, permute=permute, norm_method=norm_method)
 
         if pattern_only:
             # sparse matrix plot, does not support pixel intensity

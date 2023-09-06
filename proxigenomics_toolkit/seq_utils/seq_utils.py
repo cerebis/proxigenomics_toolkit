@@ -2,7 +2,8 @@ from ..exceptions import *
 from ..misc_utils import exe_exists
 from Bio.Restriction import Restriction
 from difflib import SequenceMatcher
-from collections import Mapping, namedtuple
+from collections import namedtuple
+from collections.abc import Mapping
 from scipy.stats import mstats
 import Bio.SeqIO as SeqIO
 import heapq
@@ -196,6 +197,19 @@ class SiteCounter(object):
                     similar.append(a)
             raise UnknownEnzymeException(enz_name, similar)
 
+    def find_sites(self, seq):
+        """
+        Find the cut-sites along the given sequence.
+        :param seq: sequence to search
+        :return: a list of genomic coordinates where cut-sites occur, marked by the 5' end of the site.
+        """
+        sites = []
+        for en in [self.enzyme_a, self.enzyme_b]:
+            if en is None:
+                continue
+            sites.extend(en.search(seq, self.is_linear))
+        return sorted(sites)
+
     def _count(self, seq):
         return sum(len(en.search(seq, self.is_linear)) for en in [self.enzyme_a, self.enzyme_b] if en is not None)
 
@@ -281,7 +295,7 @@ class SiteCounter(object):
 
 class SequenceAnalyzer(object):
 
-    COV_TYPE = np.dtype([('index', np.int16), ('status', np.bool), ('node', np.float64),
+    COV_TYPE = np.dtype([('index', np.int16), ('status', bool), ('node', np.float64),
                          ('local', np.float64), ('fold', np.float64)])
 
     @staticmethod

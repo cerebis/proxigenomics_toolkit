@@ -29,6 +29,21 @@ def is_hermitian(m, tol=1e-6):
     return np.all(~(np.abs(m - m.H) >= tol).data)
 
 
+def make_symmetric(_map, use_upper=True):
+    """
+    Make a sparse matrix symmetric by taking either the upper or lower triangle as the source, and copying
+    that to the opposite triangle. Double-summation of the diagonal is avoided.
+
+    :param _map: the map to make symmetric
+    :param use_upper: if true the upper triangle is copied to the lower, otherwise the lower is copied to the upper.
+    :return: a symmetric matrix
+    """
+    if use_upper:
+        return scisp.triu(_map) + scisp.triu(_map, k=1).T
+    else:
+        return scisp.tril(_map) + scisp.tril(_map, k=-1).T
+
+
 def tensor_print(T):
     """
     Pretty print a dense (numpy) 4D matrix. Users should consider the size of the matrix before
@@ -313,6 +328,44 @@ def max_offdiag(_m):
     if not scisp.isspmatrix_coo(_m):
         _m = _m.tocoo()
     return fast_offdiag(_m.data, _m.row, _m.col, _m.shape[0])
+
+
+@nb.jit(nopython=True)
+def fast_zero_weak(_val, _data, _row, _col, _shape):
+    """
+    Modify in-place, zeroing any element of the matrix which
+    falls below the threshold minimum value.
+
+    :param _val: the minimum acceptable value
+    :param _data: the corresponding adata of the coo matrix
+    :param _row: the row indices of the coo matrix
+    :param _col: the column indices of the coo matrix
+    :param _shape: the dimension of the square matrix (NxN)
+    """
+    for i in range(_row.shape[0]):
+        # ignore diagonal
+        if _row[i] == _col[i]:
+            continue
+        if _data[i] < _val:
+            _data[i] = 0
+
+
+def zero_weak_offdiag(_m, _val):
+    # type: (scisp.spmatrix, float) -> np.ndarray
+    """
+    For any non-zero elements below the specified threshold, zero them out.
+
+    :param _m: a scipy.sparse matrix
+    :param _val: the minimum acceptable value
+    :return: the off-diagonal maximum values
+    """
+    assert scisp.isspmatrix(_m), 'Input matrix is not a scipy.sparse object'
+    if not scisp.isspmatrix_coo(_m):
+        _m = _m.tocoo()
+    fast_zero_weak(_val, _m.data, _m.row, _m.col, _m.shape[0])
+    # refresh sparsity
+    _m.eliminate_zeros()
+    return _m
 
 
 @nb.jit(nopython=True)

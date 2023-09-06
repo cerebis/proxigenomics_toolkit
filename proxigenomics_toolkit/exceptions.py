@@ -34,16 +34,23 @@ class NoRemainingClustersException(ApplicationException):
         super(NoRemainingClustersException, self).__init__(msg)
 
 
-class NoReportException(ApplicationException):
+class ReportFormatException(ApplicationException):
     """Clustering does not contain a report"""
-    def __init__(self, clid):
-        super(NoReportException, self).__init__('No clusters contained an ordering'.format(clid))
+    def __init__(self, context, _id):
+        super(ReportFormatException, self).__init__(
+            f'Report did not follow expected format for cluster {_id}: {context}')
 
 
 class ZeroLengthException(ApplicationException):
     """Sequence of zero length"""
     def __init__(self, seq_name):
         super(ZeroLengthException, self).__init__('Sequence [{}] has zero length'.format(seq_name))
+
+
+class NotFoundException(ApplicationException):
+    """General Not Found exception"""
+    def __init__(self, context, _id):
+        super(NotFoundException, self).__init__(f'{context}:{_id} was not found')
 
 
 class ParsingError(ApplicationException):
@@ -53,6 +60,12 @@ class ParsingError(ApplicationException):
 
 
 class InvalidCoverageFormatError(ApplicationException):
-    def __init__(self, seq_name, caller_name):
+    def __init__(self, seq_name, caller_name, txt):
         super(ApplicationException, self).__init__(
-            'Sequence {} did not follow expected format when extracting coverage'.format(seq_name, caller_name))
+            f'Failed to extract coverage for {seq_name}. "{txt}" did not match {caller_name} pattern')
+
+
+class InvalidSequenceException(ApplicationException):
+    """Sequence failed some type of acceptance criteria"""
+    def __init__(self):
+        super(InvalidSequenceException, self).__init__('sequence not accepted')

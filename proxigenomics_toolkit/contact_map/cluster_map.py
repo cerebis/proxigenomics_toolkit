@@ -1,10 +1,16 @@
+import warnings
+
+import proxigenomics_toolkit.contact_map
 from ..clustering import louvain
 from ..misc_utils import package_path, make_dir
 from ..seq_utils import IndexedFasta
+from ..linalg import kr_biostochastic
 from ..exceptions import *
 from .contact_map import SeqOrder
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import Optional
+from gfa_io import GFA
+from copy import deepcopy
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
 import decimal
@@ -19,11 +25,13 @@ import re
 import scipy.sparse as sp
 import subprocess
 import tqdm
+import warnings
 
 logger = logging.getLogger(__name__)
 
 SPADES_PATTERN = re.compile(r'NODE_\d+_length_\d+_cov_(\d+\.\d*)')
 MEGAHIT_PATTERN = re.compile(r'.*?multi=(\d+\.\d*).*?')
+FLYE_PATTERN = re.compile(r'.*dp:(\d+).*')
 
 
 def coverage_data_extractor(cov_data):
@@ -40,7 +48,7 @@ def coverage_data_extractor(cov_data):
         try:
             return cov_data.loc[seq_record.id].values[0]
         except KeyError:
-            return None
+            raise NotFoundException('In supplied coverage data, sequence_id', seq_record.id)
     return _extractor
 
 
@@ -52,7 +60,7 @@ def spades_extractor(seq_record):
     """
     m = SPADES_PATTERN.match(seq_record.name)
     if m is None:
-        raise InvalidCoverageFormatError(seq_record.name, 'spades_extractor')
+        raise InvalidCoverageFormatError(seq_record.name, 'spades_extractor', seq_record.name)
     return float(m.group(1))
 
 
@@ -64,7 +72,20 @@ def megahit_extractor(seq_record):
     """
     m = MEGAHIT_PATTERN.match(seq_record.description)
     if m is None:
-        raise InvalidCoverageFormatError(seq_record.name, 'megahit_extractor')
+        raise InvalidCoverageFormatError(seq_record.name, 'megahit_extractor', seq_record.description)
+    return float(m.group(1))
+
+
+def flye_extractor(seq_record):
+    """
+    For Flye assemblies, we can extract the coverage statistic contained in the contig description.
+    Note: older versions of Flye did not include this information in the contig description.
+    :param seq_record: Bio.SeqRecord instance
+    :return: float coverage
+    """
+    m = FLYE_PATTERN.match(seq_record.description)
+    if m is None:
+        raise InvalidCoverageFormatError(seq_record.name, 'flye_extractor', seq_record.description)
     return float(m.group(1))
 
 
@@ -89,8 +110,182 @@ def add_cluster_names(clustering, prefix='CL'):
         clustering[cl_id]['name'] = '{0}{1:0{2}d}'.format(prefix, cl_id+1, num_width)
 
 
-def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
-                exclude_names=None, norm_method='sites', append_singletons=True):
+def bistochastic_graph(g):
+    _adj_mat = sp.csr_matrix(nx.adjacency_matrix(g))
+    _adj_mat, _ = kr_biostochastic(_adj_mat)
+    _adj_mat = _adj_mat.tocoo()
+    name_lookup = list(g.nodes())
+    g_out = nx.Graph()
+    for i, j, d in zip(_adj_mat.row, _adj_mat.col, _adj_mat.data):
+        g_out.add_edge(name_lookup[i], name_lookup[j], weight=d)
+    return g_out
+
+
+def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
+                 exclude_names=None, norm_method='sites', append_singletons=True,
+                 from_extent=False, fdr_alpha=0.05, use_entropy=False, gfa_file=None,
+                 markov_scale=None):
+    """
+    Cluster a contact map into groups, as an approximate proxy for "species" bins.
+
+    :param contact_map: an instance of ContactMap to cluster
+    :param seed: a random seed
+    :param work_dir: working directory to which files are written during clustering
+    :param n_iter: for method supporting iterations, specify a non-default number
+    :param exclude_names: a collection of sequence identifiers to exclude when clustering
+    :param norm_method: noramlisation method to apply to contact map
+    :param append_singletons: append additional clusters for isolated sequences not subjected
+    to clustering.
+    :param from_extent: use the extent of the contact map to determine the number of clusters
+    :param fdr_alpha: FDR alpha used in gothic normalisation
+    :param use_entropy: enable entropy correction within infomap clustering
+    :param gfa_file: path to a GFA file, if supplied, multilayered clustering will be performed
+    :param markov_scale: adjust scale of markov time in Infomap clustering (default: 1.0)
+    :return: a dictionary detailing the full clustering of the contact map
+    """
+
+    def _read_tree(pathname):
+        """
+        Read a tree clustering file as output by Infomap.
+
+        :param pathname: the path to the tree file
+        :return: dict of cluster_id to array of seq_ids
+        """
+        with open(pathname, 'r') as in_h:
+            cl_map = defaultdict(list)
+            for line in in_h:
+                line = line.strip()
+                if not line:
+                    break
+                if line.startswith('#'):
+                    continue
+                fields = line.split()
+                # the cluster is identified by the first N-1 terms in the label (: delimited)
+                _cl_id = fields[0][:fields[0].rindex(':')]
+                # this takes the name
+                cl_map[_cl_id].append(fields[2].strip('"'))
+
+        # order clusters by descending size, then create a basic map on ascending integers
+        cl_map = sorted([(len(cl_map[_id]), np.array(cl_map[_id])) for _id in cl_map],
+                        key=lambda x: x[0],
+                        reverse=True)
+        return {n: _seqs for n, (_size, _seqs) in enumerate(cl_map)}
+
+    assert os.path.exists(work_dir), 'supplied output path [{}] does not exist'.format(work_dir)
+
+    # build a graph of the complete map
+    base_name = 'cm_graph'
+    g = to_graph(contact_map, node_id_type='external', norm=True, bisto=True, scale=True,
+                 exclude_names=exclude_names, norm_method=norm_method, use_extent=False,
+                 from_extent=from_extent, fdr_alpha=fdr_alpha)
+
+    logger.info('Clustering contact graph using method: infomap')
+
+    try:
+        with open(os.path.join(work_dir, 'infomap.log'), 'w+') as stdout:
+            edge_file = os.path.join(work_dir, f'{base_name}.pajek')
+            if gfa_file is not None:
+                logger.info('GFA file supplied, preparing for multilayered clustering')
+                g_gfa = read_gfa(gfa_file, paths_to_edges=True, read_progress=True)
+                g_gfa = bistochastic_graph(g_gfa)
+                layers = [g, g_gfa]
+                write_multilayer_pajek(edge_file, layers, add_inter=False)
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    nx.write_pajek(g, edge_file)
+
+            # Infomap v2.7.1 interface
+            options = ['--flow-model', 'undirected', '--verbose',
+                       '--core-loop-codelength-threshold', '1e-20',
+                       '--tune-iteration-relative-threshold', '1e-10',
+                       '-M', '50',
+                       '--seed', str(seed)]
+
+            if use_entropy:
+                options.append('--entropy-corrected')
+
+            if markov_scale is not None:
+                options.extend(['--markov-time', str(markov_scale)])
+
+            if n_iter is None:
+                n_iter = 10
+            options.extend(['-N', str(n_iter)])
+
+            exe_path = package_path('external', 'Infomap')
+            subprocess.check_call([exe_path] + options + [edge_file, work_dir],
+                                  stdout=stdout, stderr=subprocess.STDOUT)
+
+            cl_to_ids = _read_tree(os.path.join(work_dir, f'{base_name}.tree'))
+
+    except OSError as e:
+        logger.error(f'An error occurred starting the child process. Helper path was: {exe_path}')
+        raise e
+
+    logger.info(f'Clustering resulted in {len(cl_to_ids)} clusters')
+
+    # the contact map does not contain information about sequences that were rejected
+    # for short length during initial map construction.
+    name2id = contact_map.make_reverse_index('name')
+
+    clustering = {}
+    for cl_id, _seqs in cl_to_ids.items():
+
+        known_ids = []
+        unref = []
+        for sn in _seqs:
+            if sn in name2id:
+                known_ids.append(name2id[sn])
+            else:
+                unref.append(sn)
+
+        # TODO clustering should be made class, as this dict approach is
+        #   too ad-hoc and error prone.
+        clustering[cl_id] = {
+            'names': np.array(_seqs),
+            'seq_ids': np.array(known_ids),
+            'extent': contact_map.order.lengths()[known_ids].sum(),
+            'status': 'primary',
+            'unreferenced': unref,
+            'deduplicated': []
+        }
+
+    # append singletons
+    if append_singletons:
+        lost_seq = find_lost_singletons(contact_map, clustering)
+        for n, _seq in enumerate(lost_seq):
+            # use simple temporary names prior to reassignment
+            cl_id = f'tmp_{n}'
+            assert cl_id not in clustering, f'Tried to overwrite existing cluster id: {cl_id}'
+            clustering[cl_id] = {
+                'names': np.array([_seq]),
+                'seq_ids': np.array([_seq]),
+                'extent': contact_map.seq_info[_seq].length,
+                'status': 'rescued singleton',
+                'unreferenced': [],
+                'deduplicated': []
+            }
+
+        # sanity check
+        # all_seqs = [seq_id for cl in clustering.values() for seq_id in cl['seq_ids']]
+        # assert len(all_seqs) == len(set(all_seqs)), 'Duplicate sequences in clustering'
+        logger.info('Appended {} isolated sequences as singleton clusters'.format(len(lost_seq)))
+        logger.info('Total cluster count now {}'.format(len(clustering)))
+
+    if gfa_file is not None:
+        clustering = harden_clustering(clustering, contact_map)
+
+    # assign cluster ids as ascending 0-based integers, clusters ordered by descending extent
+    sorted_keys = sorted(clustering, key=lambda k: clustering[k]['extent'], reverse=True)
+    clustering = {n: clustering[k] for n, k in enumerate(sorted_keys)}
+
+    add_cluster_names(clustering)
+
+    return clustering
+
+def cluster_map_old(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
+                exclude_names=None, norm_method='sites', append_singletons=True,
+                use_extent=False, from_extent=False, fdr_alpha=0.05, use_entropy=False):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -103,6 +298,10 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
     :param norm_method: noramlisation method to apply to contact map
     :param append_singletons: append additional clusters for isolated sequences not subjected
     to clustering.
+    :param use_extent: use the extent of the contact map to determine the number of clusters
+    :param from_extent: use the extent of the contact map to determine the number of clusters
+    :param fdr_alpha: FDR alpha used in gothic normalisation
+    :param use_entropy: enable entropy correction within infomap clustering
     :return: a dictionary detailing the full clustering of the contact map
     """
 
@@ -178,7 +377,19 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
                 fields = line.split()
                 # the cluster is identified by the first N-1 terms in the label (: delimited)
                 _cl_id = fields[0][:fields[0].rindex(':')]
-                cl_map[_cl_id].append(fields[-1])
+
+                # TODO NOTE: it needs to be resolved, whether we focus on names or ids.
+                #    where ids are 1-based integers assigned by Infomap, while names are
+                #    treated as strings. To present names to Infomap (that aren't ints)
+                #    it is required that a format other than edge-list is used, such
+                #    as Pajek. In this case, the ids need to be adjusted to be 0-based
+                #    OR we choose to handle the names. Which will be more general?
+
+                # this takes the 1-based id
+                # cl_map[_cl_id].append(fields[-1])
+
+                # this takes the name
+                cl_map[_cl_id].append(fields[2].strip('"'))
 
         # rename clusters and order them in descending size (number of members in each cluster)
         return {n: np.array(v, dtype=np.int64)
@@ -206,15 +417,187 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
 
         return edge_file
 
+    def _read_extent_tree(pathname, _cm, _min_membership):
+        """
+        Read a tree clustering file as output by Infomap, where the solution pertains to clustering
+        the extent map bins.
+
+        :param pathname: the path to the tree file
+        :param _cm: relevant contact map instance
+        :param _min_membership: minimum number of members in a cluster
+        :return: dict of seq to cluster
+        """
+
+        def _collect_clusters(_seq2cl, _min_membership):
+            """
+            Given a dict of seq to cluster, collect the clusters and their members.
+
+            :param _seq2cl: dict of seq to cluster
+            :param _min_membership: minimum number of members in a cluster
+            """
+
+            def victory_margin(p, sort=False):
+                """
+                Margin of victory, ration of first to second most popular category.
+                :param p: proportions of categorical dist
+                :return: victory margin [1..)
+                """
+                if len(p) == 1:
+                    return None
+                if sort:
+                    p = np.sort(p)[::-1]
+                return p[0] / p[1]
+
+            def unalikeability(p):
+                """
+                Coefficient of unalikeability
+                doi:10.1080/10691898.2007.11889465
+
+                :param p: proportions of categorical dist
+                :return: coeff [0..1]
+                """
+                return np.sum([pi * (1 - pi) for pi in p])
+
+            uncertain_count = 0
+            soln_list = []
+            for k, v in _seq2cl.items():
+
+                n_clusters = len(v['membership']['cluster'])
+                count = v['membership']['count']
+                ix = np.argsort(-count)
+                count = count[ix]
+                props = count / count.sum()
+                clusters = v['membership']['cluster'][ix]
+                vote_tally = v['membership']['count'][ix]
+
+                soln = {'seq_id': k,
+                        'seq_name': v['name'],
+                        'seq_len': v['length'],
+                        'seq_sites': v['sites'],
+                        'clusters': clusters,
+                        'vote_tally': vote_tally,
+                        'props': props,
+                        'n_clusters': n_clusters,
+                        'uncertain': False,
+                        'pmax': props[0],
+                        'victory_margin': victory_margin(props),
+                        'unalikeability': unalikeability(props)}
+
+                # this method is very simplistic, sorting for the
+                # top result regardless of how broad the distribution
+                # of cluster membership is. It would be sensible to
+                # possibly abandon joining a sequence to a cluster
+                # at some threshold of uncertainty -- OR -- use
+                # overlapping assignments.
+
+                if soln['n_clusters'] == 1 or \
+                        (soln['pmax'] > 0.5 and soln['victory_margin'] > 1.5 and soln['unalikeability'] < 0.5):
+
+                    soln['winner'] = soln['clusters'][0]
+
+                else:
+
+                    soln['uncertain'] = True
+                    uncertain_count += 1
+                    winner_id = -uncertain_count
+                    _memb_profile = dict(zip(soln['clusters'], [f'{si:.4f}' for si in soln['props']]))
+                    logger.debug(f'Uncertain membership over {soln["n_clusters"]} clusters for '
+                                 f'sequence: {soln["seq_name"]} with {soln["vote_tally"].sum()} votes, '
+                                 f'with voting proportions: {_memb_profile}')
+                    soln['winner'] = winner_id
+
+                    # # assume the most popular cluster is the winner
+                    # winner_id = soln['clusters'][0]
+                    #
+                    # if soln['un']
+                    # # define a new cluster if the vote is not unambiguous
+                    # if np.all(soln['vote_tally'] == soln['vote_tally'][0]):
+                    #     logger.debug(f'Ambiguous membership over {soln["n_clusters"]} clusters for '
+                    #                  f'sequence: {soln["seq_name"]} with {soln["vote_tally"].sum()} votes')
+                    #     soln['uncertain'] = True
+                    #     uncertain_count += 1
+                    #     winner_id = -uncertain_count
+                    # # minimum probability and margin of victory
+                    # elif soln['props'][0] < _min_membership and soln['props'][0]/soln['props'][1] < 2:
+                    #     _memb_profile = dict(zip(soln['clusters'], [f'{si:.4f}' for si in soln['props']]))
+                    #     logger.debug(f'Uncertain membership over {soln["n_clusters"]} clusters for '
+                    #                  f'sequence: {soln["seq_name"]} with {soln["vote_tally"].sum()} votes, '
+                    #                  f'with voting proportions: {_memb_profile}')
+                    #     soln['uncertain'] = True
+                    #     uncertain_count += 1
+                    #     winner_id = -uncertain_count
+                    #
+                    # if soln['uncertain']:
+                    #     logger.debug('Creating new cluster for '
+                    #                  f'seq:{soln["seq_id"]}, name:{soln["seq_name"]}, length:{soln["seq_len"]}')
+                    #
+                    # soln['winner'] = winner_id
+
+                soln_list.append(soln)
+
+            return pandas.DataFrame(soln_list)
+
+        _tree = _read_tree(pathname)
+
+        # lookup for mapping bin ids to sequence ids
+        bin2seqid = {}
+        for _seq_id, _bin_map in enumerate(_cm.grouping.map):
+            bin2seqid.update({_bi: _seq_id for _bi in _bin_map[:, 1]})
+
+        # collect the individual bin assignments by the parent sequence
+        seq2cl = {}
+        for cl in _tree:
+            for _bin_id in _tree[cl]:
+                _seq_id = bin2seqid[_bin_id]
+                if _seq_id not in seq2cl:
+                    seq2cl[_seq_id] = {'name': _cm.seq_info[_seq_id].name,
+                                       'length': _cm.seq_info[_seq_id].length,
+                                       'sites': _cm.seq_info[_seq_id].sites,
+                                       'membership': [cl]}
+                else:
+                    seq2cl[_seq_id]['membership'].append(cl)
+
+        # for each sequence, tally the bin-based cluster assignments
+        for k, v in seq2cl.items():
+            c = Counter(v['membership'])
+            _type = np.dtype([('cluster', 'int'), ('count', 'int')])
+            # noinspection PyTypedDict
+            seq2cl[k]['membership'] = np.array([(cl_id, cl_count) for cl_id, cl_count in c.items()], dtype=_type)
+
+        cluster_soln = _collect_clusters(seq2cl, _min_membership)
+        cluster_soln.to_csv(os.path.join(os.path.dirname(pathname), 'extent_binning_solution.csv'))
+
+        # select the winning assignments
+        report = cluster_soln.groupby('winner') \
+                             .agg({'seq_len': [sum, 'count']}) \
+                             .sort_values(('seq_len', 'sum'), ascending=False)
+
+        # write a report into the same location as the tree file
+        report.to_csv(os.path.join(os.path.dirname(pathname), 'extent_binning_report.csv'))
+
+        # prepare a dict of cluster to sequence ids, in descending order of cluster size
+        cl2seq = defaultdict(list)
+        records = cluster_soln.sort_values(['winner', 'seq_id']) \
+                              .set_index('winner')[['seq_id']] \
+                              .to_records()
+        for cl_id, sq_id in records:
+            cl2seq[cl_id].append(sq_id)
+
+        return cl2seq
+
     assert os.path.exists(work_dir), 'supplied output path [{}] does not exist'.format(work_dir)
 
     # build a graph of the complete map
     base_name = 'cm_graph'
     g = to_graph(contact_map, node_id_type='internal', norm=True, bisto=True, scale=True,
-                 exclude_names=exclude_names, norm_method=norm_method)
+                 exclude_names=exclude_names, norm_method=norm_method, use_extent=use_extent,
+                 from_extent=from_extent, fdr_alpha=fdr_alpha)
 
     method = method.lower()
     logger.info('Clustering contact graph using method: {}'.format(method))
+
+    assert (use_extent and method == 'infomap') or not use_extent, \
+        'Extent map based clustering only supported by the method: infomap'
 
     try:
         if method == 'louvain':
@@ -237,16 +620,31 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
                 cl_to_ids = _read_table(ofile)
         elif method == 'infomap':
             with open(os.path.join(work_dir, 'infomap.log'), 'w+') as stdout:
+                # edge_file = os.path.join(work_dir, '{}.pajek'.format(base_name))
+                # nx.write_pajek(g, edge_file)
                 edge_file = _write_edges(g, work_dir, base_name)
-                # Infomap v1.3.0 interface
-                options = ['--flow-model', 'undirected', '--verbose', '--seed', str(seed)]
+                # Infomap v2.7.1 interface
+                if use_entropy:
+                    options = ['--flow-model', 'undirected', '--verbose', '--entropy-corrected', '--seed', str(seed)]
+                    # options = ['--flow-model', 'undirected', '--verbose', '--entropy-corrected',
+                    #            '--variable-markov-time', '--seed', str(seed)]
+                else:
+                    options = ['--flow-model', 'undirected', '--verbose', '--seed', str(seed)]
                 if n_iter is None:
                     n_iter = 10
                 options.extend(['-N', str(n_iter)])
 
                 subprocess.check_call([package_path('external', 'Infomap')] + options + [edge_file, work_dir],
                                       stdout=stdout, stderr=subprocess.STDOUT)
-                cl_to_ids = _read_tree(os.path.join(work_dir, '{}.tree'.format(base_name)))
+
+                if use_extent:
+                    # TODO export min_memb to a higher level.
+                    cl_to_ids = _read_extent_tree(os.path.join(work_dir, '{}.tree'.format(base_name)),
+                                                  contact_map,
+                                                  _min_membership=1/3)
+                else:
+                    cl_to_ids = _read_tree(os.path.join(work_dir, '{}.tree'.format(base_name)))
+
         elif method == 'slm':
             with open(os.path.join(work_dir, 'slm.log'), 'w+') as stdout:
                 mod_func = '1'
@@ -271,18 +669,17 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
 
     logger.info('Clustering using {} resulted in {} clusters'.format(method, len(cl_to_ids)))
 
-    # standardise the results, where sequences in each cluster
-    # are listed in ascending order
+    # standardise the results, where sequences in each cluster are listed in ascending order
     clustering = {}
     for cl_id, _seqs in cl_to_ids.items():
         _ord = SeqOrder.asindex(np.sort(_seqs))
-        # IMPORTANT!! sequences are remapped to their gapless indices
+        # IMPORTANT!! sequences must be remapped to their gapless indices
         _seqs = contact_map.order.remap_gapless(_ord)['index']
 
         clustering[cl_id] = {
             'seq_ids': _seqs,
             'extent': contact_map.order.lengths()[_seqs].sum(),
-            'rescue': False
+            'status': 'primary',
             # TODO add other details for clusters here
             # - residual modularity, permanence
         }
@@ -290,16 +687,23 @@ def cluster_map(contact_map, seed, method='infomap', work_dir='.', n_iter=None,
     # append singletons
     if append_singletons:
         lost_seq = find_lost_singletons(contact_map, clustering)
-        for cl_id, _seq in enumerate(lost_seq, start=len(clustering)):
+        for n, _seq in enumerate(lost_seq):
+            # use simple temporary names prior to reassignment
+            cl_id = f'tmp_{n}'
+            assert cl_id not in clustering, f'Tried to overwrite existing cluster id: {cl_id}'
             clustering[cl_id] = {
                 'seq_ids': np.array([_seq]),
                 'extent': contact_map.seq_info[_seq].length,
-                'rescue': True
+                'status': 'rescued singleton',
             }
+
+        # sanity check
+        all_seqs = [seq_id for cl in clustering.values() for seq_id in cl['seq_ids']]
+        assert len(all_seqs) == len(set(all_seqs)), 'Duplicate sequences in clustering'
         logger.info('Appended {} isolated sequences as singleton clusters'.format(len(lost_seq)))
         logger.info('Total cluster count now {}'.format(len(clustering)))
 
-    # reestablish clusters in descending order of extent
+    # assign cluster ids as ascending 0-based integers, clusters ordered by descending extent
     sorted_keys = sorted(clustering, key=lambda k: clustering[k]['extent'], reverse=True)
     clustering = {n: clustering[k] for n, k in enumerate(sorted_keys)}
 
@@ -336,21 +740,23 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             depth_extractor = spades_extractor
         elif assembler == 'megahit':
             depth_extractor = megahit_extractor
+        elif assembler == 'flye':
+            depth_extractor = flye_extractor
         if depth_extractor is not None:
-            logger.info('Assembly contig headers are presumed follow {}\'s format'.format(assembler))
+            logger.info('Contig FASTA headers are presumed follow {}\'s format'.format(assembler))
 
     if depth_extractor is None:
         logger.info('No assembler or coverage file was supplied, '
                     'therefore coverage information will not be available in report')
 
-    seq_info = contact_map.seq_info
+    # seq_info = contact_map.seq_info
 
     if source_fasta is None:
         source_fasta = contact_map.seq_file
 
     # set up indexed access to the input fasta
     logger.info('Building random access index for input FASTA sequences')
-    with contextlib.closing(IndexedFasta(source_fasta)) as seq_db:
+    with (contextlib.closing(IndexedFasta(source_fasta)) as seq_db):
         # iterate over the cluster set, in the existing order
         for cl_id, cl_info in tqdm.tqdm(clustering.items(), total=len(clustering),
                                         desc='inspecting clusters'):
@@ -358,20 +764,22 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             _cov = []
             _gc = []
             _missing_gc = 0
-            for n, _seq_id in enumerate(np.sort(cl_info['seq_ids']), 1):
+            for _seq_id in cl_info['seq_ids']:
 
-                # TODO we could easily have collected much of this information beforehand,
-                #      This would require supplying missing coverage infomration at mkmap time.
+                _sinfo = contact_map.seq_info[_seq_id]
 
                 # get the sequence's external name and length
-                _name = seq_info[_seq_id].name
+                _name = _sinfo.name
 
                 # fetch the SeqRecord object from the input fasta
                 _seq = seq_db[_name]
+                # sanity check for incorrect supplied reference fasta
+                assert len(_seq) == _sinfo.length, \
+                    f'source fasta {source_fasta} does not match information stored in contact_map for {_name}'
+                _len.append(_sinfo.length)
 
-                _len.append(seq_info[_seq_id].length)
                 try:
-                    _gc_i = seq_info[_seq_id].gc
+                    _gc_i = _sinfo.gc
                 except IndexError:
                     _missing_gc += 1
                     # handle older contact maps without GC data in seq_info
@@ -406,10 +814,89 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             clustering[cl_id]['report'] = report
 
 
-def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='internal',
-             clustering=None, cl_list=None, exclude_names=None, norm_method='sites'):
+def revise_clusters(target_clusters, contact_map, clustering: dict, algorithm=None, from_extent=False,
+                    norm=True, bisto=True, scale=True, norm_method='sites', only_new=False):
     """
-    Convert the seq_map to a undirected Networkx Graph.
+    Subject a list of target clusters to a new round of community detection. Each cluster is
+    extracted as a subgraph and then clustered. Expected methods return type is a list of
+    partitions, each containing the collection of member sequences. networkx.community
+    algorithms fit this return type. leidenalg is another alternative.
+
+    :param target_clusters: 0-based cluster ids
+    :param contact_map: the relevant contact map
+    :param clustering: the relevant clustering solution
+    :param algorithm: specific algorithm returnning a list of community partitions
+    :param from_extent: use the extent map to define the subgraph
+    :param norm_method: normalisation method to apply to contact map
+    :return:
+    """
+    if algorithm is None:
+        algorithm = nx.community.label_propagation_communities
+
+    # prepare the contact map's complete graph
+    g_complete = to_graph(contact_map, node_id_type='external', norm=norm, bisto=bisto, scale=scale,
+                          norm_method=norm_method, from_extent=from_extent)
+
+    # begin with the current cluster solution
+    revised = clustering.copy()
+
+    # prepare a lookup table of existing sequence details, these will be transfered after revision
+    seq2report = {}
+    for cl_id in revised:
+        assert 'report' in revised[cl_id], f'The clustering solution did not contain a report for {cl_id}'
+        for si, ri in zip(revised[cl_id]['seq_ids'], revised[cl_id]['report']):
+            seq2report[si] = ri
+
+    # lookup table for switching back to seq_ids
+    name2id = contact_map.make_reverse_index('name')
+
+    n_new = 0
+    for cl_id in target_clusters:
+        # drop the cluster from the complete solution
+        cluster = revised.pop(cl_id)
+        logger.debug(f'Revising cluster {cl_id}: {len(cluster["seq_ids"])} members, {cluster["extent"]} extent')
+        # extract the subgraph
+        seq_names = [contact_map.seq_info[_id].name for _id in cluster['seq_ids']]
+        g = nx.subgraph(g_complete, seq_names)
+        logger.debug(f'Subgraph composition: order {g.order()} size {g.size()}')
+        # partition the subgraph into communities
+        partitions = algorithm(g)
+        logger.debug(f'Cluster {cl_id} was split into {len(partitions)}')
+        for n, members in enumerate(partitions, start=n_new+1):
+            _seqs = np.sort([name2id[nm] for nm in members])
+            revised[-n] = {
+                'seq_ids': _seqs,
+                'extent': contact_map.order.lengths()[_seqs].sum(),
+                'status': 'revised',
+                'report': np.squeeze(np.vstack([seq2report[_si] for _si in _seqs]))
+            }
+        n_new += n
+
+    if only_new:
+        cl_list = list(revised.keys())
+        for cl_id in cl_list:
+            # TODO commented logic protects against older clustering objects without
+            #      a status field. As we typically fail at maintaining backwards
+            #      compatibility, this is probably not necessary.
+            # if 'status' not in revised[cl_id] or revised[cl_id]['status'] != 'revised':
+            if revised[cl_id]['status'] != 'revised':
+                del revised[cl_id]
+
+    # clusters will now be renamed
+    # TODO this might be confusing if work has already been done on an existing solution
+    sorted_keys = sorted(revised, key=lambda k: revised[k]['extent'], reverse=True)
+    revised = {n: revised[k] for n, k in enumerate(sorted_keys)}
+
+    add_cluster_names(revised)
+
+    return revised
+
+
+def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='internal',
+             clustering=None, cl_list=None, exclude_names=None, norm_method='sites',
+             filter_weak_edges=False, use_extent=False, from_extent=False, fdr_alpha=0.05):
+    """
+    Convert the seq_map to an undirected Networkx Graph.
 
     The contact map is used as an adjacency matrix, where sequences/contigs are the nodes and Hi-C interactions
     become weighted edges. Edge weigths are dictated by normalisation choices (bisto, norm, scale).
@@ -442,6 +929,10 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     :param cl_list: list of clusters to include in the graph (0-based internal ids)
     :param exclude_names: a collection of sequences (by external name) to exclude when clustering
     :param norm_method: normalisation method to apply to contact map
+    :param filter_weak_edges: remove edges with weight in the bottem 5% of the distribution
+    :param use_extent: build a variant of the graph using the extent map
+    :param from_extent: normalised extent map acts as the basis for sequence map.
+    :param fdr_alpha: FDR alpha used in gothic normalisation
     :return: graph of contigs
     """
 
@@ -481,68 +972,99 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     report_map = {True: _attr_with_cov,
                   False: _attr_without_cov}
 
-    def add_nodes_and_edges():
+    def create_graph(_map):
         """
-        Helper function for adding all nodes and edges and associated attributes. This function makes heavy
-        use of local scope rather than pass parameters.
-        """
-        for i, j, w in tqdm.tqdm(zip(_map.row, _map.col, _map.data), desc='adding edges', total=_map.nnz):
-            # node ids
-            u = _nn(i)
-            v = _nn(j)
-            if not g.has_node(u):
-                g.add_node(u, **_node_attr(i))
-            if not g.has_node(v):
-                g.add_node(v, **_node_attr(j))
-            # create the edge
-            g.add_edge(u, v, weight=float(w * scl))
+        Build the graph, either rapidly or more slowly with additional attributes.
+        ** Note:  ** this function makes use of local scope rather than pass parameters.
 
+        :param _map: the contact map to convert to a graph
+        :return: a Networkx Graph based on the supplied map
+        """
+        g = nx.Graph(name='contact_graph')
+        # being a symmetric matrix, only upper/lower triangle is needed
+        g.add_nodes_from((_nn(i), _node_attr(i)) for i in range(_map.shape[0]))
+        # add edges (symmetric matrix and undirected graph)
+        _triu = sp.triu(_map)
+        for i, j, w in tqdm.tqdm(zip(_triu.row, _triu.col, _triu.data), desc='adding edges', total=_triu.nnz):
+            g.add_edge(_nn(i), _nn(j), weight=float(w * scl))
+
+        return g
+    
     if cl_list is not None and not clustering:
         raise ApplicationException('When cl_list is specified, a clustering solution is required')
 
-    contact_map.prepare_seq_map(norm=norm, bisto=bisto, norm_method=norm_method)
+    if use_extent:
+        # TODO beta testing extent clustering
+        #    - ensure that we do not mask any sequences for now, as remapping ids isn't implemented
+        #    - with this restriction, it also means there is no need to rescue singletons
+        # unmask everything
+        contact_map.order.set_mask_only(contact_map.order.new_mask(True))
+        # now make doubly sure there no lingering mask
+        contact_map.set_primary_acceptance_mask(min_sig=0, update=True)
+        _map = contact_map.get_extent_map(norm=norm, bisto=bisto, norm_method=norm_method, add_blocks=True,
+                                          fdr_alpha=fdr_alpha)
+        # temporary dummy call, as adding node attributes will be painful
+        _node_attr = lambda x: {}
+        assert cl_list is None, 'Providing a cluster is list not supported'
+        assert exclude_names is None, 'Excluding names not supported'
+        assert filter_weak_edges is False, 'Filtering weak edges not supported'
 
-    _node_attr = _attr_basic
-    if cl_list is not None:
-        # TODO this is brittle as it checks only the first cluster for presence of 'cov' key.
-        _node_attr = report_map['cov' in clustering[0]['report'].dtype.names]
-        cl_list = sorted(cl_list)
-        cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=False)
+        logger.info('Graph will have {} nodes'.format(_map.shape[0]))
 
-    _map = contact_map.get_subspace(permute=False, marginalise=True, flatten=False)
+    else:
+        contact_map.prepare_seq_map(norm=norm, bisto=bisto, norm_method=norm_method,
+                                    from_extent=from_extent, fdr_alpha=fdr_alpha)
 
-    logger.info('Graph will have {} nodes'.format(contact_map.order.count_accepted()))
+        _node_attr = _attr_basic
+        if cl_list is not None:
+            # TODO this is brittle as it checks only the first cluster for presence of 'cov' key.
+            if 'report' in clustering[cl_list[0]]:
+                _node_attr = report_map['cov' in clustering[0]['report'].dtype.names]
+            else:
+                logger.warning('As some clusters were missing report information, only basic attributes will be added')
+
+            cl_list = sorted(cl_list)
+            cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=False)
+
+        _map = contact_map.get_subspace(permute=False, marginalise=True, flatten=False)
+        logger.info('Graph will have {} nodes'.format(contact_map.order.count_accepted()))
 
     if not sp.isspmatrix_coo(_map):
         _map = _map.tocoo()
 
-    # normalise weights, assuming strictly positive
+    # if requested prepare a scale factor for maximum edge weight = 1
     scl = 1.0 / _map.max() if scale else 1
 
     logger.debug('Building graph from edges')
-    g = nx.Graph(name='contact_graph')
-
     if cl_list is not None:
+        assert not use_extent, 'Restricting to_graph() with a cluster list is not supported with use_extent'
         logger.info('Graph will only contain sequences from clusters: {}'.format(cl_list))
         # sub-space to full map index lookup.
         _to_seqid = make_gapless_lookup((_si for _cl in cl_list for _si in clustering[_cl]['seq_ids']))
-        _to_report = make_gapless_lookup((_ri for _cl in cl_list for _ri in clustering[_cl]['report']))
+        if _node_attr != _attr_basic:
+            _to_report = make_gapless_lookup((_ri for _cl in cl_list for _ri in clustering[_cl]['report']))
         _to_clid = make_gapless_lookup(
             (clustering[_cl]['name'] for _cl in cl_list for _si in clustering[_cl]['seq_ids']))
 
         n_expected = len(_to_seqid)
         logger.info('Graph will have {} nodes'.format(n_expected))
-        add_nodes_and_edges()
+        g = create_graph(_map)
+
     else:
         logger.info('Graph will contain all sequences that passed minimum length and signal criteria')
         # create a lookup from the dense indices of the filtered subspace to
         #   the original (potentially sparse) full map indices.
-        _to_seqid = contact_map.order.remap_gapless(np.arange(_map.shape[0]))
+        if not use_extent:
+            _to_seqid = contact_map.order.remap_gapless(np.arange(_map.shape[0]))
         n_expected = contact_map.order.count_accepted()
-        add_nodes_and_edges()
+        g = create_graph(_map)
 
-    assert g.order() == n_expected, \
-        'order(graph) did not equal number of expected sequences'
+    if use_extent:
+        # TODO check graph is of the correct order
+        pass
+    else:
+        assert g.order() == n_expected, \
+            f'order(graph) {g.order()} did not equal number of expected sequences {n_expected}'
 
     # disconnect any node mentioned in exclusion list
     if exclude_names:
@@ -581,6 +1103,12 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
         if n_removed_edges > 0:
             logger.info('Excluded sequences resulted in the deletion of {:,} edges'.format(n_removed_edges))
 
+    if filter_weak_edges:
+        min_weight = np.quantile(np.fromiter((d['weight'] for u, v, d in g.edges(data=True)), dtype='float'), q=0.25)
+        logger.info('Removing weak edges with weight < {:.3e}'.format(min_weight))
+        logger.info('Before weak removal: {:,} nodes, {:,} edges'.format(g.order(), g.size()))
+        g.remove_edges_from([(u, v) for u, v, d in g.edges(data=True) if d['weight'] < min_weight])
+
     logger.info('Final graph: {:,} nodes, {:,} edges'.format(g.order(), g.size()))
 
     return g
@@ -601,7 +1129,15 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
 
     # start with all clusters if unspecified
     if cl_list is None:
-        cl_list = [k for k, v in clustering.items() if 'rescue' not in v or not v['rescue']]
+        cl_list = list(clustering.keys())
+
+    # at present, only primary clusters are supported in downstream methods
+    cl_list = np.sort(np.array([(k, clustering[k]['status'] == 'primary') for k in cl_list],
+                               dtype=np.dtype([('clid', int), ('is_primary', bool)])))
+    logger.info(f'Enable_clusters: {(~cl_list["is_primary"]).sum()} non-primary clusters have been excluded')
+    cl_list = cl_list[cl_list['is_primary']]['clid'].tolist()
+    if len(cl_list) == 0:
+        raise NoRemainingClustersException('There were no primary clusters')
 
     # use instance criterion if not explicitly set
     if min_extent is None:
@@ -609,7 +1145,9 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
 
     if min_extent:
         cl_list = [k for k in cl_list if clustering[k]['extent'] >= min_extent]
-        logger.info('Clusters passing minimum extent criterion: {}'.format(len(cl_list)))
+        n_seq = sum(len(clustering[k]['seq_ids']) for k in cl_list)
+        logger.info('Enable_clusters: clusters passing minimum extent criterion: {}, containing {} sequences'.format(
+            len(cl_list), n_seq))
         if len(cl_list) == 0:
             raise NoRemainingClustersException(
                 'No clusters passed min_extent criterion of >= {}'.format(min_extent))
@@ -617,29 +1155,38 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
     if ordered_only:
         # drop any clusters that have not been ordered
         cl_list = [k for k in cl_list if 'order' in clustering[k]]
-        logger.info('Clusters passing ordered-only criterion: {}'.format(len(cl_list)))
+        n_seq = sum(len(clustering[k]['seq_ids']) for k in cl_list)
+        logger.info('Enable_clusters: clusters passing ordered-only criterion: {}, containing {} sequences'.format(
+            len(cl_list), n_seq))
         if len(cl_list) == 0:
-            raise NoRemainingClustersException(
-                'No clusters passed ordered-only criterion')
+            raise NoRemainingClustersException('No clusters passed ordered-only criterion')
 
     # impose a consistent order
     cl_list = sorted(cl_list)
 
+    # only pass sequences which were accepted.
+    # primarily this handles the situation where clustering solutions reference
+    # sequences with weak/no Hi-C observations (low signal).
+    _accepted = contact_map.get_primary_acceptance_mask()
     if ordered_only:
-        # use the determined order and orientation
-        cmb_ord = np.hstack([clustering[k]['order'] for k in cl_list])
+        # ordered by cluster and using a pre-determined order and orientation
+        cmb_ord = np.fromiter((seq_id for k in cl_list
+                               for seq_id in clustering[k]['order'] if _accepted[seq_id]), dtype=int)
     else:
-        # arbitrary order and orientation
-        cmb_ord = np.hstack([SeqOrder.asindex(clustering[k]['seq_ids']) for k in cl_list])
+        # ordered by cluster but internally arbitrary order and orientation
+        cmb_ord = SeqOrder.asindex(np.fromiter((seq_id for k in cl_list
+                                   for seq_id in clustering[k]['seq_ids'] if _accepted[seq_id]), dtype=int))
 
     if len(cmb_ord) == 0:
-        raise NoRemainingClustersException('No requested cluster contained ordering information')
+        raise NoRemainingClustersException('The set of enabled clusters contained no sequences')
 
-    logger.info('Total number of sequences in the clustering: {}'.format(len(cmb_ord)))
+    logger.info('Total number of interacting sequences involved in enabled clusters: {}'.format(len(cmb_ord)))
 
-    # prepare the mask
-    _mask = np.zeros_like(contact_map.order.mask_vector(), dtype=np.bool)
+    # prepare a mask, blacklisting all sequences
+    _mask = contact_map.order.new_mask(False)
+    # enable those sequences contained in the clusters
     _mask[cmb_ord['index']] = True
+    # apply the acceptance mask
     _mask &= contact_map.get_primary_acceptance_mask()
     logger.info('After joining with active sequence mask map: {}'.format(_mask.sum()))
     contact_map.order.set_mask_only(_mask)
@@ -686,11 +1233,10 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
         if contact_map.processed_map is None:
             contact_map.prepare_seq_map(norm=True, bisto=True, norm_method=norm_method)
     else:
-        if norm_method == 'sites':
-            logger.debug('Extent map normalisation switching to "length" as "sites" is unsupported')
-            norm_method = 'length'
         if norm_method is None:
-            norm_method = 'length'
+            # default normalisation for extent maps
+            # TODO change this to sites, if it proves better
+            norm_method = 'sites'
 
     # now build the list of relevant clusters and setup the associated mask
     cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=ordered_only,
@@ -771,7 +1317,7 @@ def write_report(fname, clustering):
                         v['name'],
                         len(v['seq_ids']),
                         v['extent'],
-                        v['rescue'],
+                        v['status'],
                         _n50(sr['length']),
                         _expect(sr['length'], sr['gc']),
                         sr['gc'].mean(),
@@ -788,10 +1334,10 @@ def write_report(fname, clustering):
 
             df.append(_cl_info)
 
-        except KeyError:
-            raise NoReportException(k)
+        except KeyError as e:
+            raise ReportFormatException(str(e), k)
 
-    _cols = ['id', 'name', 'size', 'extent', 'rescued', 'n50', 'gc_expect', 'gc_mean', 'gc_median', 'gc_std']
+    _cols = ['id', 'name', 'size', 'extent', 'status', 'n50', 'gc_expect', 'gc_mean', 'gc_median', 'gc_std']
     if has_cov:
         _cols.extend(['cov_expect', 'cov_mean', 'cov_median', 'cov_std'])
 
@@ -803,15 +1349,16 @@ def write_report(fname, clustering):
 def find_lost_singletons(contact_map, clustering):
     """
     Return the seq_ids of any sequence which was excluded from clustering. These sequences
-    will have been excluded for being too or with too few Hi-C observations.
+    will have been excluded for being too short or with too few Hi-C observations.
 
     :param contact_map: the contact map in question
     :param clustering: a clustering solution for this contact map.
     :return: the sequence ids for each excluded sequence.
     """
-    _lost = np.ones(contact_map.total_seq, dtype=np.bool)
-    for k, v in clustering.items():
-        _lost[v['seq_ids']] = False
+    _lost = contact_map.order.new_mask(True)
+    for v in clustering.values():
+        if len(v['seq_ids']) > 0:
+            _lost[v['seq_ids']] = False
     return np.where(_lost)[0]
 
 
@@ -1046,3 +1593,174 @@ def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clo
                     n_pairs += 1
 
         return output_file, n_refs, n_pairs
+
+
+def write_multilayer_pajek(output_filename, layers, add_inter=True, inter_scale=0.1):
+    """
+    Write a Pajek format graph multi-layer graph.
+
+    :param output_filename:
+    :param layers: an iterable collection of graphs, each of which will be a layer
+    :param add_inter: add inter-layer links between coincident nodes
+    :param inter_scale: inter-layer edge weight
+    """
+    assert len(layers) > 1, 'more than one layer is required'
+
+    with open(output_filename, 'w') as output_h:
+
+        # include all nodes, even if not present in every layer
+        node_registry = set()
+        intra_edge_count = 0
+        for n, lg in enumerate(layers, start=1):
+            ln = set(lg.nodes())
+            intra_edge_count += lg.size()
+            logger.debug(f'Number of nodes in layer {n}: {len(ln)}')
+            node_registry |= ln
+
+        node_registry = {_id: n for n, _id in enumerate(sorted(node_registry), start=1)}
+        assert len(node_registry) > 0, 'no nodes found in any layer'
+        logger.debug(f'Number of nodes across all layers: {len(node_registry)} '
+                     f'and {intra_edge_count} within-layer edges')
+
+        output_h.write(f'*Vertices {len(node_registry)}\n')
+        for _id, n in node_registry.items():
+            output_h.write(f'{n} "{_id}"\n')
+
+        output_h.write('*Intra\n')
+        for n, lg in enumerate(layers, start=1):
+            for u, v, d in lg.edges(data=True):
+                output_h.write(f'{n} {node_registry[u]} {node_registry[v]} {d["weight"]}\n')
+
+        # add explict interlayer edges.
+        if add_inter:
+            shared_nodes = set.intersection(*[set(lg.nodes()) for lg in layers])
+            if len(shared_nodes) == 0:
+                logger.debug('No shared nodes found, skipping inter-layer edges')
+            else:
+                output_h.write('*Inter\n')
+                logger.debug(f'Creating {len(shared_nodes)} inter-layer edges')
+                for _id in shared_nodes:
+                    output_h.write(f'1 {node_registry[_id]} 2 {inter_scale}\n')
+
+
+def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
+    """
+    Convert a GFA file into a Networkx graph. At present, it is assumed that the GFA file contains
+    optional depth attributes generated by the Flye assembler.
+
+    :param gfa_filename: path to the input GFA file
+    :param paths_to_edges: only include edges that are mentioned as paths, rather than all link records
+    :return: undirected Networkx graph
+    """
+    gfa = GFA(gfa_filename, skip_sequence_data=True, progress=read_progress)
+
+    g_out = nx.Graph()
+    # all segments in the GFA will become nodes
+    for _seg in gfa.segments.values():
+        # we wish to annotate nodes with k-mer depth reported by Flye
+        assert 'dp' in _seg.optionals, f'Segment {_seg.name} was missing depth field. Was this gfa created by Flye?'
+        g_out.add_node(_seg.name, length=_seg.length, depth=_seg.optionals['dp'].get())
+
+    # collect a registry of all inter-segment links
+    link_registry = nx.Graph()
+    for _link in gfa.links.values():
+        u, v = _link.src, _link.dest
+        # check that the RC field exists, this acts as edge weight
+        assert 'RC' in _link.optionals, f'Link ({u},{v}) is missing the RC field. Was this gfa created by Flye?'
+        cov = _link.optionals['RC'].get()
+        if link_registry.has_edge(u, v):
+            link_registry[u][v]['udir'].append(_link.src_orient)
+            link_registry[u][v]['vdir'].append(_link.dest_orient)
+            link_registry[u][v]['rc'].append(cov)
+        else:
+            cov = _link.optionals['RC'].get()
+            link_registry.add_edge(u, v, udir=[_link.src_orient], vdir=[_link.dest_orient], rc=[cov])
+
+    # Assemblers will likely treat links as directed and report more than one record per segment pair.
+    # We therefore take the mean depth as edge weights.
+    for u, v, d in link_registry.edges(data=True):
+        link_registry[u][v]['weight'] = np.mean(d['rc'])
+
+    # add edges, either selectively just for paths or all links
+    if paths_to_edges:
+        for _path in gfa.paths.values():
+            for i in range(len(_path.segment_names)-1):
+                u, udir = _path.segment_names[i]
+                v, vdir = _path.segment_names[i+1]
+                g_out.add_edge(u, v, contig=_path.name, weight=link_registry[u][v]['weight'])
+    else:
+        g_out.add_edges_from(link_registry.edges(data=True))
+
+    return g_out
+
+
+def harden_clustering(clustering, contact_map):
+    """
+    Reduce a potentially soft-clustering solution to a hard-clustering solution by removing
+    repeated assignments for any given sequence. Only the assignment to the largest cluster
+    is retained -- measured by extent.
+
+    TODO ironically, the present codebase does not handle the notion of a soft-clustering solution
+       and will have to be implemented if these solutions prove superior.
+
+    :param clustering: the clustering solution
+    :param contact_map: the contact map
+    :return the deduplicated clustering
+    """
+    # potential one-to-many lookup seq->cluster
+    seq2cl = defaultdict(set)
+    for cl_id, cl_info in clustering.items():
+        for seq_id in cl_info['seq_ids']:
+            seq2cl[seq_id].add((cl_id, cl_info['extent']))
+
+    hard_clustering = deepcopy(clustering)
+    seq_info = np.array(contact_map.seq_info,
+                        dtype=np.dtype([('offset', int),
+                                        ('refid', int),
+                                        ('name', 'U30'),
+                                        ('length', int),
+                                        ('sites', int),
+                                        ('gc', float)]))
+
+    n_duped = 0
+    dupe_extent = 0
+    for seq_id, memberships in seq2cl.items():
+        if len(memberships) <= 1:
+            continue
+        n_duped += 1
+        # keep only the assignment to the largest cluster
+        # TODO this a simplistic approach for now.
+        cl_targets = sorted(memberships, key=lambda x: -x[1])[1:]
+        for cl_id, extent in cl_targets:
+            _ix = np.where(hard_clustering[cl_id]['seq_ids'] == seq_id)[0]
+            assert len(_ix) != 0, f'failed to find sequence {seq_id} in expected cluster {cl_id}'
+            hard_clustering[cl_id]['seq_ids'] = np.delete(hard_clustering[cl_id]['seq_ids'], _ix)
+            hard_clustering[cl_id]['extent'] -= seq_info[seq_id]['length']
+            hard_clustering[cl_id]['deduplicated'].append(seq_id)
+        dupe_extent += seq_info[seq_id]['length']
+
+    logger.info(f'Clustering involves {len(seq2cl):,} sequences, '
+                f'of which {n_duped:,} were assigned to more than one cluster')
+    logger.info(f'Average length of a degenerate sequence: {dupe_extent // n_duped:,}')
+
+    # it's possible that some clusters are now empty
+    n_depleted = remove_empty_clusters(hard_clustering)
+    if n_depleted > 0:
+        logger.info(f'Removed {n_depleted} clusters that had no remaining members')
+
+    return hard_clustering
+
+
+def remove_empty_clusters(clustering):
+    """
+    In-place removal of any clusters which are empty, with the implication that ids within the
+    clustering will no longer be consecutive integers.
+    :param clustering:
+    """
+    n_depleted = 0
+    for k in list(clustering):
+        if len(clustering[k]['seq_ids']) == 0:
+            n_depleted += 1
+            del clustering[k]
+
+    return n_depleted
