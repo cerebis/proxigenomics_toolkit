@@ -12,6 +12,7 @@ import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
 import logging
 import numpy as np
+import math
 import pysam
 import scipy.sparse as sp
 import tqdm
@@ -113,13 +114,13 @@ def fast_norm_tipbased_bysite(coords, data, sites):
 
 
 # first 30 factorial values as approx as floats
-LOOKUP_TABLE = np.fromiter((np.math.factorial(i) for i in range(31)), dtype=np.float64)
+LOOKUP_TABLE = np.fromiter((math.factorial(i) for i in range(31)), dtype=np.float64)
 
 
 @nb.jit(nopython=True)
 def fast_factorial(n):
     if n > 30:
-        return np.math.gamma(n+1)
+        return math.gamma(n+1)
     return LOOKUP_TABLE[n]
 
 
@@ -825,8 +826,6 @@ class ContactMap(object):
         """
         Scan the reference fasta file and extract information about each sequence.
 
-        :param min_len: minimum length threshold
-        :param seq_file: fasta file
         :return: dict of dicts, keyed by sequence name
         """
         fasta_info = {}
