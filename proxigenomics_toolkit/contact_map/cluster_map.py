@@ -223,24 +223,24 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
     name2id = contact_map.make_reverse_index('name')
 
     clustering = {}
-    for cl_id, _seqs in cl_to_ids.items():
+    for cl_id, _seq_names in cl_to_ids.items():
 
-        known_ids = []
-        unref = []
-        for sn in _seqs:
+        _seq_ids = []
+        unknown = []
+        for ix, sn in enumerate(_seq_names):
             if sn in name2id:
-                known_ids.append(name2id[sn])
+                _seq_ids.append(name2id[sn])
             else:
-                unref.append(sn)
+                unknown.append(ix)
 
         # TODO clustering should be made class, as this dict approach is
         #   too ad-hoc and error prone.
         clustering[cl_id] = {
-            'names': np.array(_seqs),
-            'seq_ids': np.array(known_ids),
-            'extent': contact_map.order.lengths()[known_ids].sum(),
+            'names': np.array(_seq_names),
+            'seq_ids': np.array(_seq_ids),
+            'extent': contact_map.order.lengths()[_seq_ids].sum(),
             'status': 'primary',
-            'unreferenced': unref,
+            'unreferenced': unknown,
             'deduplicated': []
         }
 
