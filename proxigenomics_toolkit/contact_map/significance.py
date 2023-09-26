@@ -23,6 +23,10 @@ from ..io_utils import load_object
 
 logger = logging.getLogger(__name__)
 
+# TODO suppressing FutureWarnings from seaborn until a release (>12.2) addresses (added 2023-09-18)
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning, module='seaborn')
+
 
 def sequence_details(contact_map, coverage_info, clustering):
     """
@@ -44,7 +48,10 @@ def sequence_details(contact_map, coverage_info, clustering):
 
     # 3. join the table of coverage, using sequence name as the key
     seq_info = seq_info.reset_index(drop=False)
-    seq_info = seq_info.set_index('name', drop=False).join(coverage_info)
+    before_len = len(seq_info)
+    seq_info = seq_info.set_index('name', drop=False).join(coverage_info, how='inner')
+    assert len(seq_info) == before_len, ('Coverage data did not contain information '
+                                         'for all clustered sequences')
 
     # 4. prepare a lookup table from seq_id to sequence length and number of sites
     # - this is used for removing the contribution of an excluded
@@ -88,10 +95,10 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_len
 
     seq_info, _ix2info, _ix2cl = sequence_details(contact_map, coverage_info, clustering)
 
-    seq_grp = seq_info.groupby('cluster').agg({'length': [np.sum, 'count'],
+    seq_grp = seq_info.groupby('cluster').agg({'length': ['sum', 'count'],
                                                'sites': sum_min1,
-                                               'coverage': np.mean,
-                                               'gc': np.mean}, axis=0)
+                                               'coverage': 'mean',
+                                               'gc': 'mean'}, axis=0)
     cl_agg = pandas.DataFrame()
     cl_agg['length'] = pandas.to_numeric(seq_grp['length', 'sum'], downcast='integer')
     cl_agg['size'] = pandas.to_numeric(seq_grp['length', 'count'], downcast='integer')
@@ -391,7 +398,6 @@ def robust_read_csv(csv_name, sep=','):
     _col_def = OrderedDict({'name': str, 'coverage': np.float64})
     try:
         df = pandas.read_csv(csv_name, header=None, sep=sep, names=list(_col_def), dtype=_col_def)
-        pandas.to_numeric(df.iloc[0])
     except ValueError:
         # first row was not numeric, re-read assuming the CSV file had a header
         df = pandas.read_csv(csv_name, sep=sep, skiprows=1, names=list(_col_def), dtype=_col_def)
@@ -423,8 +429,9 @@ class SignificantLinks(object):
         :param func_name: the name of the function to return
         :return: callable R object function
         """
-        robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
-        return robjects.globalenv[func_name]
+        with localconverter(robjects.default_converter):
+            robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
+            return robjects.globalenv[func_name]
 
     def create_seq2cluster_graph(self, sep=',', min_seq_length=5000):
         """
@@ -446,11 +453,12 @@ class SignificantLinks(object):
 
         logger.info('Initial graph info: nodes={:,}, edges={:,}'.format(seq2cl_graph.order(), seq2cl_graph.size()))
 
-        iso_count = Counter(u[0] for u in nx.isolates(seq2cl_graph))
+        isolated_nodes = list(nx.isolates(seq2cl_graph))
+        iso_count = Counter(u[0] for u in isolated_nodes)
         logger.info('Of {:,} isolated nodes, {:,} are clusters and {:,} are sequences'.format(
             sum(iso_count.values()), iso_count['c'], iso_count['n']))
         # remove the isolates that provide nothing to this analysis
-        seq2cl_graph.remove_nodes_from(list(nx.isolates(seq2cl_graph)))
+        seq2cl_graph.remove_nodes_from(isolated_nodes)
         logger.info('After isolate removal: nodes={:,}, edges={:,}'.format(
             seq2cl_graph.order(), seq2cl_graph.size()))
         con_count = Counter(u[0] for u in seq2cl_graph.nodes())
@@ -493,6 +501,7 @@ class SignificantLinks(object):
                 u_dat = seq2cl_graph.nodes[u]
                 v_dat = seq2cl_graph.nodes[v]
                 assert seq2cl_graph.has_edge(u, v), 'missing neighbor edge -- should not happen'
+                # skip associations for excluded clusters
                 node_to_cluster.append((u[1],
                                         v[1],
                                         v_dat['size'],
@@ -510,13 +519,13 @@ class SignificantLinks(object):
         # make this a dataframe for easy manipulation
         node_to_cluster = np.array(node_to_cluster, dtype=_dtype)
         node_to_cluster = pandas.DataFrame(node_to_cluster)
-        logger.info('Sequence to cluster table contains {:,} observations'.format(len(node_to_cluster)))
+        logger.info(f'Sequence to cluster table contains {len(node_to_cluster):,} observations')
 
         # write table of all observations
         node_to_cluster.to_csv('{}_all.csv'.format(self.output_basename))
         self.all_contacts = node_to_cluster
 
-    def outlier_removal(self, initial_sigma=3, pr_cutoff=0.0004, n_samples=10000):
+    def outlier_removal(self, initial_sigma=3, pr_cutoff=0.0004, n_samples=10000, plot=True):
         """
         Outlier removal aimed at decreasing the FPR within the spurious data table. FPR in this
         case are interactions that are actually non-spurious. These are cases where a sequence
@@ -552,19 +561,29 @@ class SignificantLinks(object):
         # plot will use n_points
         n_points = n_samples if n_samples < _max_points else _max_points
 
+        if plot:
+            # plot initial scatter and kde
+            df_plot = np.log(clip_data)
+            g = sb.PairGrid(df_plot, diag_sharey=False)
+            g.map_upper(sb.scatterplot, s=15)
+            g.map_lower(sb.kdeplot)
+            g.map_diag(sb.kdeplot, lw=2)
+            g.savefig('{}_outlier_stage0.png'.format(self.output_basename))
+
         # stage 1: remove outliers using sigma clipping to lessen the impact of
         # significant outliers on stage 2.
         clip_data = np.log(np.ma.compress_rows(sigma_clip(clip_data, axis=0, sigma=initial_sigma)))
 
-        # outcome of stage 1
-        df_plot = pandas.DataFrame(clip_data, columns=_clip_cols)
-        if not use_all:
-            df_plot = df_plot.sample(n_points, random_state=self.seed)
-        g = sb.PairGrid(df_plot, diag_sharey=False)
-        g.map_upper(sb.scatterplot, s=15)
-        g.map_lower(sb.kdeplot)
-        g.map_diag(sb.kdeplot, lw=2)
-        g.savefig('{}_outlier_stage1.png'.format(self.output_basename))
+        if plot:
+            # plot outcome of sigma clipping
+            df_plot = pandas.DataFrame(clip_data, columns=_clip_cols)
+            if not use_all:
+                df_plot = df_plot.sample(n_points, random_state=self.seed)
+            g = sb.PairGrid(df_plot, diag_sharey=False)
+            g.map_upper(sb.scatterplot, s=15)
+            g.map_lower(sb.kdeplot)
+            g.map_diag(sb.kdeplot, lw=2)
+            g.savefig('{}_outlier_stage1.png'.format(self.output_basename))
 
         # stage 2: fit a single-component gaussian model to the pre-filtered space
         clip_model = BayesianGaussianMixture(covariance_type='diag', tol=1e-5, random_state=self.seed, max_iter=1000)
@@ -577,24 +596,52 @@ class SignificantLinks(object):
         _outlier_cutoff = np.log(pr_cutoff)
         df = df.query('clip_logpr > @_outlier_cutoff')
 
-        df_plot = df[_clip_cols]
-        if not use_all:
-            df_plot = df_plot.sample(n_points, random_state=self.seed)
-        # outcome of stage 2
-        g = sb.PairGrid(np.log(df_plot), diag_sharey=False)
-        g.map_upper(sb.scatterplot, s=15)
-        g.map_lower(sb.kdeplot)
-        g.map_diag(sb.kdeplot, lw=2)
-        g.savefig('{}_outlier_stage2.png'.format(self.output_basename))
+        if plot:
+            # plot final outcome
+            df_plot = df[_clip_cols]
+            if not use_all:
+                df_plot = df_plot.sample(n_points, random_state=self.seed)
+            # outcome of stage 2
+            g = sb.PairGrid(np.log(df_plot), diag_sharey=False)
+            g.map_upper(sb.scatterplot, s=15)
+            g.map_lower(sb.kdeplot)
+            g.map_diag(sb.kdeplot, lw=2)
+            g.savefig('{}_outlier_stage2.png'.format(self.output_basename))
 
         self.spurious = df
         logger.info('After outlier filtering, {:,} observations passed'.format(len(self.spurious)))
 
-    def create_spurious_table(self, min_bin_size=5, min_bin_length=100000,
+    def create_spurious_table(self, excluded_clusters=None, excluded_sequences=None,
+                              min_bin_size=5, min_bin_length=100000,
                               min_single_length=1000000, big_threshold=0.8, small_value=1):
+        """
+        Create a table of inter-genome_bin interactions which are likely to be spurious. Excluded
+        objects (clusters/sequences) are those which are likely to introduce false positives.
+
+        :param excluded_clusters: problematic clusters to exclude
+        :param excluded_sequences: problematic sequences to exclude
+        :param min_bin_size:
+        :param min_bin_length:
+        :param min_single_length:
+        :param big_threshold:
+        :param small_value:
+        :return:
+        """
 
         # begin with a copy, since we will make some inplace changes
         spurious = self.all_contacts.copy()
+
+        if excluded_clusters is not None and len(excluded_clusters) > 0:
+            assert isinstance(excluded_clusters, list), 'excluded_clusters must be a list'
+            n_before = len(spurious)
+            spurious = spurious.query('cluster not in @excluded_clusters').reset_index(drop=True)
+            logger.info(f'Excluded clusters removed {n_before - len(spurious):,} observations')
+
+        if excluded_sequences is not None and len(excluded_sequences) > 0:
+            assert isinstance(excluded_sequences, list), 'excluded_sequences must be a list'
+            n_before = len(spurious)
+            spurious = spurious.query('seq not in @excluded_sequences').reset_index(drop=True)
+            logger.info(f'Excluded sequences removed {n_before - len(spurious):,} observations')
 
         # Replace zeros with a small value when they occur in certain columns
         # TODO check why Flye reports zero coverage occasionally. Should we be dropping them instead?
@@ -640,8 +687,11 @@ class SignificantLinks(object):
 
         self.spurious = spurious
 
-    def estimate_significance_model(self, n_samples=10000, distrib_func='nbinom2',
-                                    fixed_model=None, disp_model=None, zif_model=None):
+    def estimate_significance_model(self, n_samples=10000,
+                                    distrib_func='nbinom2',
+                                    fixed_model='contacts1m ~ sites_z * cov_z',
+                                    disp_model='~ sites_z / cov_z',
+                                    zi_model='~ cov_z'):
         """
         For a table of contig-to-genome_bin interactions.
 
@@ -677,7 +727,7 @@ class SignificantLinks(object):
         :param distrib_func: distribution family to use in model (eg. nbinom2, genpois, compois)
         :param fixed_model: custom fixed-effects model for R
         :param disp_model: custom dispersion model for R
-        :param zif_model: custom zero-inflation model for R
+        :param zi_model: custom zero-inflation model for R
         """
         def _drop_stale_columns(*dataframes):
             """
@@ -707,47 +757,40 @@ class SignificantLinks(object):
             fitting = cv.py2rpy(fitting)
             df_all = cv.py2rpy(self.all_contacts)
 
-        # Set default models.
-        if fixed_model is None:
-            fixed_model = 'contacts1m ~ sites_z + cov_z * length_z + gc_z'
-        if disp_model is None:
-            disp_model = '~ 1'
-        if zif_model is None:
-            zif_model = '~ sites_z + cov_z'
+        with localconverter(robjects.default_converter):
+            logger.info('Calling R method')
+            ret_r = self.find_significant_function_r(fitting, df_all,
+                                                     fixed_model=fixed_model,
+                                                     disp_model=disp_model,
+                                                     zi_model=zi_model,
+                                                     output_path=self.output_basename,
+                                                     distrib_func=distrib_func,
+                                                     seed=self.seed)
 
-        logger.info('Calling R method')
-        ret_r = self.find_significant_function_r(fitting, df_all,
-                                                 fixed_model=fixed_model,
-                                                 disp_model=disp_model,
-                                                 zif_model=zif_model,
-                                                 output_path=self.output_basename,
-                                                 distrib_func=distrib_func,
-                                                 seed=self.seed)
+            # extract various return information from the R objects
+            # ANOVA result
+            anova = rmatrix2pandas(ret_r.rx2['anova'])
+            anova['Df'] = pandas.to_numeric(anova['Df'], downcast='unsigned')
 
-        # extract various return information from the R objects
-        # ANOVA result
-        anova = rmatrix2pandas(ret_r.rx2['anova'])
-        anova['Df'] = pandas.to_numeric(anova['Df'], downcast='unsigned')
+            # Build summary information dictionary
+            summary = {'AIC': ret_r.rx2['AIC'][0],
+                       'BIC': ret_r.rx2['BIC'][0],
+                       'logLik': ret_r.rx2['logLik'][0],
+                       'coeffs': rvector2dict(ret_r.rx2['fixef']),
+                       'sigma': ret_r.rx2['sigma'][0],
+                       'anova': anova}
 
-        # Build summary information dictionary
-        summary = {'AIC': ret_r.rx2['AIC'][0],
-                   'BIC': ret_r.rx2['BIC'][0],
-                   'logLik': ret_r.rx2['logLik'][0],
-                   'coeffs': rvector2dict(ret_r.rx2['fixef']),
-                   'sigma': ret_r.rx2['sigma'][0],
-                   'anova': anova}
-        self.fit_summary = summary
+            self.fit_summary = summary
 
-        # Convert the returned tables from R back into pandas
-        # these tables now have extra columns pertaining to:
-        # significance: 'pvalue, response'
-        # scaled exogenous: 'length_z, sites_z, cov_z, gc_z'
-        # endogenous: contacts1m (contacts - 1)
         with localconverter(robjects.default_converter + pandas2ri.converter):
+            # Convert the returned tables from R back into pandas
+            # these tables now have extra columns pertaining to:
+            # significance: 'pvalue, response'
+            # scaled exogenous: 'length_z, sites_z, cov_z, gc_z'
+            # endogenous: contacts1m (contacts - 1)
             self.fitted = robjects.conversion.rpy2py(ret_r.rx2('fitted'))
             self.all_contacts = robjects.conversion.rpy2py(ret_r.rx2('all_contacts'))
-        logger.info("Significance testing was computed for {:,} observations".format(
-            len(self.all_contacts)))
+            logger.info("Significance testing was computed for {:,} observations".format(len(self.all_contacts)))
 
     def fdr_correction(self, pr_signif=0.05):
         """
@@ -767,13 +810,17 @@ class SignificantLinks(object):
         logger.info('Using adjusted p-values there were {:,} significant interactions ({:.1f}%)'.format(
             n_signif, n_signif/len(self.all_contacts)))
 
-    def prepare_data(self, sep=',', min_seq_length=5000, min_bin_size=5,
-                     min_bin_length=100000, min_single_length=1000000, big_threshold=0.8,
-                     initial_sigma=3, pr_cutoff=0.0004, n_samples=10000, small_value=1):
+    def prepare_data(self, sep=',', excluded_clusters=None, excluded_sequences=None,
+                     min_seq_length=5000, min_bin_size=5, min_bin_length=100000,
+                     min_single_length=1000000, big_threshold=0.8,
+                     initial_sigma=3, pr_cutoff=0.0004, n_samples=10000, small_value=1,
+                     plot_outliers=False):
         """
         From the Hi-C dataset, prepare the input data for significance testing
 
         :param sep: variable separator for coverage csv file
+        :param excluded_clusters: list of clusters to exclude from analysis
+        :param excluded_sequences: list of sequences to exclude from analysis
         :param min_seq_length: minimum sequence length to be considered
         :param min_bin_size: minimum bin size (number of sequences) to be considered
         :param min_bin_length: minimum bin length (total sum of seq lengths) to be considered
@@ -783,12 +830,15 @@ class SignificantLinks(object):
         :param pr_cutoff: probability minimum for outlier stage-2
         :param n_samples: number of samples to use in fitting model
         :param small_value: small value for replacing observed zeros
+        :param plot_outliers: generate diagnostic plots from outlier removal
         """
         self.create_seq2cluster_graph(sep=sep, min_seq_length=min_seq_length)
         self.graph_to_table()
-        self.create_spurious_table(min_bin_size, min_bin_length,
-                                   min_single_length, big_threshold, small_value)
-        self.outlier_removal(initial_sigma, pr_cutoff, n_samples)
+        self.create_spurious_table(excluded_clusters=excluded_clusters, excluded_sequences=excluded_sequences,
+                                   min_bin_size=min_bin_size, min_bin_length=min_bin_length,
+                                   min_single_length=min_single_length, big_threshold=big_threshold,
+                                   small_value=small_value)
+        self.outlier_removal(initial_sigma, pr_cutoff, n_samples, plot=plot_outliers)
 
     def fit_model(self, n_samples=10000, pr_signif=0.05, fixed_model=None, disp_model=None, zif_model=None):
         """
@@ -804,5 +854,5 @@ class SignificantLinks(object):
         self.estimate_significance_model(n_samples,
                                          fixed_model=fixed_model,
                                          disp_model=disp_model,
-                                         zif_model=zif_model)
+                                         zi_model=zif_model)
         self.fdr_correction(pr_signif)

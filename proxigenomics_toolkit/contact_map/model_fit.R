@@ -58,7 +58,7 @@ sigma_func = function(data, fitobj) {
 }
 
 find_significant = function(fitted, all_contacts, output_path, distrib_func, n_samples, seed,
-                            fixed_model, disp_model, zif_model) {
+                            fixed_model, disp_model, zi_model) {
 
     MAX_POINTS = 1000
 
@@ -75,7 +75,7 @@ find_significant = function(fitted, all_contacts, output_path, distrib_func, n_s
     # convert strings to formulae
     fixed_model = as.formula(fixed_model)
     disp_model = as.formula(disp_model)
-    zif_model = as.formula(zif_model)
+    zi_model = as.formula(zi_model)
 
     writeLines(paste('Input rows:', nrow(fitted)))
 
@@ -105,7 +105,7 @@ find_significant = function(fitted, all_contacts, output_path, distrib_func, n_s
 
     writeLines('Fitting model')
     modfit = glmmTMB(fixed_model,
-                     ziformula = zif_model,
+                     ziformula = zi_model,
                      dispformula = disp_model,
                      family = distrib_func,
                      control = glmmTMBControl(parallel = 8),
