@@ -751,7 +751,7 @@ class ContactMap(object):
         assert 0 < len(enzymes) <= 2, 'no more than two enzymes can be specified'
         self.site_counter = SiteCounter(*enzymes, tip_size=tip_size, is_linear=True)
 
-        # build a dictionary of reference features
+        # build a dictionary of features/details for each reference sequence
         fasta_info = self.initialise_fasta_info()
 
         # now inspect the BAM header
@@ -777,17 +777,17 @@ class ContactMap(object):
                     continue
 
                 try:
-                    fa = fasta_info[rname]
+                    fa_info = fasta_info[rname]
                 except KeyError:
                     logger.info('From BAM, reference {} was not present in supplied fasta'.format(rname))
                     ref_count['seq_missing'] += 1
                     continue
 
-                assert fa['length'] == rlen, \
-                    'BAM and FASTA lengths do not agree for reference {}: {} != {}'.format(rname, fa['length'], rlen)
+                assert fa_info['length'] == rlen, \
+                    'BAM and FASTA lengths do not agree for reference {}: {} != {}'.format(rname, fa_info['length'], rlen)
 
-                self.seq_info.append(SeqInfo(offset, n, rname, rlen, fa['sites'], fa['gc']))
-                self.seq_sites.append(fa['coords'])
+                self.seq_info.append(SeqInfo(offset, n, rname, rlen, fa_info['sites'], fa_info['gc']))
+                self.seq_sites.append(fa_info['coords'])
 
                 offset += rlen
 
@@ -834,11 +834,10 @@ class ContactMap(object):
             fasta_count = count_fasta_sequences(self.seq_file)
             for n_seq, seqrec in tqdm.tqdm(enumerate(SeqIO.parse(multi_fasta, 'fasta')),
                                            total=fasta_count, desc='Analyzing reference sequences'):
-                if len(seqrec) < self.min_len:
-                    continue
-                cs_coords = self.site_counter.find_sites(seqrec.seq)
+                cs_coords = np.array(self.site_counter.find_sites(seqrec.seq))
                 fasta_info[seqrec.id] = {'sites': len(cs_coords),
                                          'length': len(seqrec),
+                                         # TODO, biopython has made an interface change for GC
                                          'gc': SeqUtils.GC(seqrec.seq),
                                          'coords': cs_coords}
 
