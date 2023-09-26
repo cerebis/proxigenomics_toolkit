@@ -118,7 +118,7 @@ def bistochastic_graph(g):
 def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
                  exclude_names=None, norm_method='sites', append_singletons=True,
                  from_extent=False, fdr_alpha=0.05, use_entropy=False, gfa_file=None,
-                 markov_scale=None):
+                 markov_scale=None, vary_markov=False, regularize=None):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -135,6 +135,9 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
     :param use_entropy: enable entropy correction within infomap clustering
     :param gfa_file: path to a GFA file, if supplied, multilayered clustering will be performed
     :param markov_scale: adjust scale of markov time in Infomap clustering (default: 1.0)
+    :param vary_markov: enable variable markov time in Infomap clustering (not compatible with markov_scale)
+    :param regularize: enable regularization and set strength of prior in Infomap clustering
+    (fully connected Bayesian prior network)
     :return: a dictionary detailing the full clustering of the contact map
     """
 
@@ -199,8 +202,16 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
             if use_entropy:
                 options.append('--entropy-corrected')
 
+            if vary_markov:
+                assert markov_scale is None, 'Cannot both vary_markov and set markov_scale'
+                options.append('--variable-markov-time')
+
             if markov_scale is not None:
+                assert not vary_markov, 'Cannot both vary_markov and set markov_scale'
                 options.extend(['--markov-time', str(markov_scale)])
+
+            if regularize is not None:
+                options.append(['--regularize', str(regularize)])
 
             if n_iter is None:
                 n_iter = 10
