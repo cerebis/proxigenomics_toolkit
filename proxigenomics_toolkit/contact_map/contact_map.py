@@ -1369,7 +1369,7 @@ class ContactMap(object):
             _map, scl = self._bisto_seq(_map)
             # retain the scale factors
             self.bisto_scale = scl
-            qlo, qmed, qhi = np.quantile(scl, q=[0.025,0.5,0.975])
+            qlo, qmed, qhi = np.quantile(scl, q=[0.025, 0.5, 0.975])
             logger.debug(f'Map balanced, scale factor range median:{qmed:.3f}, 95%:[{qlo:.3f},{qhi:.3f}]')
 
         # cache the results for optional quick access
@@ -1438,8 +1438,7 @@ class ContactMap(object):
         :param bisto: make map bistochastic
         :param permute: permute the map using current order
         :param mean_type: length normalisation mean (geometric, harmonic, arithmetic)
-        :param norm_method: methods used to normalise the matrix (length, sites, gothic-effect,
-        gothic-binomial, gothic-poisson)
+        :param norm_method: methods used to normalise the matrix (length, sites, binomial)
         :param add_blocks: add eulerian blocks to the map for contiguity during clustering
         :param apply_mask: apply the current primary acceptance mask
         :param fdr_alpha: FDR alpha used in gothic normalisation
@@ -1482,8 +1481,8 @@ class ContactMap(object):
 
         # make map bistochastic if requested
         if bisto:
-            _map, scl = sparse_utils.kr_biostochastic(_map, delta=1e-3, Delta=1e2, tol=1e-8, max_iter=10000)
-            qlo, qmed, qhi = np.quantile(scl, q=[0.025,0.5,0.975])
+            _map, scl = self._bisto_seq(_map)
+            qlo, qmed, qhi = np.quantile(scl, q=[0.025, 0.5, 0.975])
             logger.debug(f'Map balanced, scale factor range median:{qmed:.3f}, 95%:[{qlo:.3f},{qhi:.3f}]')
 
         if add_blocks:
@@ -1603,7 +1602,7 @@ class ContactMap(object):
 
         :param _map: the target map to apply normalisation
         :param tip_based: treat the supplied map as a tip-based tensor
-        :param method: the normalisation method to use [sites, length, gothic-effect, gothic-binomial, gothic-poisson]
+        :param method: the normalisation method to use [sites, length, gothic]
         :param mean_type: for length normalisation, choice of mean (harmonic, geometric, arithmetic)
         :param gothic_noself: exclude self-self interactions when calculating relative coverage.
         :return: normalized map
@@ -1637,32 +1636,19 @@ class ContactMap(object):
                                                for j in range(_map.shape[0])), dtype=np.float64)
                 _map = _map.tocsr()
 
-        elif method.startswith('gothic'):
-
+        elif method == 'gothic':
             if tip_based:
-                raise ApplicationException('GOTHiC tip based normalisation not supported')
-
-            if method == 'gothic-effect':
-                goth_mode = 'effect'
-                logger.debug('Doing GOTHiC based effect size normalisation')
-            elif method == 'gothic-binomial':
-                goth_mode = 'binomial'
-                logger.debug('Doing GOTHiC based Binomial significance normalisation')
-            elif method == 'gothic-poisson':
-                goth_mode = 'poisson'
-                logger.debug('Doing GOTHiC based Poisson significance normalisation')
-            else:
-                raise ApplicationException('Unknown method {} in GOTHiC normalisation'.format(method))
+                raise ApplicationException('GOTHiC normalisation not supported with tip-based maps')
+            goth_mode = 'binomial'
+            logger.debug(f'Doing GOTHiC based {goth_mode} significance normalisation')
 
             if gothic_noself:
                 _map = _map.tolil()
                 _map.setdiag(0)
 
             _map = _map.tocsr()
-
             # take triangular sum as total number of links (pairs) in map
             total_links = sp.triu(_map).sum()
-
             # calculate relative length-normalized contig coverage
             seq_len = self.order.order['length'].astype(np.float64)
             rel_cov = _map.sum(axis=1).astype(np.float64)
@@ -1678,12 +1664,11 @@ class ContactMap(object):
 
         return _map
 
-    def _norm_extent(self, _map, method='length', mean_type='geometric', fdr_alpha=0.01,
-                     reject_insig=True):
+    def _norm_extent(self, _map, method='length', mean_type='geometric', fdr_alpha=0.01, reject_insig=True):
         """
         Normalise a extent map in place by the geometric mean of interacting contig pairs lengths.
 
-       :param method: the normalisation method to use [sites, length, gothic-sig, gothic-es]
+       :param method: the normalisation method to use [sites, length, gothic]
        :param mean_type: for length normalisation, choice of mean (harmonic, geometric, arithmetic)
        :param fdr_alpha: the FDR-BH alpha value to use for GOTHiC significance normalisation
        :param reject_insig: reject insignificant interactions as determined after FDR correction -- for GOTHiC only.
@@ -1735,20 +1720,13 @@ class ContactMap(object):
 
             fast_norm_bysite(_map.row, _map.col, _map.data, _cs_lookup)
 
-        elif method.startswith('gothic'):
+        elif method == 'gothic':
 
-            if method == 'gothic-binomial':
-                goth_mode = 'binomial'
-                logger.debug('Extent_map: doing GOTHiC based Binomial significance normalisation')
-            elif method == 'gothic-poisson':
-                goth_mode = 'poisson'
-                logger.debug('Extent_map: doing GOTHiC based Poisson significance normalisation')
-            else:
-                raise ApplicationException('Unknown method {} in GOTHiC normalisation'.format(method))
+            goth_mode = 'binomial'
+            logger.debug(f'Extent_map: doing GOTHiC based {goth_mode} significance normalisation')
 
             # total number of off-diagonal observations
             total_obs = sp.triu(_map, k=1).sum()
-
             # marginals represent total hits per bin
             _map = _map.tocsr()
             # per-bin relative number of observations -- without diagonal elements
