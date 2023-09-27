@@ -1,6 +1,6 @@
 from ..misc_utils import package_path, make_dir
 from ..seq_utils import IndexedFasta
-from ..linalg import kr_biostochastic
+from ..linalg import kr_bistochastic
 from ..exceptions import *
 from .contact_map import SeqOrder
 from collections import defaultdict
@@ -106,7 +106,7 @@ def add_cluster_names(clustering, prefix='CL'):
 
 def bistochastic_graph(g):
     _adj_mat = sp.csr_matrix(nx.adjacency_matrix(g))
-    _adj_mat, _ = kr_biostochastic(_adj_mat)
+    _adj_mat, _ = kr_bistochastic(_adj_mat)
     _adj_mat = _adj_mat.tocoo()
     name_lookup = list(g.nodes())
     g_out = nx.Graph()
@@ -391,24 +391,41 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             clustering[cl_id]['report'] = report
 
 
-def revise_clusters(target_clusters, contact_map, clustering: dict, algorithm=None, from_extent=False,
-                    norm=True, bisto=True, scale=True, norm_method='sites', only_new=False):
+def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='greedy_modularity',
+                    from_extent=False, norm=True, bisto=True, scale=True, norm_method='sites',
+                    only_new=False, **kwargs):
     """
     Subject a list of target clusters to a new round of community detection. Each cluster is
     extracted as a subgraph and then clustered. Expected methods return type is a list of
     partitions, each containing the collection of member sequences. networkx.community
-    algorithms fit this return type. leidenalg is another alternative.
+    algorithms fit this return type.
+
+    Current choices:
+        'label_propagation'
+        'greedy_modularity'
+        'louvain'
 
     :param target_clusters: 0-based cluster ids
     :param contact_map: the relevant contact map
     :param clustering: the relevant clustering solution
-    :param algorithm: specific algorithm returnning a list of community partitions
+    :param algorithm_name: partitioning algorithm Eg. parts = func(graph). Networkx.community
     :param from_extent: use the extent map to define the subgraph
     :param norm_method: normalisation method to apply to contact map
+    :param kwargs: additional arguments to pass to the partitioning algorithm
     :return:
     """
-    if algorithm is None:
-        algorithm = nx.community.label_propagation_communities
+
+    algorithm_repository = {
+        'label_propagation': nx.community.label_propagation_communities,
+        'greedy_modularity': nx.community.greedy_modularity_communities,
+        'louvain': nx.community.louvain_communities,
+    }
+    try:
+        algorithm = algorithm_repository[algorithm_name]
+        logger.info(f'Revising selected clusters using: {algorithm_name}')
+    except KeyError:
+        raise ApplicationException(f'Unknown community detection algorithm {algorithm_name}. '
+                                   f'Choices are: {",".join(algorithm_repository.keys())}')
 
     # prepare the contact map's complete graph
     g_complete = to_graph(contact_map, node_id_type='external', norm=norm, bisto=bisto, scale=scale,
@@ -437,7 +454,7 @@ def revise_clusters(target_clusters, contact_map, clustering: dict, algorithm=No
         g = nx.subgraph(g_complete, seq_names)
         logger.debug(f'Subgraph composition: order {g.order()} size {g.size()}')
         # partition the subgraph into communities
-        partitions = algorithm(g)
+        partitions = algorithm(g, **kwargs)
         logger.debug(f'Cluster {cl_id} was split into {len(partitions)}')
         for members in partitions:
             n_new += 1
@@ -499,8 +516,8 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     are the most usedful.
 
     :param contact_map: an instance of ContactMap to cluster
-    :param norm: normalize weights by length
-    :param bisto: normalise using bistochasticity
+    :param norm: use normalized rather than raw counts as edge weights
+    :param bisto: additionally make adjacency matrix bistochastic
     :param scale: scale weights (max_w = 1)
     :param node_id_type: select the node id type (filtered, complete, external)
     :param clustering: bin3C clustering solution, required for subsets of the total map
