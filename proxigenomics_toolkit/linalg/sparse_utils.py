@@ -115,7 +115,7 @@ def downsample(m, block_size, method='mean'):
     return m
 
 
-def kr_biostochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
+def kr_bistochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
     """
     Normalise a matrix to be bistochastic using Knight-Ruiz algorithm. This method is expected
     to converge more quickly.
@@ -601,17 +601,17 @@ def dotdot(_m, _a):
     return _m
 
 
-def kr_biostochastic_4d(m4d, **kwargs):
+def kr_bistochastic_4d(m4d, **kwargs):
     """
     Knight-Ruiz applied to a NxNx2x2 tensor. The scale factors are determined by first converting
     this to a 2D matrix, summed on axis 2 and 3. The method is intended for determining scale-factors
     of the doublet matrix.
 
     :param m4d: a NxNxmxn matrix
-    :param kwargs: options to kr_biostochastic()
+    :param kwargs: options to kr_bistochastic()
     :return: a scaled matrix, scale-factors
     """
     # reduce to a 2D array, where we're summing the 2x2 submatrices
     m2d = m4d.astype(np.float64).sum(axis=(2, 3)).tocsr()
-    _, scl = kr_biostochastic(m2d, **kwargs)
+    _, scl = kr_bistochastic(m2d, **kwargs)
     return dotdot(m4d.astype(np.float64), scl), scl

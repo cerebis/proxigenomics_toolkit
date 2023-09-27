@@ -1583,9 +1583,9 @@ class ContactMap(object):
         logger.debug('Balancing contact map')
 
         if self.is_tipbased():
-            _map, scl = sparse_utils.kr_biostochastic_4d(_map)
+            _map, scl = sparse_utils.kr_bistochastic_4d(_map)
         else:
-            _map, scl = sparse_utils.kr_biostochastic(_map, delta=1e-3, Delta=1e2, tol=1e-8, max_iter=10000)
+            _map, scl = sparse_utils.kr_bistochastic(_map, delta=1e-3, Delta=1e2, tol=1e-8, max_iter=10000)
         return _map, scl
 
     def _get_sites(self):
