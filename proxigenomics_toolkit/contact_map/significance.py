@@ -1,4 +1,5 @@
 from ..exceptions import InvalidSequenceException
+from ..io_utils import load_object, open_input
 import logging
 from collections import Counter, namedtuple, OrderedDict, defaultdict
 
@@ -18,22 +19,21 @@ from rpy2.robjects.conversion import localconverter
 from sklearn.mixture import BayesianGaussianMixture
 from statsmodels.stats.multitest import multipletests
 
-
-from ..io_utils import load_object
-
 logger = logging.getLogger(__name__)
 
 # TODO suppressing FutureWarnings from seaborn until a release (>12.2) addresses (added 2023-09-18)
 import warnings
+
 warnings.filterwarnings('ignore', category=FutureWarning, module='seaborn')
 
 
-def sequence_details(contact_map, coverage_info, clustering):
+def sequence_details(contact_map, coverage_info, mappability_info, clustering):
     """
     Prepare a table of sequence information to annotate the seq2cluster graph.
 
     :param contact_map: a bin3C contact map
     :param coverage_info: coverage data for every sequence
+    :param mappability_info: mappability index for every sequence
     :param clustering: a bin3C clustering solution for contact_map
     :return: pandas dataframe of per sequence annotation details
     """
@@ -52,11 +52,16 @@ def sequence_details(contact_map, coverage_info, clustering):
     seq_info = seq_info.set_index('name', drop=False).join(coverage_info, how='inner')
     assert len(seq_info) == before_len, ('Coverage data did not contain information '
                                          'for all clustered sequences')
+    # just include uniq_frac column
+    seq_info = seq_info.join(mappability_info[['uniq_frac']], how='inner')
+    assert len(seq_info) == before_len, ('Mappability data did not contain information '
+                                         'for all clustered sequences')
 
     # 4. prepare a lookup table from seq_id to sequence length and number of sites
     # - this is used for removing the contribution of an excluded
     #   sequence from its cluster.
-    _ix2info = seq_info.set_index('seq_id').loc[:, ['length', 'sites', 'gc', 'coverage']].to_dict(orient='records')
+    _ix2info = seq_info.set_index('seq_id').loc[:,
+               ['length', 'sites', 'gc', 'coverage', 'uniq_frac']].to_dict(orient='records')
 
     # create a cluster id column, with isolated sequences assigned -1
     _nm2cl = [(contact_map.seq_info[_si].name, _cl) for _cl, _d in clustering.items() for _si in _d['seq_ids']]
@@ -73,13 +78,14 @@ def sequence_details(contact_map, coverage_info, clustering):
     return seq_info, _ix2info, _id2cl
 
 
-def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_length, tidy=True):
+def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability_info, min_seq_length, tidy=True):
     """
     Create bipartite graph
 
     :param contact_map:
     :param clustering:
     :param coverage_info:
+    :param mappability_info: mappability index for every sequence
     :param min_seq_length:
     :param tidy: remove collections of member attributes
     :return:
@@ -93,18 +99,44 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_len
         """
         return np.sum(np.maximum(1, x))
 
-    seq_info, _ix2info, _ix2cl = sequence_details(contact_map, coverage_info, clustering)
+    seq_info, _ix2info, _ix2cl = sequence_details(contact_map, coverage_info, mappability_info, clustering)
 
-    seq_grp = seq_info.groupby('cluster').agg({'length': ['sum', 'count'],
-                                               'sites': sum_min1,
-                                               'coverage': 'mean',
-                                               'gc': 'mean'}, axis=0)
-    cl_agg = pandas.DataFrame()
-    cl_agg['length'] = pandas.to_numeric(seq_grp['length', 'sum'], downcast='integer')
-    cl_agg['size'] = pandas.to_numeric(seq_grp['length', 'count'], downcast='integer')
-    cl_agg['sites'] = pandas.to_numeric(seq_grp['sites', 'sum_min1'], downcast='integer')
-    cl_agg['coverage'] = seq_grp['coverage', 'mean']
-    cl_agg['gc'] = seq_grp['gc', 'mean']
+    # calculation using weighted means (by length of sequence)
+    seq_grp = seq_info.assign(wcv=lambda x: x.length * x.coverage,
+                              wgc=lambda x: x.length * x.gc,
+                              wuf=lambda x: x.length * x.uniq_frac)
+
+    cl_agg = (seq_grp.groupby('cluster')
+              .aggregate({'wcv': 'sum',
+                          'wgc': 'sum',
+                          'wuf': 'sum',
+                          'sites': sum_min1,
+                          'length': ['sum', 'count']})
+              # rename columns for ease of reference
+              .pipe(lambda x: x.set_axis(x.columns.map('_'.join), axis=1))
+              # final values per cluster
+              .assign(length=lambda x: x.length_sum,
+                      size=lambda x: x.length_count,
+                      sites=lambda x: x.sites_sum_min1,
+                      coverage=lambda x: x.wcv_sum / x.length_sum,
+                      gc=lambda x: x.wgc_sum / x.length_sum,
+                      uniq_frac=lambda x: x.wuf_sum / x.length_sum)
+              # remove unneeded columns
+              .drop(['wcv_sum', 'wgc_sum', 'wuf_sum', 'sites_sum_min1', 'length_sum', 'length_count'], axis=1))
+
+    # simple unweighted means
+    # seq_grp = seq_info.groupby('cluster').agg({'length': ['sum', 'count'],
+    #                                            'sites': sum_min1,
+    #                                            'coverage': 'mean',
+    #                                            'gc': 'mean',
+    #                                            'uniq_frac': 'mean'}, axis=0)
+    # cl_agg = pandas.DataFrame()
+    # cl_agg['length'] = pandas.to_numeric(seq_grp['length', 'sum'], downcast='integer')
+    # cl_agg['size'] = pandas.to_numeric(seq_grp['length', 'count'], downcast='integer')
+    # cl_agg['sites'] = pandas.to_numeric(seq_grp['sites', 'sum_min1'], downcast='integer')
+    # cl_agg['coverage'] = seq_grp['coverage', 'mean']
+    # cl_agg['gc'] = seq_grp['gc', 'mean']
+    # cl_agg['uniq_frac'] = seq_grp['uniq_frac', 'mean']
     del seq_grp
 
     # get the upper diagonal of the contact_map, excluding x=y (i.e. without self-self interactions)
@@ -168,20 +200,22 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_len
     removed_seqs = set()
     no_clust = set()
     # we will iterate over sequences using the table of per-sequence annotation details
-    seq_info_array = seq_info.loc[:, ['seq_id', 'name', 'length', 'sites', 'coverage', 'gc', 'cluster']].values
-    for _si, _name, _len, _sites, _cov, _gc, _clust in tqdm.tqdm(seq_info_array):
+    seq_info_array = seq_info.loc[:,
+                     ['seq_id', 'name', 'length', 'sites', 'coverage', 'gc', 'cluster', 'uniq_frac']].values
+    for _si, _name, _len, _sites, _cov, _gc, _clust, _uf in tqdm.tqdm(seq_info_array):
 
         try:
             validate_sequence(_si)
 
             # sequence node definition with attributes
             node_from = ('n', _name)
-            nattr = {'name':  _name,
+            nattr = {'name': _name,
                      'length': _len,
                      'sites': _sites,  # assign 1 site to those sequences with 0
                      'coverage': _cov,  # flye can report 0 depth on assembly graph segments
                      'membership': _clust,
                      'gc': _gc,
+                     'uniq_frac': _uf,
                      'bipartite': 1}
             g.add_node(node_from, **nattr)
 
@@ -215,7 +249,8 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_len
                                'length': df_attribs.length.sum(),
                                'sites': df_attribs.sites.sum(),
                                'gc': (df_attribs.gc * df_attribs.length / df_attribs.length.sum()).sum(),
-                               'coverage': (df_attribs.coverage * df_attribs.length / df_attribs.length.sum()).sum()})
+                               'coverage': (df_attribs.coverage * df_attribs.length / df_attribs.length.sum()).sum(),
+                               'uniq_frac': (df_attribs.uniq_frac * df_attribs.length / df_attribs.length.sum()).sum()})
             if tidy:
                 del g.nodes[u]['members']
         if tidy and 'removed' in g.nodes[u]:
@@ -284,11 +319,11 @@ def simple_spurious_estimation(seq2cl_graph):
     p = sb.displot(in_out, x='R', kde=True, rug=True)
     p.savefig('fraction_inter.png')
     logger.info('95% CI: [{:.3f}:{:.3f}]'.format(
-        *st.t.interval(0.95, len(in_out)-1, loc=np.mean(in_out.R.mean()), scale=st.sem(in_out.R))))
+        *st.t.interval(0.95, len(in_out) - 1, loc=np.mean(in_out.R.mean()), scale=st.sem(in_out.R))))
     logger.info('Mean: {:.3f} Median: {:.3f}'.format(
         in_out.R.mean(), in_out.R.median()))
     logger.info('Weighted mean against cluster extent: {:.3f}'.format(
-        sum(in_out['R'] * in_out['ulen']/in_out['ulen'].sum())))
+        sum(in_out['R'] * in_out['ulen'] / in_out['ulen'].sum())))
 
 
 def calculate_rejection_thresholds(seq2cl_graph, prob_outlier=0.98):
@@ -404,12 +439,62 @@ def robust_read_csv(csv_name, sep=','):
     return df
 
 
+def mappability_report(filename, kmer_size):
+    """
+    Prepare a report on per-sequence mappability from a genmap text output.
+    The estimate of the unique fraction ignores the last k-1 positions since GenMap always reports zero.
+
+    :param filename: genmap text file
+    :param kmer_size: k-mer size used in genmap 'map' analysis
+    :return: pandas.DataFrame
+    """
+
+    def read_genmap(filename):
+        """
+        Generator for reading records from the fasta-format genmap text output.
+        The first line of each record is the standard FASTA header, while the next contains space-delimited
+        floats represent relative uniqueness of the k-mer that begins at that position.
+
+        :param filename: genmap text file
+        :return: tuple(seq_id, numpy array of mappability values)
+        """
+        with open_input(filename, 'rt') as input_h:
+            try:
+                while True:
+                    header = next(input_h).strip()
+                    assert header.startswith('>'), f'Invalid genmap text file: {filename}'
+                    seq = header[1:].split(' ')[0]
+                    data = np.fromiter((float(vi) for vi in next(input_h).split(' ')), dtype=float)
+                    yield seq, data
+            except StopIteration:
+                pass
+
+    map_data = {}
+    for seq, data in read_genmap(filename):
+        assert seq not in map_data, f'Duplicate sequence id {seq} in {filename}'
+        assert len(data) > kmer_size, f'Record for {seq} was shorter than specified k-mer size'
+        data = data[:-(kmer_size - 1)]
+        uniq_frac = 1 - ((data < 1).sum() / len(data))
+        map_data[seq] = [len(data), np.mean(data), np.median(data), uniq_frac]
+
+    logger.debug(f'Read mappability results for {len(map_data):,} sequences')
+
+    map_data = pandas.DataFrame.from_dict(map_data, orient='index', columns=['length','mean','median','uniq_frac'])
+    map_data.index.name = 'name'
+    return map_data
+
+
 class SignificantLinks(object):
 
-    def __init__(self, contact_map_file, clustering_file, coverage_file, output_basename, seed):
+    def __init__(self, contact_map_file, clustering_file, coverage_file,
+                 mappability_file, mappability_k,
+                 output_basename, seed):
+
         self.contact_map_file = contact_map_file
         self.clustering_file = clustering_file
         self.coverage_file = coverage_file
+        self.mappability_file = mappability_file
+        self.mappability_k = mappability_k
         self.output_basename = output_basename
         self.seed = seed
         # find the R script within this current package folder
@@ -448,10 +533,14 @@ class SignificantLinks(object):
         logger.info('Extracting coverage info')
         coverage_info = robust_read_csv(self.coverage_file, sep=sep).set_index('name')
 
-        logger.info('Creating bipartite graph between clusters and sequences')
-        seq2cl_graph = create_seq2cluster_graph(contact_map, clustering, coverage_info, min_seq_length)
+        mappability_info = mappability_report(self.mappability_file, self.mappability_k)
 
-        logger.info('Initial graph info: nodes={:,}, edges={:,}'.format(seq2cl_graph.order(), seq2cl_graph.size()))
+        logger.info('Creating bipartite graph between clusters and sequences')
+        seq2cl_graph = create_seq2cluster_graph(contact_map, clustering, coverage_info,
+                                                mappability_info, min_seq_length)
+
+        logger.info('Initial graph info: nodes={:,}, edges={:,}'.format(
+            seq2cl_graph.order(), seq2cl_graph.size()))
 
         isolated_nodes = list(nx.isolates(seq2cl_graph))
         iso_count = Counter(u[0] for u in isolated_nodes)
@@ -487,6 +576,8 @@ class SignificantLinks(object):
                            ('sites_v', 'i4'),
                            ('gc_u', 'f4'),
                            ('gc_v', 'f4'),
+                           ('uf_u', 'f4'),
+                           ('uf_v', 'f4'),
                            ('intra', 'bool')])
 
         # cps_max, lps_max = calculate_rejection_thresholds(seq2cl_graph)
@@ -514,6 +605,8 @@ class SignificantLinks(object):
                                         v_dat['sites'],
                                         u_dat['gc'],
                                         v_dat['gc'],
+                                        u_dat['uniq_frac'],
+                                        v_dat['uniq_frac'],
                                         u_dat['membership'] == v[1]))
 
         # make this a dataframe for easy manipulation
@@ -653,7 +746,7 @@ class SignificantLinks(object):
         if big_threshold is not None:
             ix_big_member = 1 / big_threshold * spurious['length_u'] > spurious['length_v']
             logger.info('{:,} observations involved a sequence over {:.1f}% of total bin extent'.format(
-                ix_big_member.sum(), big_threshold*100))
+                ix_big_member.sum(), big_threshold * 100))
             ix_accepted &= ~ix_big_member
 
         ix_short_bin = spurious['length_v'] < min_bin_length
@@ -737,7 +830,7 @@ class SignificantLinks(object):
             for df in dataframes:
                 df.drop(columns=[
                     'contacts1m', 'length_z', 'sites_z', 'cov_z',
-                    'gc_z', 'response', 'pvalue'], errors='ignore', inplace=True)
+                    'gc_z', 'uf_z', 'response', 'pvalue'], errors='ignore', inplace=True)
 
         logger.info('Total observation pool: {:,}'.format(len(self.spurious)))
         assert len(self.spurious.query('intra == True')) == 0, 'There are intra-genome_bin entries in the table'
@@ -808,7 +901,7 @@ class SignificantLinks(object):
 
         n_signif = len(self.all_contacts.query('adj_pvalue < 0.05'))
         logger.info('Using adjusted p-values there were {:,} significant interactions ({:.1f}%)'.format(
-            n_signif, n_signif/len(self.all_contacts)))
+            n_signif, n_signif / len(self.all_contacts)))
 
     def prepare_data(self, sep=',', excluded_clusters=None, excluded_sequences=None,
                      min_seq_length=5000, min_bin_size=5, min_bin_length=100000,
