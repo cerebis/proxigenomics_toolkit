@@ -135,7 +135,7 @@ setup(
     setup_requires=['numpy', 'cython'],
 
     install_requires=['astropy',
-                      'biopython',
+                      'biopython < 1.79',
                       'gfa_io @ git+https://github.com/cerebis/gfa_io#egg=gfa_io-99',
                       'matplotlib',
                       'networkx>=3.1',
