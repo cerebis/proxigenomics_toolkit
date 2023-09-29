@@ -486,6 +486,14 @@ def mappability_report(filename, kmer_size):
 
 class SignificantLinks(object):
 
+    N_SAMPLES = 10_000
+    DISTRIB_FUNC = 'nbinom2'
+    FIXED_MODEL = 'contacts1m ~ sites_z*cov_z + uf_z/cov_z'
+    DISP_MODEL = '~ sites_z/cov_z'
+    ZI_MODEL = '~ cov_z'
+    FDR_ALPHA = 0.01
+    FDR_METHOD = 'fdr_bh'
+
     def __init__(self, contact_map_file, clustering_file, coverage_file,
                  mappability_file, mappability_k,
                  output_basename, seed):
@@ -780,11 +788,12 @@ class SignificantLinks(object):
 
         self.spurious = spurious
 
-    def estimate_significance_model(self, n_samples=10000,
-                                    distrib_func='nbinom2',
-                                    fixed_model='contacts1m ~ sites_z * cov_z',
-                                    disp_model='~ sites_z / cov_z',
-                                    zi_model='~ cov_z'):
+    def estimate_significance_model(self,
+                                    n_samples=N_SAMPLES,
+                                    distrib_func=DISTRIB_FUNC,
+                                    fixed_model=FIXED_MODEL,
+                                    disp_model=DISP_MODEL,
+                                    zi_model=ZI_MODEL):
         """
         For a table of contig-to-genome_bin interactions.
 
@@ -885,28 +894,29 @@ class SignificantLinks(object):
             self.all_contacts = robjects.conversion.rpy2py(ret_r.rx2('all_contacts'))
             logger.info("Significance testing was computed for {:,} observations".format(len(self.all_contacts)))
 
-    def fdr_correction(self, pr_signif=0.05):
+    def fdr_correction(self, alpha=FDR_ALPHA, method=FDR_METHOD):
         """
         Apply Benjamini-Hochberge false-discovery rate correction. The adjusted p-values will
         appear as a new column `adj_pvalue` in the all_contacts table.
 
         Currently two-step BH is used.
 
-        :param pr_signif: target significance level.
+        :param alpha: target family-wise error rate
+        :param method: method to use in correction Benjamini-Hochberg (fdr_bh)
         """
         logger.info('Performing FDR correction')
 
         self.all_contacts['adj_pvalue'] = multipletests(
-            self.all_contacts.pvalue, alpha=pr_signif, method='fdr_tsbh')[1]
+            self.all_contacts.pvalue, alpha=alpha, method=method)[1]
 
-        n_signif = len(self.all_contacts.query('adj_pvalue < 0.05'))
-        logger.info('Using adjusted p-values there were {:,} significant interactions ({:.1f}%)'.format(
-            n_signif, n_signif / len(self.all_contacts)))
+        n_signif = len(self.all_contacts.query('adj_pvalue < @alpha'))
+        logger.info('Using adjusted p-values there were {:,} significant interactions ({:.2f}%)'.format(
+            n_signif, n_signif / len(self.all_contacts) * 100))
 
     def prepare_data(self, sep=',', excluded_clusters=None, excluded_sequences=None,
-                     min_seq_length=5000, min_bin_size=5, min_bin_length=100000,
-                     min_single_length=1000000, big_threshold=0.8,
-                     initial_sigma=3, pr_cutoff=0.0004, n_samples=10000, small_value=1,
+                     min_seq_length=2500, min_bin_size=1, min_bin_length=1_000_000,
+                     min_single_length=1_000_000, big_threshold=None,
+                     initial_sigma=4, pr_cutoff=0.0004, outlier_samples=10_000, small_value=1,
                      plot_outliers=False):
         """
         From the Hi-C dataset, prepare the input data for significance testing
@@ -921,7 +931,7 @@ class SignificantLinks(object):
         :param big_threshold: maximum fraction a sequence to represent for a bin to be considered
         :param initial_sigma: sigma clipping sigma used in outlier removal stage-1
         :param pr_cutoff: probability minimum for outlier stage-2
-        :param n_samples: number of samples to use in fitting model
+        :param outlier_samples: number of samples to use in outlier removal
         :param small_value: small value for replacing observed zeros
         :param plot_outliers: generate diagnostic plots from outlier removal
         """
@@ -931,21 +941,28 @@ class SignificantLinks(object):
                                    min_bin_size=min_bin_size, min_bin_length=min_bin_length,
                                    min_single_length=min_single_length, big_threshold=big_threshold,
                                    small_value=small_value)
-        self.outlier_removal(initial_sigma, pr_cutoff, n_samples, plot=plot_outliers)
+        self.outlier_removal(initial_sigma, pr_cutoff, outlier_samples, plot=plot_outliers)
 
-    def fit_model(self, n_samples=10000, pr_signif=0.05, fixed_model=None, disp_model=None, zif_model=None):
+    def fit_model(self,
+                  n_samples=N_SAMPLES,
+                  fixed_model=FIXED_MODEL,
+                  disp_model=DISP_MODEL,
+                  zi_model=ZI_MODEL,
+                  alpha=FDR_ALPHA,
+                  fdr_method=FDR_METHOD):
         """
         Using the prepared data, fit the Zinb model and adjust
         the resulting p-values for FDR.
 
         :param n_samples: the number of samples to use in fitting
-        :param pr_signif: the threshold probability at which to control FDR
         :param fixed_model: custom fixed-effects model for R
         :param disp_model: custom dispersion model for R
-        :param zif_model: custom zero-inflation model for R
+        :param zi_model: custom zero-inflation model for R
+        :param alpha: the target family-wise error rate to control FDR
+        :param fdr_method: the method to use in FDR correction
         """
         self.estimate_significance_model(n_samples,
                                          fixed_model=fixed_model,
                                          disp_model=disp_model,
-                                         zi_model=zif_model)
-        self.fdr_correction(pr_signif)
+                                         zi_model=zi_model)
+        self.fdr_correction(alpha, fdr_method)
