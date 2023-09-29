@@ -64,8 +64,9 @@ def sequence_details(contact_map, coverage_info, mappability_info, clustering):
                ['length', 'sites', 'gc', 'coverage', 'uniq_frac']].to_dict(orient='records')
 
     # create a cluster id column, with isolated sequences assigned -1
-    _nm2cl = [(contact_map.seq_info[_si].name, _cl) for _cl, _d in clustering.items() for _si in _d['seq_ids']]
-    _nm2cl = pandas.DataFrame.from_records(_nm2cl, columns=['name', 'cluster']).set_index('name')
+    _nm2cl = [(contact_map.seq_info[_si].name, _cl, _d['name'])
+              for _cl, _d in clustering.items() for _si in _d['seq_ids']]
+    _nm2cl = pandas.DataFrame.from_records(_nm2cl, columns=['name', 'cluster', 'cluster_name']).set_index('name')
     seq_info = seq_info.join(_nm2cl, how='left')
 
     # for sequences with no cluster membership, assign a cluster id of -1.
@@ -124,19 +125,6 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
               # remove unneeded columns
               .drop(['wcv_sum', 'wgc_sum', 'wuf_sum', 'sites_sum_min1', 'length_sum', 'length_count'], axis=1))
 
-    # simple unweighted means
-    # seq_grp = seq_info.groupby('cluster').agg({'length': ['sum', 'count'],
-    #                                            'sites': sum_min1,
-    #                                            'coverage': 'mean',
-    #                                            'gc': 'mean',
-    #                                            'uniq_frac': 'mean'}, axis=0)
-    # cl_agg = pandas.DataFrame()
-    # cl_agg['length'] = pandas.to_numeric(seq_grp['length', 'sum'], downcast='integer')
-    # cl_agg['size'] = pandas.to_numeric(seq_grp['length', 'count'], downcast='integer')
-    # cl_agg['sites'] = pandas.to_numeric(seq_grp['sites', 'sum_min1'], downcast='integer')
-    # cl_agg['coverage'] = seq_grp['coverage', 'mean']
-    # cl_agg['gc'] = seq_grp['gc', 'mean']
-    # cl_agg['uniq_frac'] = seq_grp['uniq_frac', 'mean']
     del seq_grp
 
     # get the upper diagonal of the contact_map, excluding x=y (i.e. without self-self interactions)
@@ -158,6 +146,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
         nattr = cl_agg.loc[_cl].to_dict(dict)
         assert len(_cl_dat['seq_ids']) == int(nattr['size']), 'problem with pandas calculated cluster size'
         nattr['bipartite'] = 0
+        nattr['cluster_name'] = _cl_dat['name']
         g.add_node(('c', _cl), **nattr)
 
     def validate_sequence(ix, track_removed=False):
@@ -203,10 +192,8 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     seq_info_array = seq_info.loc[:,
                      ['seq_id', 'name', 'length', 'sites', 'coverage', 'gc', 'cluster', 'uniq_frac']].values
     for _si, _name, _len, _sites, _cov, _gc, _clust, _uf in tqdm.tqdm(seq_info_array):
-
         try:
             validate_sequence(_si)
-
             # sequence node definition with attributes
             node_from = ('n', _name)
             nattr = {'name': _name,
@@ -218,21 +205,17 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
                      'uniq_frac': _uf,
                      'bipartite': 1}
             g.add_node(node_from, **nattr)
-
         except InvalidSequenceException:
             continue
 
         # iterate over all interactions between sequence _si and any other sequence in the map _sj
         _contacts = _map[_si].tocoo()
         for _sj, _contacts_ij in zip(_contacts.col, _contacts.data):
-
             try:
                 cluster_to = validate_sequence(_sj)
-
                 # add the edge if new
                 if not g.has_edge(node_from, cluster_to):
                     g.add_edge(node_from, cluster_to, contacts=0)
-
                 # accumulate these new contacts between sequence and members of cluster
                 # - this comes into effect when a sequence interacts with many sequences in
                 #   the same cluster.
@@ -571,9 +554,15 @@ class SignificantLinks(object):
         :return: complete unfiltered data frame
         """
 
+        seq2cl_graph = self.seq2cl_graph
+
+        # determine the maximum length of a cluster name, for use in numpy structured datatype
+        max_name = max(len(d['cluster_name']) for u, d in seq2cl_graph.nodes(data=True) if u[0] == 'c')
+
         # initialise an array long enough to hold everything, even though we may not fill it up
         _dtype = np.dtype([('seq', np.object_),
                            ('cluster', 'i4'),
+                           ('cluster_name', f'U{max_name+1}'),
                            ('size_v', 'i4'),
                            ('contacts', 'i4'),
                            ('length_u', 'i4'),
@@ -589,7 +578,6 @@ class SignificantLinks(object):
                            ('intra', 'bool')])
 
         # cps_max, lps_max = calculate_rejection_thresholds(seq2cl_graph)
-        seq2cl_graph = self.seq2cl_graph
         node_to_cluster = []
 
         # iterate over the sequence nodes
@@ -603,6 +591,7 @@ class SignificantLinks(object):
                 # skip associations for excluded clusters
                 node_to_cluster.append((u[1],
                                         v[1],
+                                        v_dat['cluster_name'],
                                         v_dat['size'],
                                         seq2cl_graph[u][v]['contacts'],
                                         u_dat['length'],
