@@ -694,7 +694,8 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     return g
 
 
-def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, min_extent=None):
+def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, min_extent=None,
+                    white_list=['primary', 'revised']):
     """
     Given a clustering and list of cluster ids (or none), enable (unmask) the related sequences in
     the contact map. If a requested cluster has not been ordered, it will be dropped.
@@ -704,6 +705,7 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
     :param cl_list: a list of cluster ids to enable or None (all ordered clusters)
     :param ordered_only: include only clusters which have been ordered
     :param min_extent: include only clusters whose total extent is greater
+    :param white_list: a list of cluster status values to include
     :return: the filtered list of cluster ids in ascending numerical order
     """
 
@@ -712,10 +714,11 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
         cl_list = list(clustering.keys())
 
     # at present, only primary clusters are supported in downstream methods
-    cl_list = np.sort(np.array([(k, clustering[k]['status'] == 'primary') for k in cl_list],
-                               dtype=np.dtype([('clid', int), ('is_primary', bool)])))
-    logger.info(f'Enable_clusters: {(~cl_list["is_primary"]).sum()} non-primary clusters have been excluded')
-    cl_list = cl_list[cl_list['is_primary']]['clid'].tolist()
+    white_list = set(white_list)
+    cl_list = np.sort(np.array([(k, clustering[k]['status'] in white_list) for k in cl_list],
+                               dtype=np.dtype([('clid', int), ('white_listed', bool)])))
+    logger.info(f'Enable_clusters: white-list excluded {(~cl_list["white_listed"]).sum()} clusters')
+    cl_list = cl_list[cl_list['white_listed']]['clid'].tolist()
     if len(cl_list) == 0:
         raise NoRemainingClustersException('There were no primary clusters')
 
