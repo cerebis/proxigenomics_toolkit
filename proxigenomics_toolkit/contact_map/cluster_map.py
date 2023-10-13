@@ -104,12 +104,19 @@ def add_cluster_names(clustering, prefix='CL'):
         clustering[cl_id]['name'] = '{0}{1:0{2}d}'.format(prefix, cl_id+1, num_width)
 
 
-def bistochastic_graph(g):
-    _adj_mat = sp.csr_matrix(nx.adjacency_matrix(g))
+def bistochastic_graph(g_in):
+    """
+    Make a graph bistochastic by normalizing its adjacency matrix. Returns a normalized copy
+    of the original graph.
+
+    :param g_in: input graph
+    :return: normalized group
+    """
+    _adj_mat = sp.csr_matrix(nx.adjacency_matrix(g_in))
     _adj_mat, _ = kr_bistochastic(_adj_mat)
     _adj_mat = _adj_mat.tocoo()
-    name_lookup = list(g.nodes())
-    g_out = nx.Graph()
+    name_lookup = list(g_in.nodes())
+    g_out = nx.Graph(name=g_in.name)
     for i, j, d in zip(_adj_mat.row, _adj_mat.col, _adj_mat.data):
         g_out.add_edge(name_lookup[i], name_lookup[j], weight=d)
     return g_out
@@ -118,7 +125,7 @@ def bistochastic_graph(g):
 def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
                  exclude_names=None, norm_method='sites', append_singletons=True,
                  from_extent=False, fdr_alpha=0.05, use_entropy=False, gfa_file=None,
-                 markov_scale=None, vary_markov=False, regularize=None):
+                 markov_scale=None, vary_markov=False, regularize=None, exclude_degen=True):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -138,6 +145,7 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
     :param vary_markov: enable variable markov time in Infomap clustering (not compatible with markov_scale)
     :param regularize: enable regularization and set strength of prior in Infomap clustering
     (fully connected Bayesian prior network)
+    :param exclude_degen: exclude degenerate segments from clustering
     :return: a dictionary detailing the full clustering of the contact map
     """
 
@@ -172,25 +180,22 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
 
     # build a graph of the complete map
     base_name = 'cm_graph'
-    g = to_graph(contact_map, node_id_type='external', norm=True, bisto=True, scale=True,
-                 exclude_names=exclude_names, norm_method=norm_method,
-                 from_extent=from_extent, fdr_alpha=fdr_alpha)
+    graph_layers = to_graph(contact_map, gfa_file=gfa_file, node_id_type='external',
+                            norm=True, bisto=True, scale=True,
+                            exclude_names=exclude_names, norm_method=norm_method,
+                            from_extent=from_extent, fdr_alpha=fdr_alpha, disconnect_degen=exclude_degen)
 
     logger.info('Clustering contact graph using method: infomap')
 
     try:
         with open(os.path.join(work_dir, 'infomap.log'), 'w+') as stdout:
-            edge_file = os.path.join(work_dir, f'{base_name}.pajek')
-            if gfa_file is not None:
-                logger.info('GFA file supplied, preparing for multilayered clustering')
-                g_gfa = read_gfa(gfa_file, paths_to_edges=True, read_progress=True)
-                g_gfa = bistochastic_graph(g_gfa)
-                layers = [g, g_gfa]
-                write_multilayer_pajek(edge_file, layers, add_inter=False)
+            graph_file = os.path.join(work_dir, f'{base_name}.pajek')
+            if len(graph_layers) > 1:
+                write_multilayer_pajek(graph_file, graph_layers, add_inter=False)
             else:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    nx.write_pajek(g, edge_file)
+                    nx.write_pajek(graph_layers[0], graph_file)
 
             # Infomap v2.7.1 interface
             options = ['--flow-model', 'undirected', '--verbose',
@@ -218,7 +223,7 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
             options.extend(['-N', str(n_iter)])
 
             exe_path = package_path('external', 'Infomap')
-            subprocess.check_call([exe_path] + options + [edge_file, work_dir],
+            subprocess.check_call([exe_path] + options + [graph_file, work_dir],
                                   stdout=stdout, stderr=subprocess.STDOUT)
 
             cl_to_ids = _read_tree(os.path.join(work_dir, f'{base_name}.tree'))
@@ -247,7 +252,7 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
         # TODO clustering should be made class, as this dict approach is
         #   too ad-hoc and error prone.
         clustering[cl_id] = {
-            'names': np.array(_seq_names),
+            'seq_names': np.array(_seq_names),
             'seq_ids': np.array(_seq_ids),
             'extent': contact_map.order.lengths()[_seq_ids].sum(),
             'status': 'primary',
@@ -258,15 +263,16 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
     # append singletons
     if append_singletons:
         lost_seq = find_lost_singletons(contact_map, clustering)
+        _seq_info = contact_map.seq_info
         for n, _seq in enumerate(lost_seq):
             # use simple temporary names prior to reassignment
             cl_id = f'tmp_{n}'
             assert cl_id not in clustering, f'Tried to overwrite existing cluster id: {cl_id}'
             clustering[cl_id] = {
-                'names': np.array([_seq]),
+                'seq_names': np.array([_seq_info[_seq].name]),
                 'seq_ids': np.array([_seq]),
                 'extent': contact_map.seq_info[_seq].length,
-                'status': 'rescued singleton',
+                'status': 'rescued',
                 'unreferenced': [],
                 'deduplicated': []
             }
@@ -428,8 +434,10 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
                                    f'Choices are: {",".join(algorithm_repository.keys())}')
 
     # prepare the contact map's complete graph
-    g_complete = to_graph(contact_map, node_id_type='external', norm=norm, bisto=bisto, scale=scale,
-                          norm_method=norm_method, from_extent=from_extent)
+    # this will always be a single-layer graph, therefore just dereference the first element
+    g_complete = to_graph(contact_map, node_id_type='external',
+                          norm=norm, bisto=bisto, scale=scale,
+                          norm_method=norm_method, from_extent=from_extent)[0]
 
     # begin with the current cluster solution
     revised = clustering.copy()
@@ -487,9 +495,9 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
     return revised
 
 
-def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='internal',
+def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, node_id_type='internal',
              clustering=None, cl_list=None, exclude_names=None, norm_method='sites',
-             filter_weak_edges=False, from_extent=False, fdr_alpha=0.05):
+             filter_weak_edges=False, from_extent=False, fdr_alpha=0.05, disconnect_degen=True):
     """
     Convert the seq_map to an undirected Networkx Graph.
 
@@ -516,6 +524,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     are the most usedful.
 
     :param contact_map: an instance of ContactMap to cluster
+    :param gfa_file: path to a GFA file, if supplied, multilayered clustering will be performed
     :param norm: use normalized rather than raw counts as edge weights
     :param bisto: additionally make adjacency matrix bistochastic
     :param scale: scale weights (max_w = 1)
@@ -527,6 +536,7 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     :param filter_weak_edges: remove edges with weight in the bottem 5% of the distribution
     :param from_extent: normalised extent map acts as the basis for sequence map.
     :param fdr_alpha: FDR alpha used in gothic normalisation
+    :param disconnect_degen: prune all edges of degenerate segments
     :return: graph of contigs
     """
 
@@ -583,9 +593,66 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
             g.add_edge(_nn(i), _nn(j), weight=float(w * scl))
 
         return g
-    
-    if cl_list is not None and not clustering:
-        raise ApplicationException('When cl_list is specified, a clustering solution is required')
+
+    def prune_edges(graph, exclude_names):
+        """
+        Prune in-place the edges of a graph based on a list of sequence names to exclude.
+        :param graph: the graph to prune
+        :param exclude_names: internal or external sequence ids
+        :return: pruned graph
+        """
+        logger.info(f'{graph.name}: Before exclusion: {graph.order():,} nodes, {graph.size():,} edges')
+
+        n_failed = 0
+        n_missing = 0
+        n_removed_edges = 0
+
+        if node_id_type == 'internal':
+            # do this one at a time, so we can report about missing ids
+            name_to_matindex = {contact_map.seq_info[_id].name: _ix for _ix, _id in enumerate(_to_seqid)}
+            for _name in exclude_names:
+                try:
+                    u = name_to_matindex[_name]
+                except KeyError as ex:
+                    logger.debug(f'{graph.name}: while excluding nodes from clustering, no sequence named {_name} found')
+                    n_missing += 1
+                    continue
+                # pedantically check that this mess of cross-referencing is valid.
+                if not graph.has_node(u):
+                    logger.debug(f'{graph.name}: disconnecting {_name} failed as no corresponding node in graph')
+                    n_failed += 1
+                    continue
+                to_remove = [(u, v) for v in g.neighbors(u)]
+                n_removed_edges += len(to_remove)
+                g.remove_edges_from(to_remove)
+
+        elif node_id_type == 'external':
+            for u in exclude_names:
+                if not graph.has_node(u):
+                    n_failed += 1
+                elif graph.degree(u) > 0:
+                    to_remove = [(u, v) for v in g.neighbors(u)]
+                    n_removed_edges += len(to_remove)
+                    graph.remove_edges_from(to_remove)
+        else:
+            raise ApplicationException(f'{graph.name}: unknown node_id_type {node_id_type}')
+
+        if n_missing > 0:
+            logger.warning(f'{graph.name}: {n_missing:,} sequences mentioned for clustering exclusion were not found')
+        if n_failed > 0:
+            logger.warning(f'{graph.name}: {n_failed} nodes were not found during exclusion')
+        if n_failed == len(exclude_names):
+            logger.warning(f'{graph.name}: none of excluded sequences were found in graph')
+        if n_removed_edges > 0:
+            logger.info(f'{graph.name}: excluded sequences resulted in the deletion of {n_removed_edges:,} edges')
+
+        # prune_edges - no return value
+
+    if cl_list is not None:
+        if not clustering:
+            raise ApplicationException('When cl_list is supplied a clustering solution is required')
+        if gfa_file is not None:
+            raise ApplicationException('When cl_list is supplied multilayered clustering not supported')
 
     contact_map.prepare_seq_map(norm=norm, bisto=bisto, norm_method=norm_method,
                                 from_extent=from_extent, fdr_alpha=fdr_alpha)
@@ -619,7 +686,6 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
             _to_report = make_gapless_lookup((_ri for _cl in cl_list for _ri in clustering[_cl]['report']))
         _to_clid = make_gapless_lookup(
             (clustering[_cl]['name'] for _cl in cl_list for _si in clustering[_cl]['seq_ids']))
-
         n_expected = len(_to_seqid)
         logger.info('Graph will have {} nodes'.format(n_expected))
         g = create_graph(_map)
@@ -635,67 +701,42 @@ def to_graph(contact_map, norm=True, bisto=False, scale=False, node_id_type='int
     assert g.order() == n_expected, \
         f'order(graph) {g.order()} did not equal number of expected sequences {n_expected}'
 
-    # disconnect any node mentioned in exclusion list
-    if exclude_names:
-        logger.info('Before exclusion: {:,} nodes, {:,} edges'.format(g.order(), g.size()))
-
-        n_failed = 0
-        n_missing = 0
-        n_removed_edges = 0
-
-        if node_id_type == 'internal':
-            # do this one at a time, so we can report about missing ids
-            name_to_matindex = {contact_map.seq_info[_id].name: _ix for _ix, _id in enumerate(_to_seqid)}
-            for _name in exclude_names:
-                try:
-                    u = name_to_matindex[_name]
-                except KeyError as ex:
-                    logger.debug('while excluding nodes from clustering, no sequence named {} found'.format(_name))
-                    n_missing += 1
-                    continue
-                # pedantically check that this mess of cross-referencing is valid.
-                #assert contact_map.seq_info[u].name == _name, 'Conflict between name records'
-                if not g.has_node(u):
-                    logger.debug('disconnecting {} failed as no corresponding node in graph'.format(_name))
-                    n_failed += 1
-                    continue
-                to_remove = [(u, v) for v in g.neighbors(u)]
-                n_removed_edges += len(to_remove)
-                g.remove_edges_from(to_remove)
-
-        elif node_id_type == 'external':
-            for u in exclude_names:
-                if not g.has_node(u):
-                    n_failed += 1
-                elif g.degree(u) > 0:
-                    to_remove = [(u, v) for v in g.neighbors(u)]
-                    n_removed_edges += len(to_remove)
-                    g.remove_edges_from(to_remove)
-        else:
-            raise ApplicationException(f'unknown node_id_type {node_id_type}')
-
-        if n_missing > 0:
-            logger.warning('{} sequences mentioned for clustering exclusion were not found'.format(n_missing))
-        if n_failed > 0:
-            logger.warning('{} nodes were not found during exclusion'.format(n_failed))
-        if n_failed == len(exclude_names):
-            logger.warning('None of excluded sequences were found in graph')
-        if n_removed_edges > 0:
-            logger.info('Excluded sequences resulted in the deletion of {:,} edges'.format(n_removed_edges))
-
     if filter_weak_edges:
         min_weight = np.quantile(np.fromiter((d['weight'] for u, v, d in g.edges(data=True)), dtype='float'), q=0.25)
         logger.info('Removing weak edges with weight < {:.3e}'.format(min_weight))
         logger.info('Before weak removal: {:,} nodes, {:,} edges'.format(g.order(), g.size()))
         g.remove_edges_from([(u, v) for u, v, d in g.edges(data=True) if d['weight'] < min_weight])
 
-    logger.info('Final graph: {:,} nodes, {:,} edges'.format(g.order(), g.size()))
+    # the Hi-C contact_map layer is always present at the first element
+    graph_layers = [g]
 
-    return g
+    # Add GFA layer if supplied
+    if gfa_file is not None:
+        logger.info('GFA file supplied, preparing for multilayered clustering')
+        g_gfa, degen_segments = read_gfa(gfa_file, paths_to_edges=True, read_progress=True)
+        g_gfa = bistochastic_graph(g_gfa)
+        # extend the list of excluded sequences to include degenerate segments within assembly graph
+        if disconnect_degen:
+            if exclude_names is None:
+                exclude_names = degen_segments
+            else:
+                exclude_names += degen_segments
+        graph_layers.append(g_gfa)
+
+    # disconnect any node mentioned in exclusion list
+    if exclude_names:
+        for g in graph_layers:
+            prune_edges(g, exclude_names)
+
+    _order = sum(g.order() for g in graph_layers)
+    _size = sum(g.size() for g in graph_layers)
+    logger.info(f'Final graph contains {len(graph_layers)} layers, with {_order:,} nodes and {_size:,} edges')
+
+    return graph_layers
 
 
 def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, min_extent=None,
-                    white_list=['primary', 'revised']):
+                    white_list=['primary', 'rescued', 'revised']):
     """
     Given a clustering and list of cluster ids (or none), enable (unmask) the related sequences in
     the contact map. If a requested cluster has not been ordered, it will be dropped.
@@ -713,8 +754,13 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
     if cl_list is None:
         cl_list = list(clustering.keys())
 
-    # at present, only primary clusters are supported in downstream methods
+    # at present, only some cluster types (statuses) are supported in downstream methods
     white_list = set(white_list)
+
+    for k in cl_list:
+        if clustering[k]['status'] not in white_list:
+            logger.warning(f'Cluster {k} has status {clustering[k]["status"]} which is not in the white-list')
+
     cl_list = np.sort(np.array([(k, clustering[k]['status'] in white_list) for k in cl_list],
                                dtype=np.dtype([('clid', int), ('white_listed', bool)])))
     logger.info(f'Enable_clusters: white-list excluded {(~cl_list["white_listed"]).sum()} clusters')
@@ -824,6 +870,11 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
     # now build the list of relevant clusters and setup the associated mask
     cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=ordered_only,
                               min_extent=min_extent)
+
+    # initial assume all clusters are visible
+    # TODO this need to be revised to support show_sequences, etc.
+    visible_clusters = {k: True for k in cl_list}
+
     if simple or contact_map.bin_size is None:
         assert not show_sequences, 'show_sequences=True is not supported for simple contact maps'
         # tick spacing simple the number of sequences in the cluster
@@ -834,28 +885,44 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
         # tick spacing depends on cumulative bins for sequences in cluster
         # cumulative bin count, excluding masked sequences
         csbins = [0]
+
+        assert not show_sequences, 'show_sequences=True is defective and therefore disabled'
+
         if show_sequences:
             for k in cl_list:
                 # get the order records for the sequences in cluster k
                 _oi = contact_map.order.order[clustering[k]['seq_ids']]
                 # count the cumulative bins at each cluster for those sequences which are not masked
-                csbins.extend(contact_map.grouping.bins[clustering[k]['seq_ids'][_oi['mask']]])
+                cl_bins = contact_map.grouping.bins[clustering[k]['seq_ids'][_oi['mask']]]
+
+                # TODO this will mess up with masked sequences!
+                #    sequence labels below need to be mask-aware
+
+                csbins.extend(cl_bins)
+
             tick_locs = np.array(np.array(csbins).cumsum(), dtype=np.int32)
         else:
             for k in cl_list:
                 # get the order records for the sequences in cluster k
                 _oi = contact_map.order.order[clustering[k]['seq_ids']]
                 # count the cumulative bins at each cluster for those sequences which are not masked
-                csbins.append(contact_map.grouping.bins[clustering[k]['seq_ids'][_oi['mask']]].sum() + csbins[-1])
+                _bins = contact_map.grouping.bins[clustering[k]['seq_ids'][_oi['mask']]].sum()
+                # clusters with no unmaked sequences -- zero bins to display -- are marked as
+                # invisible and receive no tick mark
+                if _bins > 0:
+                    csbins.append(_bins + csbins[-1])
+                else:
+                    visible_clusters[k] = False
+                    logger.debug(f'Cluster {clustering[k]["name"]} is completely masked and excluded from plot')
             tick_locs = np.array(csbins, dtype=np.int32)
 
     if show_sequences:
         _labels = [contact_map.seq_info[si].name for cl_id in cl_list for si in clustering[cl_id]['seq_ids']]
     else:
         if use_taxo:
-            _labels = [clustering[cl_id]['taxon'] for cl_id in cl_list]
+            _labels = [clustering[cl_id]['taxon'] for cl_id in cl_list if visible_clusters[cl_id]]
         else:
-            _labels = [clustering[cl_id]['name'] for cl_id in cl_list]
+            _labels = [clustering[cl_id]['name'] for cl_id in cl_list if visible_clusters[cl_id]]
 
     contact_map.plot(fname, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=_labels,
                      max_image_size=max_image_size, flatten=flatten, norm_method=norm_method, **kwargs)
@@ -931,8 +998,9 @@ def write_report(fname, clustering):
 
 def find_lost_singletons(contact_map, clustering):
     """
-    Return the seq_ids of any sequence which was excluded from clustering. These sequences
-    will have been excluded for being too short or with too few Hi-C observations.
+    Return the seq_ids of all sequences which were excluded from clustering. These sequences
+    will have been excluded for being too short (in clustering) or with too few Hi-C observations.
+    Sequences excluded for length during initial map creation will not be found.
 
     :param contact_map: the contact map in question
     :param clustering: a clustering solution for this contact map.
@@ -1233,11 +1301,30 @@ def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
 
     :param gfa_filename: path to the input GFA file
     :param paths_to_edges: only include edges that are mentioned as paths, rather than all link records
-    :return: undirected Networkx graph
+    :param read_progress: show a tqdm progress bar while reading GFA file
+    :return: undirected Networkx graph, list of degenerate segments
     """
+
+    def find_degenerate_segments(gfa):
+        """
+        find all segments which were placed more than once within paths.
+        :param gfa:
+        :return:
+        """
+        segment_frequency = defaultdict(int)
+        for _, _path in gfa.paths.items():
+            for _seg, _dir in _path.segment_names:
+                segment_frequency[_seg] += 1
+        return [k for k, v in segment_frequency.items() if v > 1]
+
     gfa = GFA(gfa_filename, skip_sequence_data=True, progress=read_progress)
 
-    g_out = nx.Graph()
+    # segment which have been incorporated into multiple paths can lead
+    # to bridges in the graph structure and cluster multiplicity
+    degen_segments = find_degenerate_segments(gfa)
+
+    g_out = nx.Graph(name='assembly_graph')
+
     # all segments in the GFA will become nodes
     for _seg in gfa.segments.values():
         # we wish to annotate nodes with k-mer depth reported by Flye
@@ -1274,7 +1361,7 @@ def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
     else:
         g_out.add_edges_from(link_registry.edges(data=True))
 
-    return g_out
+    return g_out, degen_segments
 
 
 def harden_clustering(clustering, contact_map):
@@ -1324,7 +1411,8 @@ def harden_clustering(clustering, contact_map):
 
     logger.info(f'Clustering involves {len(seq2cl):,} sequences, '
                 f'of which {n_duped:,} were assigned to more than one cluster')
-    logger.info(f'Average length of a degenerate sequence: {dupe_extent // n_duped:,}')
+    if n_duped > 0:
+        logger.info(f'Average length of a degenerate sequence: {dupe_extent // n_duped:,}')
 
     # it's possible that some clusters are now empty
     n_depleted = remove_empty_clusters(hard_clustering)
