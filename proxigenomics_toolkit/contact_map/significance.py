@@ -42,6 +42,12 @@ def sequence_details(contact_map, coverage_info, mappability_info, clustering):
     seq_info = np.array(contact_map.seq_info, dtype=np.dtype(
         [('offset', np.int64), ('refid', np.int64), ('name', np.object_),
          ('length', np.int64), ('sites', np.int64), ('gc', np.float64)]))
+
+    # convert percentage GC to range [0..1]
+    if seq_info['gc'].max() > 1:
+        logger.debug('Transformed GC from percentage [0..100] to fractional representation [0..1]')
+        seq_info['gc'] *= 0.01
+
     # 2. drop unneeded the refid and offset columns
     seq_info = pandas.DataFrame(seq_info).drop(['refid', 'offset'], axis=1)
     seq_info.index.name = 'seq_id'
@@ -782,7 +788,8 @@ class SignificantLinks(object):
                                     distrib_func=DISTRIB_FUNC,
                                     fixed_model=FIXED_MODEL,
                                     disp_model=DISP_MODEL,
-                                    zi_model=ZI_MODEL):
+                                    zi_model=ZI_MODEL,
+                                    validate_fit=True):
         """
         For a table of contig-to-genome_bin interactions.
 
@@ -819,6 +826,7 @@ class SignificantLinks(object):
         :param fixed_model: custom fixed-effects model for R
         :param disp_model: custom dispersion model for R
         :param zi_model: custom zero-inflation model for R
+        :param validate_fit: carry out validation tests for model fit
         """
         def _drop_stale_columns(*dataframes):
             """
@@ -856,7 +864,8 @@ class SignificantLinks(object):
                                                      zi_model=zi_model,
                                                      output_path=self.output_basename,
                                                      distrib_func=distrib_func,
-                                                     seed=self.seed)
+                                                     seed=self.seed,
+                                                     validate=validate_fit)
 
             # extract various return information from the R objects
             # ANOVA result
@@ -938,7 +947,8 @@ class SignificantLinks(object):
                   disp_model=DISP_MODEL,
                   zi_model=ZI_MODEL,
                   alpha=FDR_ALPHA,
-                  fdr_method=FDR_METHOD):
+                  fdr_method=FDR_METHOD,
+                  validate_fit=True):
         """
         Using the prepared data, fit the Zinb model and adjust
         the resulting p-values for FDR.
@@ -949,9 +959,11 @@ class SignificantLinks(object):
         :param zi_model: custom zero-inflation model for R
         :param alpha: the target family-wise error rate to control FDR
         :param fdr_method: the method to use in FDR correction
+        :param validate_fit: carry out validation tests for model fit
         """
         self.estimate_significance_model(n_samples,
                                          fixed_model=fixed_model,
                                          disp_model=disp_model,
-                                         zi_model=zi_model)
+                                         zi_model=zi_model,
+                                         validate_fit=validate_fit)
         self.fdr_correction(alpha, fdr_method)
