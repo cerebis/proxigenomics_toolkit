@@ -41,9 +41,9 @@ transform_data <- function(data) {
                     length = log(length_u * length_v),
                     sites = log(sites_u * sites_v),
                     cov = log(cov_u * cov_v),
-                    gc = log(gc_u * gc_v),
-                    # arcsine transformation of uf since it is a proportion
-                    uf = asin(uf_u * uf_v)),
+                    # arcsine transformation for proportional variables
+                    uf = asin(uf_u * uf_v),
+                    gc = gc_v - gc_u),
              # standardise exogenous
              length,
              sites,
@@ -65,7 +65,7 @@ sigma_func <- function(data, fitobj) {
 }
 
 find_significant <- function(spurious, all_contacts, output_path, distrib_func, n_samples, seed,
-                            fixed_model, disp_model, zi_model) {
+                            fixed_model, disp_model, zi_model, validate=TRUE) {
 
     MAX_POINTS <- 1000
 
@@ -94,6 +94,7 @@ find_significant <- function(spurious, all_contacts, output_path, distrib_func, 
 
     if (!missing(n_samples)) {
         dfit <- sample_n(dfit, n_samples)
+        writeLines(paste('Reduced observation set size'))
     }
     writeLines(paste('Fitting with:', nrow(dfit)))
 
@@ -128,27 +129,27 @@ find_significant <- function(spurious, all_contacts, output_path, distrib_func, 
     print(fit_summary1)
     sink()
 
-    # simulate residuals plot for model quality inspection
-    writeLines('\nSimulating residuals')
-    png(paste0(output_path, '_R_simulated-residuals.png'), width = 1200, height = 800)
-    par(mfrow = c(1, 2))
-    simOut <- simulateResiduals(modfit, plot = T, seed = seed)
-    dev.off()
-
-    writeLines('\nTesting outliers with boostrapping')
-    png(paste0(output_path, '_R_test-outliers.png'), width = 1200, height = 800)
-    print(testOutliers(simOut, type = 'bootstrap'))
-    dev.off()
-
-    writeLines('\nTesting dispersion')
-    png(paste0(output_path, '_R_test-dispersion.png'), width = 1200, height = 800)
-    print(testDispersion(simOut))
-    dev.off()
-
-    writeLines('\nTesting zero-inflation')
-    png(paste0(output_path, '_R_test-zif.png'), width = 1200, height = 800)
-    print(testZeroInflation(simOut))
-    dev.off()
+    if (validate) {
+        # simulate residuals plot for model quality inspection
+        writeLines('\nSimulating residuals')
+        pdf(paste0(output_path, '_R_validation.pdf'))
+        layout.matrix <- matrix(c(1, 3, 2, 4), nrow = 2, ncol = 2)
+        layout(mat = layout.matrix, heights = c(1, 1), widths = c(1, 1))
+        par(cex.lab=0.67)
+        simOut <- simulateResiduals(modfit, plot = F, seed = seed, integerResponse = T, n = 1000)
+        writeLines('\nTest uniformity')
+        print(testUniformity(simOut, plot=F))
+        plotQQunif(simOut, testUniformity = T, testOutliers = F, testDispersion = F)
+        writeLines('\nTest quantiles')
+        print(testQuantiles(simOut))
+        writeLines('\nTest dispersion')
+        print(testDispersion(simOut))
+        writeLines('\nTest zero-inflation')
+        print(testZeroInflation(simOut))
+        writeLines('\nTest outliers with boostrapping')
+        print(testOutliers(simOut, type = 'bootstrap'))
+        dev.off()
+    }
 
     # predict expeced contacts (response) from model
     spurious['response'] <- predict(modfit, spurious, type = 'response')
