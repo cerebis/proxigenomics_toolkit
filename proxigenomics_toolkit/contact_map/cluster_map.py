@@ -117,6 +117,7 @@ def bistochastic_graph(g_in):
     _adj_mat = _adj_mat.tocoo()
     name_lookup = list(g_in.nodes())
     g_out = nx.Graph(name=g_in.name)
+    g_out.add_nodes_from(name_lookup)
     for i, j, d in zip(_adj_mat.row, _adj_mat.col, _adj_mat.data):
         g_out.add_edge(name_lookup[i], name_lookup[j], weight=d)
     return g_out
@@ -713,7 +714,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     # Add GFA layer if supplied
     if gfa_file is not None:
         logger.info('GFA file supplied, preparing for multilayered clustering')
-        g_gfa, degen_segments = read_gfa(gfa_file, paths_to_edges=True, read_progress=True)
+        g_gfa, degen_segments = read_gfa(gfa_file, paths_to_edges=True, read_progress=False)
         g_gfa = bistochastic_graph(g_gfa)
         # extend the list of excluded sequences to include degenerate segments within assembly graph
         if disconnect_degen:
@@ -1360,6 +1361,8 @@ def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
                 g_out.add_edge(u, v, contig=_path.name, weight=link_registry[u][v]['weight'])
     else:
         g_out.add_edges_from(link_registry.edges(data=True))
+
+    logger.debug(f'GFA graph contains {g_out.order()} nodes and {g_out.size()} edges')
 
     return g_out, degen_segments
 
