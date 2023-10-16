@@ -654,7 +654,7 @@ class SignificantLinks(object):
         logger.info(f'Sequence to cluster table contains {len(node_to_cluster):,} observations')
 
         # write table of all observations
-        node_to_cluster.to_csv('{}_all.csv'.format(self.output_basename))
+        node_to_cluster.to_csv('{}_raw.csv'.format(self.output_basename))
         self.all_contacts = node_to_cluster
 
     def outlier_removal(self, initial_sigma=3, pr_cutoff=0.0004, n_samples=10000, plot=True):
@@ -818,7 +818,7 @@ class SignificantLinks(object):
         ix_accepted &= ~ix_singletons
 
         spurious = spurious[ix_accepted]
-        spurious.to_csv('{}_inter.csv'.format(self.output_basename))
+        spurious.to_csv('{}_spurious.csv'.format(self.output_basename))
         logger.info('After basic rejections, {:,} observations passed'.format(len(spurious)))
 
         self.spurious = spurious
@@ -829,6 +829,7 @@ class SignificantLinks(object):
         real interactions which will be compared to the statistical model.
         """
         self.symbolic = self.all_contacts.query('contacts == @SYMBOLIC_SELF_CONTACTS').copy()
+        self.symbolic.to_csv('{}_singletons.csv'.format(self.output_basename))
         self.all_contacts = self.all_contacts.query('contacts != @SYMBOLIC_SELF_CONTACTS').copy()
 
     def estimate_significance_model(self,
@@ -1016,3 +1017,5 @@ class SignificantLinks(object):
                                          zi_model=zi_model,
                                          validate_fit=validate_fit)
         self.fdr_correction(alpha, fdr_method)
+
+        self.all_contacts.to_csv('{}_prediction.csv'.format(self.output_basename))
