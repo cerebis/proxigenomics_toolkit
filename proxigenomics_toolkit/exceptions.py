@@ -65,7 +65,7 @@ class InvalidCoverageFormatError(ApplicationException):
             f'Failed to extract coverage for {seq_name}. "{txt}" did not match {caller_name} pattern')
 
 
-class InvalidSequenceException(ApplicationException):
+class RejectedSequenceException(ApplicationException):
     """Sequence failed some type of acceptance criteria"""
     def __init__(self):
-        super(InvalidSequenceException, self).__init__('sequence not accepted')
+        super(RejectedSequenceException, self).__init__('sequence has been rejected')

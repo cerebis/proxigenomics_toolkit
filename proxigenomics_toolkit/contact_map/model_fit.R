@@ -158,7 +158,6 @@ find_significant <- function(spurious, all_contacts, output_path, distrib_func, 
                                       size = sigma_func(spurious, modfit), mu = spurious$response)
 
     writeLines('Calculating significance for all contacts')
-    #write_csv(all_contacts, paste0(output_path, 'temp.csv'))
     all_contacts <- transform_data(all_contacts)
     all_contacts['response'] <- predict(modfit, all_contacts, type = 'response')
     all_contacts['pvalue'] <- 1 - pnbinom(all_contacts$contacts1m,

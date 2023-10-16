@@ -1,4 +1,4 @@
-from ..exceptions import InvalidSequenceException
+from ..exceptions import RejectedSequenceException
 from ..io_utils import load_object, open_input
 import logging
 from collections import Counter, namedtuple, OrderedDict, defaultdict
@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 import warnings
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='seaborn')
+
+# A marker to consistently represent singleton cluster self-self contacts.
+#
+# Motivation: for bipartite clustering attraction between a singleton cluster and
+# itself (as a sequence), the observed self-self contact count is nonsensical. A sequence
+# does nothing to attract itself more to a singleton cluster with more observed
+# inTRA-sequence pairs. Additionally, many singletons have zero contacts due to very low
+# mappability. This large negative value is used as a marker (rather than np.NaN), as this
+# avoids the contacts column becoming typed as float.
+SYMBOLIC_SELF_CONTACTS = -999999
 
 
 def sequence_details(contact_map, coverage_info, mappability_info, clustering):
@@ -106,6 +116,46 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
         """
         return np.sum(np.maximum(1, x))
 
+    def validate_sequence(ix, seq_name, track_removed=False):
+        """
+        Check that a sequence belongs to a cluster and is sufficiently long. In addition, the
+        method keeps track of accepted/rejected sequences and their attributes for each cluster.
+        This is later used to calculate updated cluster attributes. As a consequence, this methods
+        modifies nodes within the graph.
+        :ix: sequence index
+        :seq_name: sequence name
+        :track_removed: when true, attributes of removed sequences are stored with each cluster node
+        :return: cluster_id
+        :raise: RejectedSequenceException for rejected sequences
+        """
+        cl = _ix2cl[ix]
+        if cl == -1:
+            no_clust.add(ix)
+            raise RejectedSequenceException
+
+        cluster_id = ('c', cl)
+        assert g.has_node(cluster_id), f'cluster node {cluster_id} is missing from graph'
+
+        if ix in removed_seqs:
+            raise RejectedSequenceException
+
+        info = _ix2info[ix]
+        # an additional entry for convenience
+        info['seq_name'] = seq_name
+
+        if info['length'] < min_seq_length:
+            if track_removed:
+                cl_node = g.nodes[cluster_id]
+                cl_node.setdefault('removed', {})[ix] = info
+            removed_seqs.add(ix)
+            raise RejectedSequenceException
+
+        cl_node = g.nodes[cluster_id]
+        cl_node.setdefault('members', {})[ix] = info
+
+        return cluster_id
+
+    # prepare some reference objects used during bipartite graph construction
     seq_info, _ix2info, _ix2cl = sequence_details(contact_map, coverage_info, mappability_info, clustering)
 
     # calculation using weighted means (by length of sequence)
@@ -113,6 +163,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
                               wgc=lambda x: x.length * x.gc,
                               wuf=lambda x: x.length * x.uniq_frac)
 
+    # per-cluster aggregated statistics
     cl_agg = (seq_grp.groupby('cluster')
               .aggregate({'wcv': 'sum',
                           'wgc': 'sum',
@@ -134,9 +185,14 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     del seq_grp
 
     # get the upper diagonal of the contact_map, excluding x=y (i.e. without self-self interactions)
+    # NOTE: in eliminating self-self interactions, edges will not be created between singleton
+    # clusters and their sole member sequence. We do not want to treat self-self interactions as
+    # they do not contribute to the seq-seq clustering.
     _map = sp.triu(contact_map.seq_map, k=1).tocsr()
 
+    #
     # Steps in building the graph
+    #
     # 1. add cluster nodes
     # 2. add sequence nodes
     #   a. for all sequences u:
@@ -149,46 +205,11 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     # first create all the "cluster" nodes
     # where their ids follow the syntax "('c', int)"
     for _cl, _cl_dat in clustering.items():
-        nattr = cl_agg.loc[_cl].to_dict(dict)
-        assert len(_cl_dat['seq_ids']) == int(nattr['size']), 'problem with pandas calculated cluster size'
-        nattr['bipartite'] = 0
-        nattr['cluster_name'] = _cl_dat['name']
-        g.add_node(('c', _cl), **nattr)
-
-    def validate_sequence(ix, track_removed=False):
-        """
-        Check that a sequence belongs to a cluster and is sufficiently long. In addition, the
-        method keeps track of accepted/rejected sequences and their attributes for each cluster.
-        This is later used to calculate updated cluster attributes. As a consequence, this methods
-        modifies nodes within the graph.
-        :ix: sequence index
-        :track_removed: when true, attributes of removed sequences are stored with each cluster node
-        :return: cluster_id
-        :raise: InvalidSequenceException for rejected sequences
-        """
-        cl = _ix2cl[ix]
-        if cl == -1:
-            no_clust.add(ix)
-            raise InvalidSequenceException
-
-        cluster_id = ('c', cl)
-        assert g.has_node(cluster_id), f'cluster node {cluster_id} is missing from graph'
-
-        if ix in removed_seqs:
-            raise InvalidSequenceException
-
-        info = _ix2info[ix]
-        if info['length'] < min_seq_length:
-            if track_removed:
-                cl_node = g.nodes[cluster_id]
-                cl_node.setdefault('removed', {})[ix] = info
-            removed_seqs.add(ix)
-            raise InvalidSequenceException
-
-        cl_node = g.nodes[cluster_id]
-        cl_node.setdefault('members', {})[ix] = info
-
-        return cluster_id
+        node_attr = cl_agg.loc[_cl].to_dict(dict)
+        assert len(_cl_dat['seq_ids']) == int(node_attr['size']), 'problem with pandas calculated cluster size'
+        node_attr['bipartite'] = 0
+        node_attr['cluster_name'] = _cl_dat['name']
+        g.add_node(('c', _cl), **node_attr)
 
     # create sequence nodes and link to clusters through Hi-C interactions
     # where their ids follow the syntax "('n', int)"
@@ -197,39 +218,43 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     # we will iterate over sequences using the table of per-sequence annotation details
     seq_info_array = seq_info.loc[:,
                      ['seq_id', 'name', 'length', 'sites', 'coverage', 'gc', 'cluster', 'uniq_frac']].values
+
+    id2name = seq_info.set_index('seq_id')[['name']]
+
     for _si, _name, _len, _sites, _cov, _gc, _clust, _uf in tqdm.tqdm(seq_info_array):
         try:
-            validate_sequence(_si)
+            validate_sequence(_si, _name)
             # sequence node definition with attributes
             node_from = ('n', _name)
-            nattr = {'name': _name,
-                     'length': _len,
-                     'sites': _sites,  # assign 1 site to those sequences with 0
-                     'coverage': _cov,  # flye can report 0 depth on assembly graph segments
-                     'membership': _clust,
-                     'gc': _gc,
-                     'uniq_frac': _uf,
-                     'bipartite': 1}
-            g.add_node(node_from, **nattr)
-        except InvalidSequenceException:
+            node_attr = {'name': _name,
+                         'length': _len,
+                         'sites': _sites,  # assign 1 site to those sequences with 0
+                         'coverage': _cov,  # flye can report 0 depth on assembly graph segments
+                         'membership': _clust,
+                         'gc': _gc,
+                         'uniq_frac': _uf,
+                         'bipartite': 1}
+            g.add_node(node_from, **node_attr)
+        except RejectedSequenceException:
             continue
 
-        # iterate over all interactions between sequence _si and any other sequence in the map _sj
+        # iterate over all observed interactions between
+        # sequence _si and any other sequence _sj
         _contacts = _map[_si].tocoo()
         for _sj, _contacts_ij in zip(_contacts.col, _contacts.data):
             try:
-                cluster_to = validate_sequence(_sj)
+                cluster_to = validate_sequence(_sj, id2name.loc[_sj, 'name'])
                 # add the edge if new
                 if not g.has_edge(node_from, cluster_to):
                     g.add_edge(node_from, cluster_to, contacts=0)
-                # accumulate these new contacts between sequence and members of cluster
+                # otherwise accumulate the contacts between sequence and members of cluster
                 # - this comes into effect when a sequence interacts with many sequences in
                 #   the same cluster.
                 g[node_from][cluster_to]['contacts'] += _contacts_ij
-            except InvalidSequenceException:
+            except RejectedSequenceException:
                 continue
 
-    # update cluster nodes to reflect loss of rejected sequences
+    # update cluster nodes to reflect loss of any rejected sequences during accumulation
     cluster_nodes = [u for u in g.nodes() if u[0] == 'c']
     for u in cluster_nodes:
         if 'members' in g.nodes[u]:
@@ -240,10 +265,20 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
                                'gc': (df_attribs.gc * df_attribs.length / df_attribs.length.sum()).sum(),
                                'coverage': (df_attribs.coverage * df_attribs.length / df_attribs.length.sum()).sum(),
                                'uniq_frac': (df_attribs.uniq_frac * df_attribs.length / df_attribs.length.sum()).sum()})
-            if tidy:
-                del g.nodes[u]['members']
         if tidy and 'removed' in g.nodes[u]:
             del g.nodes[u]['removed']
+
+    _diag = contact_map.seq_map.diagonal()
+    for u in cluster_nodes:
+        cl_info = g.nodes[u]
+        if 'members' in cl_info and len(cl_info['members']) == 1:
+            v = ('n', next(iter(cl_info['members'].values()))['seq_name'])
+            g.add_edge(u, v, contacts=SYMBOLIC_SELF_CONTACTS)
+
+    if tidy:
+        for u in cluster_nodes:
+            if 'members' in g.nodes[u]:
+                del g.nodes[u]['members']
 
     logger.info('{:,} sequences were too short to be destinations (< {:,} bp)'.format(
         len(removed_seqs), min_seq_length))
@@ -499,6 +534,7 @@ class SignificantLinks(object):
         self.seq2cl_graph = None
         self.all_contacts = None
         self.spurious = None
+        self.symbolic = None
         self.spurious_model = None
         self.fit_summary = None
         self.fitted = None
@@ -777,11 +813,23 @@ class SignificantLinks(object):
         logger.info('{:,} observations were marked as intra-genome_bin'.format(spurious['intra'].sum()))
         ix_accepted &= ~spurious['intra']
 
+        ix_singletons = spurious['contacts'] == SYMBOLIC_SELF_CONTACTS
+        logger.info('{:,} observations are symbolic singleton cluster self-contacts'.format(ix_singletons.sum()))
+        ix_accepted &= ~ix_singletons
+
         spurious = spurious[ix_accepted]
         spurious.to_csv('{}_inter.csv'.format(self.output_basename))
         logger.info('After basic rejections, {:,} observations passed'.format(len(spurious)))
 
         self.spurious = spurious
+
+    def separate_real_and_symbolic_tables(self):
+        """
+        Separate symbolic records -- representing interactions otherwise excluded from the analysis -- from
+        real interactions which will be compared to the statistical model.
+        """
+        self.symbolic = self.all_contacts.query('contacts == @SYMBOLIC_SELF_CONTACTS').copy()
+        self.all_contacts = self.all_contacts.query('contacts != @SYMBOLIC_SELF_CONTACTS').copy()
 
     def estimate_significance_model(self,
                                     n_samples=N_SAMPLES,
@@ -854,11 +902,11 @@ class SignificantLinks(object):
             logger.info('Converting pandas table to R')
             _drop_stale_columns(fitting, self.all_contacts)
             fitting = cv.py2rpy(fitting)
-            df_all = cv.py2rpy(self.all_contacts)
+            all_contacts = cv.py2rpy(self.all_contacts)
 
         with localconverter(robjects.default_converter):
             logger.info('Calling R method')
-            ret_r = self.find_significant_function_r(fitting, df_all,
+            ret_r = self.find_significant_function_r(fitting, all_contacts,
                                                      fixed_model=fixed_model,
                                                      disp_model=disp_model,
                                                      zi_model=zi_model,
@@ -939,6 +987,7 @@ class SignificantLinks(object):
                                    min_bin_size=min_bin_size, min_bin_length=min_bin_length,
                                    min_single_length=min_single_length, big_threshold=big_threshold,
                                    small_value=small_value)
+        self.separate_real_and_symbolic_tables()
         self.outlier_removal(initial_sigma, pr_cutoff, outlier_samples, plot=plot_outliers)
 
     def fit_model(self,
