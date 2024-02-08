@@ -1,5 +1,8 @@
+from ..contact_map import to_graph
 from ..exceptions import RejectedSequenceException
 from ..io_utils import load_object, open_input
+from ..linalg import is_hermitian, make_symmetric
+
 import logging
 from collections import Counter, namedtuple, OrderedDict, defaultdict
 
@@ -19,12 +22,12 @@ from rpy2.robjects.conversion import localconverter
 from sklearn.mixture import BayesianGaussianMixture
 from statsmodels.stats.multitest import multipletests
 
-logger = logging.getLogger(__name__)
-
 # TODO suppressing FutureWarnings from seaborn until a release (>12.2) addresses (added 2023-09-18)
 import warnings
-
 warnings.filterwarnings('ignore', category=FutureWarning, module='seaborn')
+
+logger = logging.getLogger(__name__)
+
 
 # A marker to consistently represent singleton cluster self-self contacts.
 #
@@ -76,8 +79,8 @@ def sequence_details(contact_map, coverage_info, mappability_info, clustering):
     # 4. prepare a lookup table from seq_id to sequence length and number of sites
     # - this is used for removing the contribution of an excluded
     #   sequence from its cluster.
-    _ix2info = seq_info.set_index('seq_id').loc[:,
-               ['length', 'sites', 'gc', 'coverage', 'uniq_frac']].to_dict(orient='records')
+    _ix2info = seq_info.set_index('seq_id').loc[:, ['length', 'sites', 'gc',
+                                                    'coverage', 'uniq_frac']].to_dict(orient='records')
 
     # create a cluster id column, with isolated sequences assigned -1
     _nm2cl = [(contact_map.seq_info[_si].name, _cl, _d['name'])
@@ -93,6 +96,30 @@ def sequence_details(contact_map, coverage_info, mappability_info, clustering):
     _id2cl = seq_info.set_index('seq_id')['cluster'].to_dict()
 
     return seq_info, _ix2info, _id2cl
+
+
+def get_map(_m, full=False, no_diagonal=False):
+    """
+    Return a map (matrix) in the requested form. Either the full matrix or
+    upper triangle (half) and optionally excluding the diagonal. The matrix is
+    checked for symmetry and made symmetric if necessary (fulL). There is an
+    assumption here that the upper half contains the values.
+    :param _m: the matrix (map) in question
+    :param full: True - the full matrix, False - upper triangle
+    :param no_diagonal: drop diagonal elements (True)
+    :return: a copy of the matrix
+    """
+    if full:
+        if not is_hermitian(_m):
+            _m = make_symmetric(_m)
+        if no_diagonal:
+            _m = _m.todok()
+            _m.setdiag(0)
+            _m = _m.tocsr()
+            _m.eliminate_zeros()
+    else:
+        _m = sp.triu(_m, k=1 if no_diagonal else 0).tocsr()
+    return _m
 
 
 def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability_info, min_seq_length, tidy=True):
@@ -184,11 +211,10 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
 
     del seq_grp
 
-    # get the upper diagonal of the contact_map, excluding x=y (i.e. without self-self interactions)
     # NOTE: in eliminating self-self interactions, edges will not be created between singleton
     # clusters and their sole member sequence. We do not want to treat self-self interactions as
     # they do not contribute to the seq-seq clustering.
-    _map = sp.triu(contact_map.seq_map, k=1).tocsr()
+    _map = get_map(contact_map.seq_map, full=True, no_diagonal=True)
 
     #
     # Steps in building the graph
@@ -216,17 +242,22 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     removed_seqs = set()
     no_clust = set()
     # we will iterate over sequences using the table of per-sequence annotation details
-    seq_info_array = seq_info.loc[:,
-                     ['seq_id', 'name', 'length', 'sites', 'coverage', 'gc', 'cluster', 'uniq_frac']].values
+    seq_info_array = seq_info.loc[:, ['seq_id', 'name', 'length', 'sites',
+                                      'coverage', 'gc', 'cluster', 'uniq_frac']].values
 
     id2name = seq_info.set_index('seq_id')[['name']]
 
-    for _si, _name, _len, _sites, _cov, _gc, _clust, _uf in tqdm.tqdm(seq_info_array):
+    # these sequences are problematic, and we need to restrict their influence on the
+    # accumulation of contacts into clusters.
+    promiscuous_sequences = SequencePromiscuity(contact_map, clustering, 0.33,
+                                                5, node_id_type='external').get_promiscuous()
+
+    for _si, _name_i, _len, _sites, _cov, _gc, _clust, _uf in tqdm.tqdm(seq_info_array):
         try:
-            validate_sequence(_si, _name)
+            validate_sequence(_si, _name_i)
             # sequence node definition with attributes
-            node_from = ('n', _name)
-            node_attr = {'name': _name,
+            node_from = ('n', _name_i)
+            node_attr = {'name': _name_i,
                          'length': _len,
                          'sites': _sites,  # assign 1 site to those sequences with 0
                          'coverage': _cov,  # flye can report 0 depth on assembly graph segments
@@ -243,7 +274,13 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
         _contacts = _map[_si].tocoo()
         for _sj, _contacts_ij in zip(_contacts.col, _contacts.data):
             try:
-                cluster_to = validate_sequence(_sj, id2name.loc[_sj, 'name'])
+                _name_j = id2name.loc[_sj, 'name']
+
+                if _name_j in promiscuous_sequences:
+                    logger.debug(f'Ignoring promiscuous contact between {_name_j} and {_name_i}')
+                    raise RejectedSequenceException
+
+                cluster_to = validate_sequence(_sj, _name_j)
                 # add the edge if new
                 if not g.has_edge(node_from, cluster_to):
                     g.add_edge(node_from, cluster_to, contacts=0)
@@ -251,6 +288,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
                 # - this comes into effect when a sequence interacts with many sequences in
                 #   the same cluster.
                 g[node_from][cluster_to]['contacts'] += _contacts_ij
+
             except RejectedSequenceException:
                 continue
 
@@ -501,11 +539,82 @@ def mappability_report(filename, kmer_size):
         uniq_frac = 1 - ((data < 1).sum() / len(data))
         map_data[seq] = [len(data), np.mean(data), np.median(data), uniq_frac]
 
-    logger.debug(f'Read mappability results for {len(map_data):,} sequences')
+    logger.debug(f'Found mappability results for {len(map_data):,} sequences')
 
-    map_data = pandas.DataFrame.from_dict(map_data, orient='index', columns=['length','mean','median','uniq_frac'])
+    map_data = pandas.DataFrame.from_dict(map_data, orient='index', columns=['length', 'mean', 'median', 'uniq_frac'])
     map_data.index.name = 'name'
     return map_data
+
+
+class SequencePromiscuity(object):
+    """
+    Calculate the promiscuity of sequences within a given clustering solution.
+
+    Promiscuity is defined as the proportion of connections between a given sequence and all the members of a
+    cluster. Ideally, a sequence only has significant connection to a single cluster. However, in practice, a sequence
+    may possess significant connections to multiple clusters. This is particularly true for sequences that represent
+    mobile DNA, but conserved regions may also appear as promiscuous sequences (PS) so long as the involved genomes fall
+    into separate bins. For long-read sequence, even reasonably closely related genomes may be resolved in such a way.
+    Also, strain-refinement methods could also separate strain-degenerate bins.
+
+    Legitimate promiscuous sequences are problematic when accumulating contact evidence within the seq2cluster
+    bipartite graph.
+
+    Say we have two clusters A and B, with which a PS has significant interactions, and that PS has been assigned a
+    member of A during binning. The process of accumulating contact counts between sequences and clusters is misled
+    by the membership of PS in A, in that (PS in A) will attract contact counts from sequences that are members of B.
+    As such, it will appear that members of B significantly interact with A, when in fact this is an echo of their
+    interactions with PS alone.
+    """
+
+    ITEM_CHOICES = {'internal': 'seq_ids', 'external': 'seq_names'}
+
+    def __init__(self, contact_map, clustering, cluster_cover, min_contacts, node_id_type='external'):
+        """
+        :param contact_map: a contact map
+        :param clustering: a clustering solution for the given map
+        :param cluster_cover: the threshold interaction cover between a sequence and the members of a cluster
+        :param min_contacts: the minimum number of contacts between sequences to be considered significant
+        :param node_id_type: graph uses internal or external ids.
+        """
+        self.clustering = clustering
+        self.cluster_cover = cluster_cover
+        self.min_contacts = min_contacts
+        self.cl_item = SequencePromiscuity.ITEM_CHOICES[node_id_type]
+
+        hic_graph = to_graph(contact_map, norm=False, node_id_type=node_id_type, clustering=clustering)[0]
+        self.mates = self._sequence_promiscuity(hic_graph)
+
+    def _relative_connectedness(self, g, u, v_list):
+        n = 0
+        for v in v_list:
+            if g.has_edge(u, v) and g[u][v]['weight'] > self.min_contacts:
+                n += 1
+        return n / len(v_list)
+
+    def _sequence_promiscuity(self, g):
+        d = defaultdict(list)
+        for u in g.nodes():
+            for cl_id, cl_info in self.clustering.items():
+                r = self._relative_connectedness(g, u, cl_info[self.cl_item])
+                if r > self.cluster_cover:
+                    d[u].append({'cl_id': cl_id, 'relcon': r, 'extent': cl_info['extent']})
+
+        for _id, _mates in d.items():
+            d[_id] = sorted(_mates, key=lambda x: x['extent'], reverse=True)
+
+        return d
+
+    def get_promiscuous(self):
+        return {_id: _mates for _id, _mates in self.mates.items() if len(_mates) > 1}
+
+    def get_mates(self, seq_id):
+        if seq_id not in self.mates:
+            return None
+        return self.mates[seq_id]
+
+    def body_count(self, seq_id):
+        return len(self.mates[seq_id])
 
 
 class SignificantLinks(object):
@@ -563,9 +672,9 @@ class SignificantLinks(object):
         contact_map = load_object(self.contact_map_file)
         clustering = load_object(self.clustering_file)
 
-        logger.info('Extracting coverage info')
+        logger.info('Extracting coverage data')
         coverage_info = robust_read_csv(self.coverage_file, sep=sep).set_index('name')
-
+        logger.info('Reading mappability data')
         mappability_info = mappability_report(self.mappability_file, self.mappability_k)
 
         logger.info('Creating bipartite graph between clusters and sequences')
@@ -626,8 +735,8 @@ class SignificantLinks(object):
         seq_nodes = [u for u in seq2cl_graph.nodes() if u[0] == 'n']
         for u in tqdm.tqdm(seq_nodes):
             # every neighbour of a sequence will be a cluster
+            u_dat = seq2cl_graph.nodes[u]
             for v in seq2cl_graph.neighbors(u):
-                u_dat = seq2cl_graph.nodes[u]
                 v_dat = seq2cl_graph.nodes[v]
                 assert seq2cl_graph.has_edge(u, v), 'missing neighbor edge -- should not happen'
                 # skip associations for excluded clusters
@@ -657,7 +766,7 @@ class SignificantLinks(object):
         node_to_cluster.to_csv('{}_raw.csv'.format(self.output_basename))
         self.all_contacts = node_to_cluster
 
-    def outlier_removal(self, initial_sigma=3, pr_cutoff=0.0004, n_samples=10000, plot=True):
+    def outlier_removal(self, initial_sigma=3, min_prob=0.001, n_samples=10000, plot=True):
         """
         Outlier removal aimed at decreasing the FPR within the spurious data table. FPR in this
         case are interactions that are actually non-spurious. These are cases where a sequence
@@ -665,83 +774,98 @@ class SignificantLinks(object):
         include: genome_bin splitting, mobile elements, and conserved regions too confounding to be
         clustered.
 
-        :param initial_sigma: sigma-clipping threshold used in stage 1
-        :param pr_cutoff: probability threshold used in stage 2
+        :param initial_sigma: stage 1 - sigma-clipping threshold
+        :param min_prob: stage 2 - minimum probability below which a point is rejected
         :param n_samples: number of samples to use in stage 2 model fitting.
+        :param plot: create diagnostic plots
         :return: filtered table
         """
-        # plots limited to sensible number of points
-        _max_points = 2000
+        _MAX_POINTS = 2000
+        _COLS = ['cpcc', 'cpss']
 
-        # outlier filtering will use 4 statistics.
-        df = self.spurious.assign(cpcc=lambda x: x.contacts / (x.cov_u.astype('f4') * x.cov_v.astype('f4')),
-                                  cpss=lambda x: x.contacts / (x.sites_u.astype('f4') * x.sites_v.astype('f4')),
-                                  cps=lambda x: x.contacts / x.sites_u.astype('f4'),
-                                  lps=lambda x: x.length_u / x.sites_u.astype('f4'))
+        def plot_stage(_df, _stage, _format='png'):
+            """ Basic plotting method.
+            :param _df: dataframe to plot
+            :param _stage: stage of plot (int)
+            :param _format: format of plot (png or pdf)
+            """
+            if len(_df) > _MAX_POINTS:
+                _df = _df.sample(_MAX_POINTS, random_state=self.seed)
+            g = sb.PairGrid(_df, diag_sharey=False)
+            g.map_upper(sb.scatterplot, s=15)
+            g.map_lower(sb.kdeplot)
+            g.map_diag(sb.kdeplot, lw=2)
+            g.savefig(f'{self.output_basename}_outlier_stage{_stage}.{_format}')
 
-        _clip_cols = ['cpcc', 'cpss', 'cps', 'lps']
-        if len(df) < n_samples:
-            logger.warning('Outlier filtering will use the entire table as sample size '
-                           'exceeds table size. {:,} > {:,}'.format(n_samples, len(df)))
-            n_samples = len(df)
-            clip_data = df[_clip_cols]
-            use_all = True
+        def zscore(_df, _mu=None, _std=None):
+            """
+            Standarize all columns in a dataframe
+            :param _df: dataframe to standardize
+            :param _mu: use these means if supplied, otherwise calculate
+            :param _std: use these SDs if supplied, otherwise calculate
+            :return: standardized dataframe
+            """
+            assert len(_df) > 10, 'Dataframe contains too few rows to be reliably standardized'
+            if _mu is None:
+                _mu = _df.mean()
+            if _std is None:
+                _std = _df.std()
+            return (_df - _mu) / _std
+
+        # prepare statistics used in outlier filtering. We are aiming to remove
+        # those interactions which appear to be too strong for the number of sites or coverage
+        df_all = self.spurious.assign(cpcc=lambda x: x.contacts / (x.cov_u.astype('f4') * x.cov_v.astype('f4')),
+                                      cpss=lambda x: x.contacts / (x.sites_u.astype('f4') * x.sites_v.astype('f4')))
+
+        if len(df_all) < n_samples:
+            logger.warning('Outlier rejection: filtering will use the entire table as sample size '
+                           f'exceeds table size. {n_samples:,} > {len(df_all):,}')
+            df_smpl = df_all[_COLS]
         else:
-            clip_data = df[_clip_cols].sample(n_samples, random_state=self.seed)
-            use_all = False
-
-        # plot will use n_points
-        n_points = n_samples if n_samples < _max_points else _max_points
+            df_smpl = df_all[_COLS].sample(n_samples, random_state=self.seed)
 
         if plot:
-            # plot initial scatter and kde
-            df_plot = np.log(clip_data)
-            g = sb.PairGrid(df_plot, diag_sharey=False)
-            g.map_upper(sb.scatterplot, s=15)
-            g.map_lower(sb.kdeplot)
-            g.map_diag(sb.kdeplot, lw=2)
-            g.savefig('{}_outlier_stage0.png'.format(self.output_basename))
+            # initial distribution
+            plot_stage(zscore(np.log(df_smpl)), 0)
 
-        # stage 1: remove outliers using sigma clipping to lessen the impact of
-        # significant outliers on stage 2.
-        clip_data = np.log(np.ma.compress_rows(sigma_clip(clip_data, axis=0, sigma=initial_sigma)))
+        #
+        # stage 1: remove outliers using sigma clipping
+        #
+        df_smpl = np.ma.compress_rows(sigma_clip(df_smpl, axis=0, sigma=initial_sigma))
+        df_smpl = pandas.DataFrame(np.log(df_smpl), columns=_COLS)
+        # keep mean and std for later standardization
+        smpl_mu = df_smpl.mean()
+        smpl_sd = df_smpl.std()
+        # standardize
+        df_smpl = zscore(df_smpl, smpl_mu, smpl_sd)
 
         if plot:
-            # plot outcome of sigma clipping
-            df_plot = pandas.DataFrame(clip_data, columns=_clip_cols)
-            if not use_all:
-                df_plot = df_plot.sample(n_points, random_state=self.seed)
-            g = sb.PairGrid(df_plot, diag_sharey=False)
-            g.map_upper(sb.scatterplot, s=15)
-            g.map_lower(sb.kdeplot)
-            g.map_diag(sb.kdeplot, lw=2)
-            g.savefig('{}_outlier_stage1.png'.format(self.output_basename))
+            plot_stage(df_smpl, 1)
 
         # stage 2: fit a single-component gaussian model to the pre-filtered space
-        clip_model = BayesianGaussianMixture(covariance_type='diag', tol=1e-5, random_state=self.seed, max_iter=1000)
-        clip_model = clip_model.fit(clip_data)
-        logger.info('Outlier model means: {:.3g} {:.3g} {:.3g} {:.3g}'.format(*np.exp(clip_model.means_[0])))
-        logger.info('Outlier model variances: {:.3g} {:.3g} {:.3g} {:.3g}'.format(*np.exp(clip_model.covariances_[0])))
+        normal_model = BayesianGaussianMixture(n_components=1, covariance_type='diag', tol=1e-5,
+                                               random_state=self.seed, max_iter=1000)
+        normal_model = normal_model.fit(df_smpl)
+        assert normal_model.converged_, 'Outlier rejection: Gaussian mixture model did not converge'
 
-        # assign probabilities and use them for rejection.
-        df['clip_logpr'] = clip_model.score_samples(np.log(df[_clip_cols]))
-        _outlier_cutoff = np.log(pr_cutoff)
-        df = df.query('clip_logpr > @_outlier_cutoff')
+        logger.debug(f'Outlier rejection: converged in {normal_model.n_iter_} iterations')
+        logger.debug('Outlier rejection: model means: {:.3g} {:.3g}'.format(*normal_model.means_[0]))
+        logger.debug('Outlier rejection: model variances: {:.3g} {:.3g}'.format(*normal_model.covariances_[0]))
+
+        #  transform equivalent to sample and assign probabilities
+        df_all['pr_norm'] = np.exp(normal_model.score_samples(zscore(np.log(df_all[_COLS]).copy(), smpl_mu, smpl_sd)))
+        df_all['pr_norm'] = multipletests(df_all['pr_norm'], method=self.FDR_METHOD)[1]
+        # lastly redo standardization using the entire table
+        df_all[_COLS] = zscore(np.log(df_all[_COLS]))
+        logger.debug('Removing observations with Pr < {:.3g}'.format(min_prob))
+        df_all = df_all.query('pr_norm > @min_prob or cpcc < -1 or cpss < -1')
 
         if plot:
-            # plot final outcome
-            df_plot = df[_clip_cols]
-            if not use_all:
-                df_plot = df_plot.sample(n_points, random_state=self.seed)
-            # outcome of stage 2
-            g = sb.PairGrid(np.log(df_plot), diag_sharey=False)
-            g.map_upper(sb.scatterplot, s=15)
-            g.map_lower(sb.kdeplot)
-            g.map_diag(sb.kdeplot, lw=2)
-            g.savefig('{}_outlier_stage2.png'.format(self.output_basename))
+            plot_stage(df_all[_COLS], 2)
 
-        self.spurious = df
+        self.spurious = df_all
         logger.info('After outlier filtering, {:,} observations passed'.format(len(self.spurious)))
+        self.spurious.to_csv('{}_no-outliers.csv'.format(self.output_basename))
 
     def create_spurious_table(self, excluded_clusters=None, excluded_sequences=None,
                               min_bin_size=5, min_bin_length=100000,
@@ -835,10 +959,14 @@ class SignificantLinks(object):
     def estimate_significance_model(self,
                                     n_samples=N_SAMPLES,
                                     distrib_func=DISTRIB_FUNC,
-                                    fixed_model=FIXED_MODEL,
-                                    disp_model=DISP_MODEL,
-                                    zi_model=ZI_MODEL,
-                                    validate_fit=True):
+                                    fixed_model1=FIXED_MODEL,
+                                    disp_model1=DISP_MODEL,
+                                    zi_model1=ZI_MODEL,
+                                    fixed_model2=FIXED_MODEL,
+                                    disp_model2=DISP_MODEL,
+                                    zi_model2=ZI_MODEL,
+                                    validate_fit=True,
+                                    two_pass=False):
         """
         For a table of contig-to-genome_bin interactions.
 
@@ -872,10 +1000,14 @@ class SignificantLinks(object):
 
         :param n_samples: the number of samples to use in model estimation
         :param distrib_func: distribution family to use in model (eg. nbinom2, genpois, compois)
-        :param fixed_model: custom fixed-effects model for R
-        :param disp_model: custom dispersion model for R
-        :param zi_model: custom zero-inflation model for R
+        :param fixed_model1: custom fixed-effects model for R
+        :param disp_model1: custom dispersion model for R
+        :param zi_model1: custom zero-inflation model for R
+        :param fixed_model2: custom fixed-effects model for R
+        :param disp_model2: custom dispersion model for R
+        :param zi_model2: custom zero-inflation model for R
         :param validate_fit: carry out validation tests for model fit
+        :param two_pass: use two-pass fitting procedure
         """
         def _drop_stale_columns(*dataframes):
             """
@@ -897,7 +1029,6 @@ class SignificantLinks(object):
             logger.warning('Significance model will use the entire table as sample size '
                            'exceeds table size. {:,} > {:,}'.format(n_samples, len(fitting)))
             n_samples = len(fitting)
-        fitting = fitting.sample(n_samples, random_state=self.seed)
 
         with localconverter(robjects.default_converter + pandas2ri.converter) as cv:
             logger.info('Converting pandas table to R')
@@ -908,13 +1039,18 @@ class SignificantLinks(object):
         with localconverter(robjects.default_converter):
             logger.info('Calling R method')
             ret_r = self.find_significant_function_r(fitting, all_contacts,
-                                                     fixed_model=fixed_model,
-                                                     disp_model=disp_model,
-                                                     zi_model=zi_model,
                                                      output_path=self.output_basename,
                                                      distrib_func=distrib_func,
+                                                     n_samples=n_samples,
                                                      seed=self.seed,
-                                                     validate=validate_fit)
+                                                     fixed_model1=fixed_model1,
+                                                     disp_model1=disp_model1,
+                                                     zi_model1=zi_model1,
+                                                     fixed_model2=fixed_model2,
+                                                     disp_model2=disp_model2,
+                                                     zi_model2=zi_model2,
+                                                     validate=validate_fit,
+                                                     twopass=two_pass)
 
             # extract various return information from the R objects
             # ANOVA result
@@ -962,9 +1098,9 @@ class SignificantLinks(object):
 
     def prepare_data(self, sep=',', excluded_clusters=None, excluded_sequences=None,
                      min_seq_length=2500, min_bin_size=1, min_bin_length=1_000_000,
-                     min_single_length=1_000_000, big_threshold=None,
-                     initial_sigma=4, pr_cutoff=0.0004, outlier_samples=10_000, small_value=1,
-                     plot_outliers=False):
+                     min_single_length=1_000_000, big_threshold=None, small_value=1,
+                     outlier_rejection=True, initial_sigma=4, min_prob=0.0004,
+                     outlier_samples=10_000, plot_outliers=False):
         """
         From the Hi-C dataset, prepare the input data for significance testing
 
@@ -976,10 +1112,11 @@ class SignificantLinks(object):
         :param min_bin_length: minimum bin length (total sum of seq lengths) to be considered
         :param min_single_length: minimum length of a single-sequence bin to be considered
         :param big_threshold: maximum fraction a sequence to represent for a bin to be considered
-        :param initial_sigma: sigma clipping sigma used in outlier removal stage-1
-        :param pr_cutoff: probability minimum for outlier stage-2
-        :param outlier_samples: number of samples to use in outlier removal
         :param small_value: small value for replacing observed zeros
+        :param outlier_rejection: perform outlier rejection to remove strong interactions
+        :param initial_sigma: sigma clipping for outliers
+        :param min_prob: probability minimum for outliers
+        :param outlier_samples: number of samples to use in outlier removal
         :param plot_outliers: generate diagnostic plots from outlier removal
         """
         self.create_seq2cluster_graph(sep=sep, min_seq_length=min_seq_length)
@@ -989,33 +1126,47 @@ class SignificantLinks(object):
                                    min_single_length=min_single_length, big_threshold=big_threshold,
                                    small_value=small_value)
         self.separate_real_and_symbolic_tables()
-        self.outlier_removal(initial_sigma, pr_cutoff, outlier_samples, plot=plot_outliers)
+        if outlier_rejection:
+            self.outlier_removal(initial_sigma, min_prob, outlier_samples, plot=plot_outliers)
 
     def fit_model(self,
                   n_samples=N_SAMPLES,
-                  fixed_model=FIXED_MODEL,
-                  disp_model=DISP_MODEL,
-                  zi_model=ZI_MODEL,
+                  fixed_model1=FIXED_MODEL,
+                  disp_model1=DISP_MODEL,
+                  zi_model1=ZI_MODEL,
+                  fixed_model2=FIXED_MODEL,
+                  disp_model2=DISP_MODEL,
+                  zi_model2=ZI_MODEL,
                   alpha=FDR_ALPHA,
-                  fdr_method=FDR_METHOD,
-                  validate_fit=True):
+                  validate_fit=True,
+                  two_pass=False):
         """
         Using the prepared data, fit the Zinb model and adjust
         the resulting p-values for FDR.
 
         :param n_samples: the number of samples to use in fitting
-        :param fixed_model: custom fixed-effects model for R
-        :param disp_model: custom dispersion model for R
-        :param zi_model: custom zero-inflation model for R
+        :param fixed_model1: custom fixed-effects model for R
+        :param disp_model1: custom dispersion model for R
+        :param zi_model1: custom zero-inflation model for R
+        :param fixed_model2: custom fixed-effects model for R
+        :param disp_model2: custom dispersion model for R
+        :param zi_model2: custom zero-inflation model for R
         :param alpha: the target family-wise error rate to control FDR
-        :param fdr_method: the method to use in FDR correction
         :param validate_fit: carry out validation tests for model fit
+        :param two_pass: use two-pass fitting procedure
         """
         self.estimate_significance_model(n_samples,
-                                         fixed_model=fixed_model,
-                                         disp_model=disp_model,
-                                         zi_model=zi_model,
-                                         validate_fit=validate_fit)
-        self.fdr_correction(alpha, fdr_method)
+                                         fixed_model1=fixed_model1,
+                                         disp_model1=disp_model1,
+                                         zi_model1=zi_model1,
+                                         fixed_model2=fixed_model2,
+                                         disp_model2=disp_model2,
+                                         zi_model2=zi_model2,
+                                         validate_fit=validate_fit,
+                                         two_pass=two_pass)
+
+        n_signif = len(self.all_contacts.query('adj_pvalue < @alpha'))
+        logger.info('Using adjusted p-values there were {:,} interactions (p<{:.2e}) ({:.2f}%)'.format(
+            n_signif, alpha, n_signif / len(self.all_contacts) * 100))
 
         self.all_contacts.to_csv('{}_prediction.csv'.format(self.output_basename))

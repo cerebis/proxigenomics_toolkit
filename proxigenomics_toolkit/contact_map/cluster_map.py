@@ -124,9 +124,9 @@ def bistochastic_graph(g_in):
 
 
 def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
-                 exclude_names=None, norm_method='sites', append_singletons=True,
-                 from_extent=False, fdr_alpha=0.05, use_entropy=False, gfa_file=None,
-                 markov_scale=None, vary_markov=False, regularize=None, exclude_degen=True):
+                exclude_names=None, norm_method='sites', append_singletons=True,
+                from_extent=False, fdr_alpha=0.05, use_entropy=False, gfa_file=None,
+                markov_scale=None, vary_markov=False, regularize=None, exclude_degen=True):
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
@@ -374,7 +374,7 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
                     _cov.append(depth_extractor(_seq))
 
             if _missing_gc > 0:
-                logger.warning('GC values missing from {} records were recovered from FASTA sequences'.format(_missing_gc))
+                logger.warning(f'GC values missing from {_missing_gc} records were recovered from FASTA sequences')
 
             if depth_extractor is None:
                 assert len(_len) == len(_gc), \
@@ -417,7 +417,11 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
     :param clustering: the relevant clustering solution
     :param algorithm_name: partitioning algorithm Eg. parts = func(graph). Networkx.community
     :param from_extent: use the extent map to define the subgraph
+    :param norm: use normalized rather than raw counts as edge weights
+    :param bisto: additionally make adjacency matrix bistochastic
+    :param scale: scale weights (max_w = 1)
     :param norm_method: normalisation method to apply to contact map
+    :param only_new: only return clusters that were newly created
     :param kwargs: additional arguments to pass to the partitioning algorithm
     :return:
     """
@@ -529,7 +533,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     :param norm: use normalized rather than raw counts as edge weights
     :param bisto: additionally make adjacency matrix bistochastic
     :param scale: scale weights (max_w = 1)
-    :param node_id_type: select the node id type (filtered, complete, external)
+    :param node_id_type: select the node id type (internal, external)
     :param clustering: bin3C clustering solution, required for subsets of the total map
     :param cl_list: list of clusters to include in the graph (0-based internal ids)
     :param exclude_names: a collection of sequences (by external name) to exclude when clustering
@@ -538,7 +542,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     :param from_extent: normalised extent map acts as the basis for sequence map.
     :param fdr_alpha: FDR alpha used in gothic normalisation
     :param disconnect_degen: prune all edges of degenerate segments
-    :return: graph of contigs
+    :return: list of graphs (1 or 2) depending on inputs
     """
 
     def make_gapless_lookup(iterable):
@@ -614,8 +618,9 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
             for _name in exclude_names:
                 try:
                     u = name_to_matindex[_name]
-                except KeyError as ex:
-                    logger.debug(f'{graph.name}: while excluding nodes from clustering, no sequence named {_name} found')
+                except KeyError:
+                    logger.debug(f'{graph.name}: while excluding nodes from clustering, '
+                                 f'no sequence named {_name} found')
                     n_missing += 1
                     continue
                 # pedantically check that this mess of cross-referencing is valid.
@@ -737,7 +742,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
 
 
 def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, min_extent=None,
-                    white_list=['primary', 'rescued', 'revised']):
+                    white_list=('primary', 'rescued', 'revised')):
     """
     Given a clustering and list of cluster ids (or none), enable (unmask) the related sequences in
     the contact map. If a requested cluster has not been ordered, it will be dropped.
@@ -868,7 +873,7 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
             # TODO change this to sites, if it proves better
             norm_method = 'sites'
 
-    # now build the list of relevant clusters and setup the associated mask
+    # now build the list of relevant clusters and set up the associated mask
     cl_list = enable_clusters(contact_map, clustering, cl_list=cl_list, ordered_only=ordered_only,
                               min_extent=min_extent)
 
@@ -1089,12 +1094,6 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
 
             if not clobber and os.path.exists(cl_path):
                 raise IOError('Output path exists [{}] and overwriting not enabled'.format(cl_path))
-
-            # determine the number of digits required for cluster sequence names
-            try:
-                num_width = max(1, int(np.ceil(np.log10(len(cl_info['seq_ids'])+1))))
-            except OverflowError:
-                num_width = 1
 
             with open(cl_path, 'w') as output_h:
 
