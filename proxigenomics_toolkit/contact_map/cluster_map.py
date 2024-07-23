@@ -217,7 +217,7 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
                 options.extend(['--markov-time', str(markov_scale)])
 
             if regularize is not None:
-                options.append(['--regularize', str(regularize)])
+                options.extend(['--regularized', '--regularization-strength', str(regularize)])
 
             if n_iter is None:
                 n_iter = 10
