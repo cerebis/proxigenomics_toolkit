@@ -156,6 +156,10 @@ setup(
                       'llvmlite',
                       'cython',
                       'lap @ git+https://github.com/gatagat/lap@master#egg=lap-99',
+                      'transformers<4.29',
+                      'pytorch',
+                      'triton=2.0.0.dev20221202'
+                      'einops'
                       ],
 
     dependency_links=['git+https://github.com/gatagat/lap@master#egg=lap-99',
