@@ -43,18 +43,20 @@ transform_data <- function(data, robust='sd') {
                     length = log(length_u * length_v),
                     sites = log(sites_u * sites_v),
                     cov = log(cov_u * cov_v),
+                    dens = sites_u/length_u * sites_v/length_v,
                     # arcsine transformation for proportional variables
                     uf = logit_transform(uf_u * uf_v),
-                    gc = gc_v - gc_u),
+                    gc = logit_transform(gc_v * gc_u)),
              # standardise exogenous
              length,
              sites,
              cov,
+             dens,
              gc,
              uf,
              robust = robust),
          # drop unstandardised exog columns
-         -c('length', 'sites', 'cov', 'gc', 'uf'))
+         -c('length', 'sites', 'cov', 'dens', 'gc', 'uf'))
 
     # return
     d
@@ -96,17 +98,17 @@ handle_nas <- function(df, remove_na) {
 find_significant <- function(spurious, all_contacts, output_path, distrib_func, n_samples, seed,
                              fixed_model1, disp_model1, zi_model1,
                              fixed_model2, disp_model2, zi_model2,
-                             validate=TRUE, twopass=False) {
+                             validate=TRUE, twopass=False, remove_na=TRUE) {
     if (twopass) {
         find_significant_twopass(spurious, all_contacts, output_path, distrib_func, n_samples, seed,
                                  fixed_model1, disp_model1, zi_model1,
                                  fixed_model2, disp_model2, zi_model2,
-                                 validate=validate)
+                                 validate=validate, remove_na=remove_na)
     }
     else {
         find_significant_onepass(spurious, all_contacts, output_path, distrib_func, n_samples, seed,
                                  fixed_model1, disp_model1, zi_model1,
-                                 validate=validate)
+                                 validate=validate, remove_na=remove_na)
     }
 }
 
@@ -336,7 +338,7 @@ find_significant_onepass <- function(spurious, all_contacts, output_path, distri
 
     writeLines('Creating correlation plot')
     png(paste0(output_path, '_R_onepass_correlation.png'), width = 1200, height = 800)
-    chart.Correlation(sample_n(dfit[, c('contacts1m', 'sites_z', 'length_z', 'cov_z', 'gc_z', 'uf_z')], n_points),
+    chart.Correlation(sample_n(dfit[, c('contacts1m', 'sites_z', 'length_z', 'cov_z', 'gc_z', 'uf_z', 'dens_z')], n_points),
                       histogram = TRUE, pch = 19)
     dev.off()
 
@@ -406,5 +408,6 @@ find_significant_onepass <- function(spurious, all_contacts, output_path, distri
     list(fitted = spurious, all_contacts = all_contacts,
          fixef = unlist(fixef(model)), sigma = sigma(model),
          AIC = AIC(model), BIC = BIC(model), logLik = logLik(model),
-         anova = as.matrix(Anova(model, type = 'III')))
+         anova = as.matrix(Anova(model, type = 'III')), fit_type='glmmTMB')
 }
+
