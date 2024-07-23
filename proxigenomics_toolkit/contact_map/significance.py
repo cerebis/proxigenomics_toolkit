@@ -249,9 +249,16 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
 
     # these sequences are problematic, and we need to restrict their influence on the
     # accumulation of contacts into clusters.
-    promiscuous_sequences = SequencePromiscuity(contact_map, clustering, 0.33,
-                                                5, node_id_type='external').get_promiscuous()
+    promiscuous_sequences = SequencePromiscuity(contact_map, clustering, cluster_cover=0.5, min_degree_fraction=0.01,
+                                                min_bin_length=1_000_000, min_bin_size=3, max_seq_length=500_000,
+                                                node_id_type='external').get_promiscuous()
+    logger.info(f'There were {len(promiscuous_sequences)} sequences deemed promiscuous')
+    for _seq_name, _seq_dat in promiscuous_sequences.items():
+        logger.debug(f'The sequence {_seq_name} was deemed promiscuous and will not attract cluster contacts')
+        for _d in _seq_dat:
+            logger.debug(f'Relative connectivity {_seq_name} to cluster {_d["cl_name"]}: {_d["relcon"]:.3f}')
 
+    n_prom_contacts = 0
     for _si, _name_i, _len, _sites, _cov, _gc, _clust, _uf in tqdm.tqdm(seq_info_array):
         try:
             validate_sequence(_si, _name_i)
@@ -277,7 +284,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
                 _name_j = id2name.loc[_sj, 'name']
 
                 if _name_j in promiscuous_sequences:
-                    logger.debug(f'Ignoring promiscuous contact between {_name_j} and {_name_i}')
+                    n_prom_contacts += 1
                     raise RejectedSequenceException
 
                 cluster_to = validate_sequence(_sj, _name_j)
@@ -291,6 +298,8 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
 
             except RejectedSequenceException:
                 continue
+
+    logger.info(f'Ignored {n_prom_contacts:,} contacts involving promiscuous sequences')
 
     # update cluster nodes to reflect loss of any rejected sequences during accumulation
     cluster_nodes = [u for u in g.nodes() if u[0] == 'c']
@@ -320,7 +329,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
 
     logger.info('{:,} sequences were too short to be destinations (< {:,} bp)'.format(
         len(removed_seqs), min_seq_length))
-    logger.info('{:,} inter-sequence associations did not involve a cluster'.format(
+    logger.info('{:,} inter-sequence associations occurred outside of a cluster'.format(
         len(no_clust)))
 
     return g
@@ -569,41 +578,81 @@ class SequencePromiscuity(object):
 
     ITEM_CHOICES = {'internal': 'seq_ids', 'external': 'seq_names'}
 
-    def __init__(self, contact_map, clustering, cluster_cover, min_contacts, node_id_type='external'):
+    def __init__(self,
+                 contact_map,
+                 clustering,
+                 cluster_cover=0.5,
+                 min_degree_fraction=0.01,
+                 min_bin_length=1_000_000,
+                 min_bin_size=3,
+                 max_seq_length=500_000,
+                 node_id_type='external'):
         """
         :param contact_map: a contact map
         :param clustering: a clustering solution for the given map
         :param cluster_cover: the threshold interaction cover between a sequence and the members of a cluster
-        :param min_contacts: the minimum number of contacts between sequences to be considered significant
+        :param min_degree_fraction: the minimum fractional weight of an edge to be considered significant. Fractional
+        weight is normalised against the total weighted degree of the node u.
+        :param min_bin_length: the minimum extent of a cluster to be considered for promiscuity
+        :param min_bin_size: the minimum size (number of members) for a cluster to be considered
+        :param max_seq_length: the maximum length of a sequence to be considered
         :param node_id_type: graph uses internal or external ids.
         """
         self.clustering = clustering
         self.cluster_cover = cluster_cover
-        self.min_contacts = min_contacts
+        self.min_degree_fraction = min_degree_fraction
+        self.min_bin_length = min_bin_length
+        self.min_bin_size = min_bin_size
+        self.max_seq_length = max_seq_length
         self.cl_item = SequencePromiscuity.ITEM_CHOICES[node_id_type]
 
         hic_graph = to_graph(contact_map, norm=False, node_id_type=node_id_type, clustering=clustering)[0]
         self.mates = self._sequence_promiscuity(hic_graph)
 
+    @staticmethod
+    def _weighted_degree(g, u):
+        """
+        Calculate the weighted degree of a node in a graph, this excludes
+        self-loops/
+        :param g: the graph
+        :param u: the node
+        :return: weighted degree
+        """
+        return sum(g[u][v]['weight'] for v in g[u] if u != v)
+
     def _relative_connectedness(self, g, u, v_list):
+        u_degree = SequencePromiscuity._weighted_degree(g, u)
+        if u_degree == 0:
+            return 0
+
         n = 0
         for v in v_list:
-            if g.has_edge(u, v) and g[u][v]['weight'] > self.min_contacts:
+            if g.has_edge(u, v) and g[u][v]['weight'] / u_degree > self.min_degree_fraction:
                 n += 1
         return n / len(v_list)
 
     def _sequence_promiscuity(self, g):
-        d = defaultdict(list)
+        _mates_registry = defaultdict(list)
         for u in g.nodes():
+
+            if g.nodes[u]['length'] > self.max_seq_length:
+                continue
+
             for cl_id, cl_info in self.clustering.items():
+
+                if cl_info['extent'] <= self.min_bin_length or len(cl_info[self.cl_item]) <= self.min_bin_size:
+                    # clusters of small extent or size are exempt
+                    continue
+
                 r = self._relative_connectedness(g, u, cl_info[self.cl_item])
                 if r > self.cluster_cover:
-                    d[u].append({'cl_id': cl_id, 'relcon': r, 'extent': cl_info['extent']})
+                    _mates_registry[u].append({'cl_id': cl_id, 'cl_name': cl_info['name'], 'relcon': r, 'extent': cl_info['extent']})
 
-        for _id, _mates in d.items():
-            d[_id] = sorted(_mates, key=lambda x: x['extent'], reverse=True)
+        for _id, _mates in _mates_registry.items():
+            # reorder by descending cluster extent
+            _mates_registry[_id] = sorted(_mates, key=lambda x: x['extent'], reverse=True)
 
-        return d
+        return _mates_registry
 
     def get_promiscuous(self):
         return {_id: _mates for _id, _mates in self.mates.items() if len(_mates) > 1}
@@ -659,6 +708,17 @@ class SignificantLinks(object):
         with localconverter(robjects.default_converter):
             robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
             return robjects.globalenv[func_name]
+
+    def write_table(self, df, suffix, description):
+        """
+        Standardised writing of a table to a file
+        :param df: the pandas table
+        :param suffix: file name suffix to include
+        :param description: a description of logging
+        """
+        file_name = f'{self.output_basename}_{suffix}.csv'
+        logger.info(f'Writing {description} to {file_name}')
+        df.to_csv(file_name)
 
     def create_seq2cluster_graph(self, sep=',', min_seq_length=5000):
         """
@@ -718,8 +778,8 @@ class SignificantLinks(object):
                            ('contacts', 'i4'),
                            ('length_u', 'i4'),
                            ('length_v', 'i4'),
-                           ('cov_u', 'i4'),
-                           ('cov_v', 'i4'),
+                           ('cov_u', 'f4'),
+                           ('cov_v', 'f4'),
                            ('sites_u', 'i4'),
                            ('sites_v', 'i4'),
                            ('gc_u', 'f4'),
@@ -763,7 +823,7 @@ class SignificantLinks(object):
         logger.info(f'Sequence to cluster table contains {len(node_to_cluster):,} observations')
 
         # write table of all observations
-        node_to_cluster.to_csv('{}_raw.csv'.format(self.output_basename))
+        self.write_table(node_to_cluster, 'raw', 'raw observations')
         self.all_contacts = node_to_cluster
 
     def outlier_removal(self, initial_sigma=3, min_prob=0.001, n_samples=10000, plot=True):
@@ -865,7 +925,7 @@ class SignificantLinks(object):
 
         self.spurious = df_all
         logger.info('After outlier filtering, {:,} observations passed'.format(len(self.spurious)))
-        self.spurious.to_csv('{}_no-outliers.csv'.format(self.output_basename))
+        self.write_table(self.spurious, 'no-outliers', 'outlier filtered contacts')
 
     def create_spurious_table(self, excluded_clusters=None, excluded_sequences=None,
                               min_bin_size=5, min_bin_length=100000,
@@ -942,7 +1002,7 @@ class SignificantLinks(object):
         ix_accepted &= ~ix_singletons
 
         spurious = spurious[ix_accepted]
-        spurious.to_csv('{}_spurious.csv'.format(self.output_basename))
+        self.write_table(spurious, 'spurious', 'spurious interactions')
         logger.info('After basic rejections, {:,} observations passed'.format(len(spurious)))
 
         self.spurious = spurious
@@ -953,8 +1013,10 @@ class SignificantLinks(object):
         real interactions which will be compared to the statistical model.
         """
         self.symbolic = self.all_contacts.query('contacts == @SYMBOLIC_SELF_CONTACTS').copy()
-        self.symbolic.to_csv('{}_singletons.csv'.format(self.output_basename))
+        self.write_table(self.symbolic, 'singletons', 'singletons with symbolic contacts')
+
         self.all_contacts = self.all_contacts.query('contacts != @SYMBOLIC_SELF_CONTACTS').copy()
+        self.write_table(self.all_contacts, 'allreal', 'all real contacts')
 
     def estimate_significance_model(self,
                                     n_samples=N_SAMPLES,
@@ -1169,4 +1231,4 @@ class SignificantLinks(object):
         logger.info('Using adjusted p-values there were {:,} interactions (p<{:.2e}) ({:.2f}%)'.format(
             n_signif, alpha, n_signif / len(self.all_contacts) * 100))
 
-        self.all_contacts.to_csv('{}_prediction.csv'.format(self.output_basename))
+        self.write_table(self.all_contacts, 'prediction', 'predictions')
