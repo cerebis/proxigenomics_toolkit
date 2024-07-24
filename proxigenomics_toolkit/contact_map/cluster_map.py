@@ -202,7 +202,7 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
             options = ['--flow-model', 'undirected', '--verbose',
                        '--core-loop-codelength-threshold', '1e-20',
                        '--tune-iteration-relative-threshold', '1e-10',
-                       '-M', '50',
+                       '--core-loop-limit', '50',
                        '--seed', str(seed)]
 
             if use_entropy:
@@ -723,6 +723,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
         g_gfa = bistochastic_graph(g_gfa)
         # extend the list of excluded sequences to include degenerate segments within assembly graph
         if disconnect_degen:
+            logger.info(f'Edges linking {len(degen_segments)} degenerate segments within the assembly will be pruned')
             if exclude_names is None:
                 exclude_names = degen_segments
             else:

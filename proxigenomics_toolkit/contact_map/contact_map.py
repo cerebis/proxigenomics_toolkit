@@ -1752,8 +1752,8 @@ class ContactMap(object):
                 _map.data[~reject_h0] = 0
                 _map.eliminate_zeros()
 
-            # convert to log space, representing larger values as more significant
-            # _map.data[:] = - np.log(_map.data)
+            # For Infomap clustering, values must be inverted
+            # TODO explore other transformations
             _map.data[:] =  1 -_map.data
 
             _map = sparse_utils.make_symmetric(_map)
