@@ -1,6 +1,7 @@
 import warnings
 import logging
 import Bio.SeqIO
+import random
 import tqdm
 import torch
 import pickle
@@ -8,19 +9,26 @@ import transformers
 import argparse
 import torch.utils.data as util_data
 import torch.nn as nn
-import random
 import numpy as np
 import os
 
 from collections import OrderedDict
+from proxigenomics_toolkit.io_utils import save_object
+
+#torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
 
 
-def calculate_llm_embedding(dna_sequences, model, tokenizer, batch_size, n_gpu, max_length):
+def calculate_llm_embedding(dna_sequences, model, tokenizer, batch_size, n_cores, max_length):
 
     train_loader = util_data.DataLoader(dna_sequences,
-                                        batch_size=batch_size*n_gpu,
+                                        batch_size=batch_size * n_cores,
                                         shuffle=False,
-                                        num_workers=2*n_gpu)
+                                        num_workers=2 * n_cores,
+                                        worker_init_fn=seed_worker,
+                                        generator=g)
+
+
 
     for i, batch in enumerate(train_loader):
 
@@ -65,40 +73,41 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--seed', default=None, type=int,
                         help='Random seed [default: not set]')
     parser.add_argument('-n', '--chunk-size', default=5000,
-                        type=int, help='Chunk-size for larger sequences [default: 5000]')
+                        type=int, help='Chunk-size for larger sequences [5000]')
     parser.add_argument('-d', '--device-id', default=0, type=int,
-                        help='Specify GPU device ID [default: 0]')
-    parser.add_argument('--n-gpu', default=1,
-                        type=int, help='Number of GPUs to use [default: 1]')
+                        help='Specify GPU device ID [0]')
+    parser.add_argument('--n-gpu', default=2,
+                        type=int, help='Number of GPUs to use [all]')
     parser.add_argument('-b', '--batch-size', default=50,
-                        type=int, help='Batch-size for processing sequences [default: 50]')
-    parser.add_argument('fasta', help='input fasta file')
-    parser.add_argument('pickle', help='output pickled embed')
+                        type=int, help='Batch-size for processing sequences [50]')
+    parser.add_argument('fasta_in', help='Input fasta file to embed')
+    parser.add_argument('pickle_out', help='Output file to save pickled object of chunked embeddings')
     args = parser.parse_args()
 
+    if not torch.cuda.is_available():
+        raise RuntimeError('A CUDA supported GPU is presently required to calculate embeddings')
+
     if args.seed is not None:
-        # UNSOLVED ISSUE
-        # despite this effort, success runs produce different embeddings
-        # chunking of input data IS deterministic.
-        torch.manual_seed(args.seed)
         transformers.set_seed(args.seed)
+        torch.manual_seed(args.seed)
         random.seed(args.seed)
         np.random.seed(args.seed)
 
-    if not torch.cuda.is_available():
-        device = "cpu"
-    else:
-        gpu_ok = False
-        print(f'Using: cuda:{args.device_id}')
-        torch.cuda.device(args.device_id)
-        device_cap = torch.cuda.get_device_capability()
-        if device_cap in ((7, 0), (8, 0), (9, 0)):
-            gpu_ok = True
-        if not gpu_ok:
-            warnings.warn(
-                "GPU is not NVIDIA V100, A100, or H100. Speedup numbers may be lower "
-                "than expected."
-            )
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    g = torch.Generator()
+    g.manual_seed(0)
+
+    torch.cuda.device(args.device_id)
+    device_cap = torch.cuda.get_device_capability()
+    if not device_cap in ((7, 0), (8, 0), (9, 0)):
+        warnings.warn(
+            "GPU is not NVIDIA V100, A100, or H100. Speedup numbers may be lower "
+            "than expected."
+        )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
             'zhihan1996/DNABERT-S',
@@ -116,6 +125,9 @@ if __name__ == '__main__':
             revision='main',
         )
 
+    if args.n_gpu < 1:
+        warnings.warn(f'Minimum number of GPUs is 1, requested {args.n_gpu}')
+
     n_gpu = torch.cuda.device_count()
     if n_gpu > 1 and args.n_gpu > 1:
         model = nn.DataParallel(model)
@@ -125,7 +137,7 @@ if __name__ == '__main__':
     total_sequences = sum(1 for _ in Bio.SeqIO.parse(args.fasta, 'fasta'))
 
     embeds = OrderedDict()
-    for seq in tqdm.tqdm(Bio.SeqIO.parse(args.fasta, 'fasta'), total=total_sequences):
+    for seq in tqdm.tqdm(Bio.SeqIO.parse(args.fasta_in, 'fasta'), total=total_sequences):
 
         seq_str = str(seq.seq)
 
@@ -142,18 +154,14 @@ if __name__ == '__main__':
             step = int(args.chunk_size + (len(seq_str) % args.chunk_size) / n + 1)
             chunks = [seq_str[i:i+step] for i in range(0, len(seq_str), step)]
 
-        with open('chunks.txt', 'w') as out_h:
-            for i, chk in enumerate(chunks):
-                out_h.write(f'{i}\t{chk}\n')
-
         embeddings = calculate_llm_embedding(chunks,
                                              model,
                                              tokenizer,
                                              batch_size=args.batch_size,
-                                             n_gpu=args.n_gpu,
+                                             n_cores=args.n_gpu,
                                              max_length=args.chunk_size+500)
 
         embeds[seq.id] = embeddings
 
-    with open(args.pickle, 'wb') as out_h:
-        pickle.dump(embeds, out_h)
+    # Serialize the object to a simple pickle.
+    save_object(args.pickle_out, embeds)

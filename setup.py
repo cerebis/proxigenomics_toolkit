@@ -27,7 +27,7 @@ class TarballExtension(Extension, object):
     """
     Simple class for use by build_tarball
     """
-    def __init__(self, name, url, exe_path):
+    def __init__(self, name, url, exe_path, triton=False):
         """
         :param name: a name for the extension. This is used for naming the tarball and extracted parent path
         :param url: the remote location of the tarball (github)
@@ -36,6 +36,7 @@ class TarballExtension(Extension, object):
         super(TarballExtension, self).__init__(name, sources=[])
         self.url = url
         self.exe_path = exe_path
+        self.triton = triton
 
         # attempt to use GNU tar and not Mac OSX bsd tar or the like
         self.tar_cmd = 'tar'
@@ -99,6 +100,7 @@ class build_tarball(build_ext_orig, object):
         build_dir = os.path.join(self.build_lib, pkg_name)
         # rename parent folder to something simple and consistent
         self.spawn([ext.tar_cmd, '--transform=s,[^/]*,{},'.format(ext.name), '-xzvf', ext.tarball])
+
         # build
         self.spawn(['make', '-j4', '-C', ext.name])
         # copy the built binary to package folder
@@ -140,7 +142,7 @@ setup(
                       'matplotlib',
                       'networkx>=3.1',
                       'numba',
-                      'numpy',
+                      'numpy<2',
                       'pandas',
                       'python-louvain',
                       'pysam',
@@ -156,10 +158,6 @@ setup(
                       'llvmlite',
                       'cython',
                       'lap @ git+https://github.com/gatagat/lap@master#egg=lap-99',
-                      'transformers<4.29',
-                      'pytorch',
-                      'triton=2.0.0.dev20221202'
-                      'einops'
                       ],
 
     dependency_links=['git+https://github.com/gatagat/lap@master#egg=lap-99',
