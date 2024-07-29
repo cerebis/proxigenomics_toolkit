@@ -134,7 +134,7 @@ if __name__ == '__main__':
     model.to('cuda')
 
     # scan the file for the total number of sequences for the progress bar (lame)
-    total_sequences = sum(1 for _ in Bio.SeqIO.parse(args.fasta, 'fasta'))
+    total_sequences = sum(1 for _ in Bio.SeqIO.parse(args.fasta_in, 'fasta'))
 
     embeds = OrderedDict()
     for seq in tqdm.tqdm(Bio.SeqIO.parse(args.fasta_in, 'fasta'), total=total_sequences):
