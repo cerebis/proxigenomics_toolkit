@@ -26,7 +26,7 @@ def is_hermitian(m, tol=1e-6):
     :param tol: tolernace above zero for m - m.T < tol
     :return: True matrix is Hermitian
     """
-    return np.all(~(np.abs(m - m.H) >= tol).data)
+    return np.all(~(np.abs(m - m.conjugate().T) >= tol).data)
 
 
 def make_symmetric(_map, use_upper=True):
