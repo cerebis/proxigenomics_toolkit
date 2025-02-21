@@ -143,7 +143,7 @@ setup(
                       'matplotlib',
                       'networkx>=3.1',
                       'numba',
-                      'numpy<2',
+                      'numpy<=1.26',
                       'pandas',
                       'python-louvain',
                       'pysam',

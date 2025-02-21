@@ -400,7 +400,7 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
 
 def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='greedy_modularity',
                     from_extent=False, norm=True, bisto=True, scale=True, norm_method='sites',
-                    only_new=False, **kwargs):
+                    fdr_alpha=0.05, only_new=False, alg_args=None):
     """
     Subject a list of target clusters to a new round of community detection. Each cluster is
     extracted as a subgraph and then clustered. Expected methods return type is a list of
@@ -422,8 +422,8 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
     :param scale: scale weights (max_w = 1)
     :param norm_method: normalisation method to apply to contact map
     :param only_new: only return clusters that were newly created
-    :param kwargs: additional arguments to pass to the partitioning algorithm
-    :return:
+    :param alg_args: a dict of additional arguments to pass to the partitioning algorithm
+    :return: revised clustering object
     """
 
     algorithm_repository = {
@@ -440,9 +440,9 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
 
     # prepare the contact map's complete graph
     # this will always be a single-layer graph, therefore just dereference the first element
-    g_complete = to_graph(contact_map, node_id_type='external',
-                          norm=norm, bisto=bisto, scale=scale,
-                          norm_method=norm_method, from_extent=from_extent)[0]
+    g_complete = to_graph(contact_map, node_id_type='external', norm=norm,
+                          bisto=bisto, scale=scale, norm_method=norm_method,
+                          from_extent=from_extent, fdr_alpha=fdr_alpha)[0]
 
     # begin with the current cluster solution
     revised = clustering.copy()
@@ -466,8 +466,14 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
         seq_names = [contact_map.seq_info[_id].name for _id in cluster['seq_ids']]
         g = nx.subgraph(g_complete, seq_names)
         logger.debug(f'Subgraph composition: order {g.order()} size {g.size()}')
+
         # partition the subgraph into communities
-        partitions = algorithm(g, **kwargs)
+        if alg_args is not None:
+            assert isinstance(alg_args, dict), f'Algorithm optional parameters must be in the form of a dictionary'
+            partitions = algorithm(g, **alg_args)
+        else:
+            partitions = algorithm(g)
+
         logger.debug(f'Cluster {cl_id} was split into {len(partitions)}')
         for members in partitions:
             n_new += 1
@@ -538,8 +544,8 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     :param cl_list: list of clusters to include in the graph (0-based internal ids)
     :param exclude_names: a collection of sequences (by external name) to exclude when clustering
     :param norm_method: normalisation method to apply to contact map
-    :param filter_weak_edges: remove edges with weight in the bottem 5% of the distribution
-    :param from_extent: normalised extent map acts as the basis for sequence map.
+    :param filter_weak_edges: remove edges with weight in the bottom 5% of the distribution
+    :param from_extent: normalized extent map acts as the basis for sequence map.
     :param fdr_alpha: FDR alpha used in gothic normalisation
     :param disconnect_degen: prune all edges of degenerate segments
     :return: list of graphs (1 or 2) depending on inputs
