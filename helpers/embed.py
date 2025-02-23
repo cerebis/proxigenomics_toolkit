@@ -4,7 +4,6 @@ import Bio.SeqIO
 import random
 import tqdm
 import torch
-import pickle
 import transformers
 import argparse
 import torch.utils.data as util_data
