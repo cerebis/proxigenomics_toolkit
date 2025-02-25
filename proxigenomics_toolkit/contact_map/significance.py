@@ -678,14 +678,14 @@ class SignificantLinks(object):
 
     def __init__(self, contact_map_file, clustering_file, coverage_file,
                  mappability_file, mappability_k,
-                 output_basename, seed):
+                 output_dir, seed):
 
         self.contact_map_file = contact_map_file
         self.clustering_file = clustering_file
         self.coverage_file = coverage_file
         self.mappability_file = mappability_file
         self.mappability_k = mappability_k
-        self.output_basename = output_basename
+        self.output_dir = output_dir
         self.seed = seed
         # find the R script within this current package folder
         self.find_significant_function_r = SignificantLinks._source_r_function('model_fit.R', 'find_significant')
@@ -716,7 +716,7 @@ class SignificantLinks(object):
         :param suffix: file name suffix to include
         :param description: a description of logging
         """
-        file_name = f'{self.output_basename}_{suffix}.csv'
+        file_name = os.path.join(self.output_dir, f'significance_{suffix}.csv')
         logger.info(f'Writing {description} to {file_name}')
         df.to_csv(file_name)
 
@@ -855,7 +855,7 @@ class SignificantLinks(object):
             g.map_upper(sb.scatterplot, s=15)
             g.map_lower(sb.kdeplot)
             g.map_diag(sb.kdeplot, lw=2)
-            g.savefig(f'{self.output_basename}_outlier_stage{_stage}.{_format}')
+            g.savefig(os.path.join(self.output_dir, f'significance_outliers_stage{_stage}.{_format}'))
 
         def zscore(_df, _mu=None, _std=None):
             """
@@ -925,7 +925,7 @@ class SignificantLinks(object):
 
         self.spurious = df_all
         logger.info('After outlier filtering, {:,} observations passed'.format(len(self.spurious)))
-        self.write_table(self.spurious, 'no-outliers', 'outlier filtered contacts')
+        self.write_table(self.spurious, 'spurious_no_outliers', 'outlier filtered contacts')
 
     def create_spurious_table(self, excluded_clusters=None, excluded_sequences=None,
                               min_bin_size=5, min_bin_length=100000,
@@ -1016,7 +1016,7 @@ class SignificantLinks(object):
         self.write_table(self.symbolic, 'singletons', 'singletons with symbolic contacts')
 
         self.all_contacts = self.all_contacts.query('contacts != @SYMBOLIC_SELF_CONTACTS').copy()
-        self.write_table(self.all_contacts, 'allreal', 'all real contacts')
+        self.write_table(self.all_contacts, 'all_real', 'all real contacts')
 
     def estimate_significance_model(self,
                                     n_samples=N_SAMPLES,
@@ -1101,7 +1101,7 @@ class SignificantLinks(object):
         with localconverter(robjects.default_converter):
             logger.info('Calling R method')
             ret_r = self.find_significant_function_r(fitting, all_contacts,
-                                                     output_path=self.output_basename,
+                                                     output_path=self.output_dir,
                                                      distrib_func=distrib_func,
                                                      n_samples=n_samples,
                                                      seed=self.seed,

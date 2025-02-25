@@ -158,6 +158,12 @@ setup(
                       'typing',
                       'llvmlite',
                       'cython',
+                      'scikeras<0.13',
+                      'tensorflow<2.16',
+                      'keras<3',
+                      'umap-learn',
+                      'imbalanced-learn',
+                      'plotnine',
                       'lap @ git+https://github.com/gatagat/lap@master#egg=lap-99',
                       ],
 

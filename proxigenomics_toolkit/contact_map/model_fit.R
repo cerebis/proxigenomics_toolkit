@@ -161,7 +161,7 @@ find_significant_twopass <- function(spurious, all_contacts, output_path, distri
     }
 
     writeLines('Creating correlation plot')
-    png(paste0(output_path, '_R_correlation.png'), width = 1200, height = 800)
+    png(paste(output_path, 'significance_R_correlation.png', sep='/'), width = 1200, height = 800)
     chart.Correlation(sample_n(dfit[, c('contacts1m', 'sites_z', 'length_z', 'cov_z', 'gc_z', 'uf_z')], n_points),
                       histogram = TRUE, pch = 19)
     dev.off()
@@ -185,7 +185,7 @@ find_significant_twopass <- function(spurious, all_contacts, output_path, distri
     print(fit_summary1)
     writeLines('\nParameter confidence intervals')
     print(confint(model1))
-    sink(paste0(output_path, '_R_round1_fit.log'), append = TRUE)
+    sink(paste(output_path, 'significance_R_round1_fit.log', sep='/'), append = TRUE)
     writeLines('\nSummary for round 1 model fit')
     print(fit_summary1)
     sink()
@@ -193,7 +193,7 @@ find_significant_twopass <- function(spurious, all_contacts, output_path, distri
     if (validate) {
         # simulate residuals plot for model quality inspection
         writeLines('\nSimulating residuals')
-        pdf(paste0(output_path, '_R_round1_validation.pdf'))
+        pdf(paste(output_path, 'significance_R_round1_validation.pdf', sep='/'))
         layout.matrix <- matrix(c(1, 3, 2, 4), nrow = 2, ncol = 2)
         layout(mat = layout.matrix, heights = c(1, 1), widths = c(1, 1))
         par(cex.lab=0.67)
@@ -243,7 +243,7 @@ find_significant_twopass <- function(spurious, all_contacts, output_path, distri
     print(fit_summary2)
     writeLines('\nParameter confidence intervals')
     print(confint(model2))
-    sink(paste0(output_path, '_R_round2_fit.log'), append = TRUE)
+    sink(paste(output_path, 'significance_R_round2_fit.log', sep='/'), append = TRUE)
     writeLines('\nSummary for round 2 model fit')
     print(fit_summary2)
     sink()
@@ -251,7 +251,7 @@ find_significant_twopass <- function(spurious, all_contacts, output_path, distri
     if (validate) {
         # simulate residuals plot for model quality inspection
         writeLines('\nSimulating residuals')
-        pdf(paste0(output_path, '_R_round2_validation.pdf'))
+        pdf(paste(output_path, 'significance_R_round2_validation.pdf', sep='/'))
         layout.matrix <- matrix(c(1, 3, 2, 4), nrow = 2, ncol = 2)
         layout(mat = layout.matrix, heights = c(1, 1), widths = c(1, 1))
         par(cex.lab=0.67)
@@ -337,7 +337,7 @@ find_significant_onepass <- function(spurious, all_contacts, output_path, distri
     }
 
     writeLines('Creating correlation plot')
-    png(paste0(output_path, '_R_onepass_correlation.png'), width = 1200, height = 800)
+    png(paste(output_path, 'significance_R_onepass_correlation.png', sep='/'), width = 1200, height = 800)
     chart.Correlation(sample_n(dfit[, c('contacts1m', 'sites_z', 'length_z', 'cov_z', 'gc_z', 'uf_z', 'dens_z')], n_points),
                       histogram = TRUE, pch = 19)
     dev.off()
@@ -360,7 +360,7 @@ find_significant_onepass <- function(spurious, all_contacts, output_path, distri
     print(fit_summary1)
     writeLines('\nParameter confidence intervals')
     print(confint(model))
-    sink(paste0(output_path, '_R_onepass_fit.log'), append = TRUE)
+    sink(paste(output_path, 'significance_R_onepass_fit.log', sep='/'), append = TRUE)
     writeLines('\nSummary for model fit')
     print(fit_summary1)
     sink()
@@ -368,7 +368,7 @@ find_significant_onepass <- function(spurious, all_contacts, output_path, distri
     if (validate) {
         # simulate residuals plot for model quality inspection
         writeLines('\nSimulating residuals')
-        pdf(paste0(output_path, '_R_onepass_validation.pdf'))
+        pdf(paste(output_path, 'significance_R_onepass_validation.pdf', sep='/'))
         layout.matrix <- matrix(c(1, 3, 2, 4), nrow = 2, ncol = 2)
         layout(mat = layout.matrix, heights = c(1, 1), widths = c(1, 1))
         par(cex.lab=0.67)
