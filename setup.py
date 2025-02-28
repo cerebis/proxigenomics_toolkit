@@ -148,7 +148,7 @@ setup(
                       'python-louvain',
                       'pysam',
                       'PyYAML',
-                      'rpy2',
+                      #'rpy2',
                       'scipy',
                       'seaborn',
                       'scikit-learn',

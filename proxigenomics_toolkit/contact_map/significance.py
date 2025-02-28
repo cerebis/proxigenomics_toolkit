@@ -11,14 +11,14 @@ import networkx as nx
 import numpy as np
 import os
 import pandas
-import rpy2.robjects as robjects
+#import rpy2.robjects as robjects
 import scipy.sparse as sp
 import scipy.stats as st
 import seaborn as sb
 import tqdm
 from astropy.stats import sigma_clip
-from rpy2.robjects import pandas2ri
-from rpy2.robjects.conversion import localconverter
+#from rpy2.robjects import pandas2ri
+#from rpy2.robjects.conversion import localconverter
 from sklearn.mixture import BayesianGaussianMixture
 from statsmodels.stats.multitest import multipletests
 
@@ -688,7 +688,7 @@ class SignificantLinks(object):
         self.output_dir = output_dir
         self.seed = seed
         # find the R script within this current package folder
-        self.find_significant_function_r = SignificantLinks._source_r_function('model_fit.R', 'find_significant')
+        # self.find_significant_function_r = SignificantLinks._source_r_function('model_fit.R', 'find_significant')
         self.seq2cl_graph = None
         self.all_contacts = None
         self.spurious = None
@@ -697,17 +697,17 @@ class SignificantLinks(object):
         self.fit_summary = None
         self.fitted = None
 
-    @staticmethod
-    def _source_r_function(r_script, func_name):
-        """
-        Find the R script within this current package folder
-        :param r_script: the R scripo to source
-        :param func_name: the name of the function to return
-        :return: callable R object function
-        """
-        with localconverter(robjects.default_converter):
-            robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
-            return robjects.globalenv[func_name]
+    # @staticmethod
+    # def _source_r_function(r_script, func_name):
+    #     """
+    #     Find the R script within this current package folder
+    #     :param r_script: the R scripo to source
+    #     :param func_name: the name of the function to return
+    #     :return: callable R object function
+    #     """
+    #     with localconverter(robjects.default_converter):
+    #         robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
+    #         return robjects.globalenv[func_name]
 
     def write_table(self, df, suffix, description):
         """
@@ -1018,126 +1018,126 @@ class SignificantLinks(object):
         self.all_contacts = self.all_contacts.query('contacts != @SYMBOLIC_SELF_CONTACTS').copy()
         self.write_table(self.all_contacts, 'all_real', 'all real contacts')
 
-    def estimate_significance_model(self,
-                                    n_samples=N_SAMPLES,
-                                    distrib_func=DISTRIB_FUNC,
-                                    fixed_model1=FIXED_MODEL,
-                                    disp_model1=DISP_MODEL,
-                                    zi_model1=ZI_MODEL,
-                                    fixed_model2=FIXED_MODEL,
-                                    disp_model2=DISP_MODEL,
-                                    zi_model2=ZI_MODEL,
-                                    validate_fit=True,
-                                    two_pass=False):
-        """
-        For a table of contig-to-genome_bin interactions.
-
-        Estimate the parameters of a Zero-Inflated Negative Binomial model for the interactions
-        involving contigs and genome_bins for which the contigs are suspected of _not_ belonging.
-        The dominant form of these interactions _should_ be spurious. To maximise the proportion,
-        outlier rejection is used to remove strong interactions -- identified as those where
-        contacts/(site_u*site_v) or contacts/(cov_u*cov_v) is large.
-
-        Exogenous variables are the product value pairs for the variables: length, sites, coverage,
-        and gc. Here, each pair is made up of one contig (u) and one genome_bin (v). These products
-        are log transformed and standardised. e.g. scale(log(length_u * length_v))
-
-        Exogenous variables: length_z, sites_z, coverage_z, gc_z
-        Endogenous variable is: contacts - 1
-
-        After fitting the model to selected "non-local/spurious" observations, the model is then used to
-        predict responses for all observed interactions. Comparison of model predictions to actual values
-        is then used to assign p-values that the observed interaction is non-local/spurious.
-
-        The modelling is current carried out in R using the glmmTMB package, but could potentially
-        be done using statsmodels.
-
-        Distribution family choices include: nbinom1 or nbinom2 (negative binomial p=1|2),
-        genpois (Generalised), compois (Conway-Maxwell). In experimenting, we have found the most
-        applicable distributions are nbinom2 and compois. Although consistenly producing superior
-        AIC, BIC and AICc, the Conway-Maxwell distribution is expensive to calculate. Therefore
-        users should be prepared to wait significantly longer for modelling to complete or
-        reduce the number of points supplied. For the simple model of 3 conditional parameters,
-        10k points appears to be more than sufficient.
-
-        :param n_samples: the number of samples to use in model estimation
-        :param distrib_func: distribution family to use in model (eg. nbinom2, genpois, compois)
-        :param fixed_model1: custom fixed-effects model for R
-        :param disp_model1: custom dispersion model for R
-        :param zi_model1: custom zero-inflation model for R
-        :param fixed_model2: custom fixed-effects model for R
-        :param disp_model2: custom dispersion model for R
-        :param zi_model2: custom zero-inflation model for R
-        :param validate_fit: carry out validation tests for model fit
-        :param two_pass: use two-pass fitting procedure
-        """
-        def _drop_stale_columns(*dataframes):
-            """
-            On multiple calls to fit routine, in-place remove the return columns
-            :param dataframes: a list of dataframes to alter
-            """
-            for df in dataframes:
-                df.drop(columns=[
-                    'contacts1m', 'length_z', 'sites_z', 'cov_z',
-                    'gc_z', 'uf_z', 'response', 'pvalue'], errors='ignore', inplace=True)
-
-        logger.info('Total observation pool: {:,}'.format(len(self.spurious)))
-        assert len(self.spurious.query('intra == True')) == 0, 'There are intra-genome_bin entries in the table'
-
-        fitting = self.spurious.query('sites_u > 0 and sites_v > 0 and cov_u > 0 and cov_v > 0')
-        logger.info('After zero removal: {:,}'.format(len(fitting)))
-
-        if n_samples > len(fitting):
-            logger.warning('Significance model will use the entire table as sample size '
-                           'exceeds table size. {:,} > {:,}'.format(n_samples, len(fitting)))
-            n_samples = len(fitting)
-
-        with localconverter(robjects.default_converter + pandas2ri.converter) as cv:
-            logger.info('Converting pandas table to R')
-            _drop_stale_columns(fitting, self.all_contacts)
-            fitting = cv.py2rpy(fitting)
-            all_contacts = cv.py2rpy(self.all_contacts)
-
-        with localconverter(robjects.default_converter):
-            logger.info('Calling R method')
-            ret_r = self.find_significant_function_r(fitting, all_contacts,
-                                                     output_path=self.output_dir,
-                                                     distrib_func=distrib_func,
-                                                     n_samples=n_samples,
-                                                     seed=self.seed,
-                                                     fixed_model1=fixed_model1,
-                                                     disp_model1=disp_model1,
-                                                     zi_model1=zi_model1,
-                                                     fixed_model2=fixed_model2,
-                                                     disp_model2=disp_model2,
-                                                     zi_model2=zi_model2,
-                                                     validate=validate_fit,
-                                                     twopass=two_pass)
-
-            # extract various return information from the R objects
-            # ANOVA result
-            anova = rmatrix2pandas(ret_r.rx2['anova'])
-            anova['Df'] = pandas.to_numeric(anova['Df'], downcast='unsigned')
-
-            # Build summary information dictionary
-            summary = {'AIC': ret_r.rx2['AIC'][0],
-                       'BIC': ret_r.rx2['BIC'][0],
-                       'logLik': ret_r.rx2['logLik'][0],
-                       'coeffs': rvector2dict(ret_r.rx2['fixef']),
-                       'sigma': ret_r.rx2['sigma'][0],
-                       'anova': anova}
-
-            self.fit_summary = summary
-
-        with localconverter(robjects.default_converter + pandas2ri.converter):
-            # Convert the returned tables from R back into pandas
-            # these tables now have extra columns pertaining to:
-            # significance: 'pvalue, response'
-            # scaled exogenous: 'length_z, sites_z, cov_z, gc_z'
-            # endogenous: contacts1m (contacts - 1)
-            self.fitted = robjects.conversion.rpy2py(ret_r.rx2('fitted'))
-            self.all_contacts = robjects.conversion.rpy2py(ret_r.rx2('all_contacts'))
-            logger.info("Significance testing was computed for {:,} observations".format(len(self.all_contacts)))
+    # def estimate_significance_model(self,
+    #                                 n_samples=N_SAMPLES,
+    #                                 distrib_func=DISTRIB_FUNC,
+    #                                 fixed_model1=FIXED_MODEL,
+    #                                 disp_model1=DISP_MODEL,
+    #                                 zi_model1=ZI_MODEL,
+    #                                 fixed_model2=FIXED_MODEL,
+    #                                 disp_model2=DISP_MODEL,
+    #                                 zi_model2=ZI_MODEL,
+    #                                 validate_fit=True,
+    #                                 two_pass=False):
+    #     """
+    #     For a table of contig-to-genome_bin interactions.
+    #
+    #     Estimate the parameters of a Zero-Inflated Negative Binomial model for the interactions
+    #     involving contigs and genome_bins for which the contigs are suspected of _not_ belonging.
+    #     The dominant form of these interactions _should_ be spurious. To maximise the proportion,
+    #     outlier rejection is used to remove strong interactions -- identified as those where
+    #     contacts/(site_u*site_v) or contacts/(cov_u*cov_v) is large.
+    #
+    #     Exogenous variables are the product value pairs for the variables: length, sites, coverage,
+    #     and gc. Here, each pair is made up of one contig (u) and one genome_bin (v). These products
+    #     are log transformed and standardised. e.g. scale(log(length_u * length_v))
+    #
+    #     Exogenous variables: length_z, sites_z, coverage_z, gc_z
+    #     Endogenous variable is: contacts - 1
+    #
+    #     After fitting the model to selected "non-local/spurious" observations, the model is then used to
+    #     predict responses for all observed interactions. Comparison of model predictions to actual values
+    #     is then used to assign p-values that the observed interaction is non-local/spurious.
+    #
+    #     The modelling is current carried out in R using the glmmTMB package, but could potentially
+    #     be done using statsmodels.
+    #
+    #     Distribution family choices include: nbinom1 or nbinom2 (negative binomial p=1|2),
+    #     genpois (Generalised), compois (Conway-Maxwell). In experimenting, we have found the most
+    #     applicable distributions are nbinom2 and compois. Although consistenly producing superior
+    #     AIC, BIC and AICc, the Conway-Maxwell distribution is expensive to calculate. Therefore
+    #     users should be prepared to wait significantly longer for modelling to complete or
+    #     reduce the number of points supplied. For the simple model of 3 conditional parameters,
+    #     10k points appears to be more than sufficient.
+    #
+    #     :param n_samples: the number of samples to use in model estimation
+    #     :param distrib_func: distribution family to use in model (eg. nbinom2, genpois, compois)
+    #     :param fixed_model1: custom fixed-effects model for R
+    #     :param disp_model1: custom dispersion model for R
+    #     :param zi_model1: custom zero-inflation model for R
+    #     :param fixed_model2: custom fixed-effects model for R
+    #     :param disp_model2: custom dispersion model for R
+    #     :param zi_model2: custom zero-inflation model for R
+    #     :param validate_fit: carry out validation tests for model fit
+    #     :param two_pass: use two-pass fitting procedure
+    #     """
+    #     def _drop_stale_columns(*dataframes):
+    #         """
+    #         On multiple calls to fit routine, in-place remove the return columns
+    #         :param dataframes: a list of dataframes to alter
+    #         """
+    #         for df in dataframes:
+    #             df.drop(columns=[
+    #                 'contacts1m', 'length_z', 'sites_z', 'cov_z',
+    #                 'gc_z', 'uf_z', 'response', 'pvalue'], errors='ignore', inplace=True)
+    #
+    #     logger.info('Total observation pool: {:,}'.format(len(self.spurious)))
+    #     assert len(self.spurious.query('intra == True')) == 0, 'There are intra-genome_bin entries in the table'
+    #
+    #     fitting = self.spurious.query('sites_u > 0 and sites_v > 0 and cov_u > 0 and cov_v > 0')
+    #     logger.info('After zero removal: {:,}'.format(len(fitting)))
+    #
+    #     if n_samples > len(fitting):
+    #         logger.warning('Significance model will use the entire table as sample size '
+    #                        'exceeds table size. {:,} > {:,}'.format(n_samples, len(fitting)))
+    #         n_samples = len(fitting)
+    #
+    #     with localconverter(robjects.default_converter + pandas2ri.converter) as cv:
+    #         logger.info('Converting pandas table to R')
+    #         _drop_stale_columns(fitting, self.all_contacts)
+    #         fitting = cv.py2rpy(fitting)
+    #         all_contacts = cv.py2rpy(self.all_contacts)
+    #
+    #     with localconverter(robjects.default_converter):
+    #         logger.info('Calling R method')
+    #         ret_r = self.find_significant_function_r(fitting, all_contacts,
+    #                                                  output_path=self.output_dir,
+    #                                                  distrib_func=distrib_func,
+    #                                                  n_samples=n_samples,
+    #                                                  seed=self.seed,
+    #                                                  fixed_model1=fixed_model1,
+    #                                                  disp_model1=disp_model1,
+    #                                                  zi_model1=zi_model1,
+    #                                                  fixed_model2=fixed_model2,
+    #                                                  disp_model2=disp_model2,
+    #                                                  zi_model2=zi_model2,
+    #                                                  validate=validate_fit,
+    #                                                  twopass=two_pass)
+    #
+    #         # extract various return information from the R objects
+    #         # ANOVA result
+    #         anova = rmatrix2pandas(ret_r.rx2['anova'])
+    #         anova['Df'] = pandas.to_numeric(anova['Df'], downcast='unsigned')
+    #
+    #         # Build summary information dictionary
+    #         summary = {'AIC': ret_r.rx2['AIC'][0],
+    #                    'BIC': ret_r.rx2['BIC'][0],
+    #                    'logLik': ret_r.rx2['logLik'][0],
+    #                    'coeffs': rvector2dict(ret_r.rx2['fixef']),
+    #                    'sigma': ret_r.rx2['sigma'][0],
+    #                    'anova': anova}
+    #
+    #         self.fit_summary = summary
+    #
+    #     with localconverter(robjects.default_converter + pandas2ri.converter):
+    #         # Convert the returned tables from R back into pandas
+    #         # these tables now have extra columns pertaining to:
+    #         # significance: 'pvalue, response'
+    #         # scaled exogenous: 'length_z, sites_z, cov_z, gc_z'
+    #         # endogenous: contacts1m (contacts - 1)
+    #         self.fitted = robjects.conversion.rpy2py(ret_r.rx2('fitted'))
+    #         self.all_contacts = robjects.conversion.rpy2py(ret_r.rx2('all_contacts'))
+    #         logger.info("Significance testing was computed for {:,} observations".format(len(self.all_contacts)))
 
     def fdr_correction(self, alpha=FDR_ALPHA, method=FDR_METHOD):
         """
