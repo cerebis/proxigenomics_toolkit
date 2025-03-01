@@ -1,11 +1,10 @@
 import logging
 import numpy as np
-import pandas as pd
 import os
+import pandas as pd
 import warnings
 
 from sklearn.metrics.pairwise import linear_kernel
-from proxigenomics_toolkit.classify import significance
 
 
 logger = logging.getLogger(__name__)
@@ -224,14 +223,14 @@ def prepare_labelled_training_data(output_dir, binning_qc_file, embeddings):
     logger.info(f'Undecided set: {len(df_undecided)}')
 
     # label contacts acceptable for training
-    df_train.reset_index().to_csv(f'{output_dir}/training.csv', index=False)
-    df_undecided.reset_index().to_csv(f'{output_dir}/undecided.csv', index=False)
+    df_train.reset_index().to_csv(os.path.join(output_dir, 'training.csv'), index=False)
+    df_undecided.reset_index().to_csv(os.path.join(output_dir, 'undecided.csv'), index=False)
     df_train['train'] = True
     df_undecided['train'] = False
 
     # combine and reset the basic integer index to get unique values
     df_cmb = pd.concat([df_train.reset_index(), df_undecided.reset_index()]).reset_index(drop=True)
-    df_cmb.to_csv(f'{output_dir}/combined.csv', index=False)
+    df_cmb.to_csv(os.path.join(output_dir, 'combined.csv'), index=False)
 
     return df_cmb
 

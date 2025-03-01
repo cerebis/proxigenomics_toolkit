@@ -74,15 +74,7 @@ class StatefullBinaryFBeta(Metric):
 def kfold_model_training(seed, n_folds, n_epochs, batch_size, X, y, out_dir):
 
     tf.keras.backend.clear_session()
-
     hidden_layer_sizes = [72]*4
-
-    # options = {'activation': 'relu',
-    #            'dropout_rate': 0.3,
-    #            'l2_bias': 0.026,
-    #            'l2_kernel': 0.067,
-    #            }
-
     kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
 
     validation = {'precision': [],
@@ -153,9 +145,7 @@ def kfold_model_training(seed, n_folds, n_epochs, batch_size, X, y, out_dir):
     p = (ggplot(df_plot.query('index>=1').melt(id_vars=['index', 'set_type', 'fold']))
          + geom_point(aes(x='index', y='value', group='set_type', color='set_type'), size=0.5)
          + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6], legend_position="right"))
-
-    p.save(filename=f'{out_dir}/kfold_model.png', dpi=300, verbose=False)
-    p.save(filename=f'{out_dir}/kfold_model.svg', verbose=False)
+    p.save(filename=os.path.join(out_dir, 'kfold_model.svg'), verbose=False)
 
 
 def create_baseline(hidden_layer_sizes, meta):
@@ -244,7 +234,7 @@ class ContactClassifier(object):
 
         tf.keras.backend.clear_session()
 
-        best_model = f'{self.output_dir}/full_best_{self.monitor_metric}.keras'
+        best_model = os.path.join(self.output_dir, f'full_best_{self.monitor_metric}.keras')
 
         checkpoint = tf.keras.callbacks.ModelCheckpoint(
             best_model,
@@ -274,14 +264,12 @@ class ContactClassifier(object):
         p = (ggplot(df_plot.query('epoch>=1').melt(id_vars='epoch'))
              + geom_line(aes(x='epoch', y='value'), color='red')
              + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
-        p.save(filename=f'{self.output_dir}/full_model.png', dpi=300, verbose=False)
-        p.save(filename=f'{self.output_dir}/full_model.svg', verbose=False)
+        p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
 
     def classify(self, df):
-        # self.full_model_fit()
         assert self.model is not None, 'Model has not been trained.'
         X = ContactClassifier._get_fit_variables(df)
         pred_significance = self.model.predict_proba(X)
         df['prob_intra'] = pred_significance[:, 1]
-        df.to_csv(f'{self.output_dir}/predictions.csv')
+        df.to_csv(os.path.join(self.output_dir, 'predictions.csv'))
         return df

@@ -148,6 +148,4 @@ class MetagenomeEmbeddings(object):
              + theme(figure_size=[12,9], aspect_ratio=1)
              + labs(x='dim1', y='dim2', colour='Cluster ID'))
 
-        # p.save(filename=f'{output_dir}/Embedding_UMAP_Manhattan_projection.png', dpi=300, verbose=False)
         p.save(filename=output_path, verbose=False)
-
