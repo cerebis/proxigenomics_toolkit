@@ -1191,44 +1191,44 @@ class SignificantLinks(object):
         if outlier_rejection:
             self.outlier_removal(initial_sigma, min_prob, outlier_samples, plot=plot_outliers)
 
-    def fit_model(self,
-                  n_samples=N_SAMPLES,
-                  fixed_model1=FIXED_MODEL,
-                  disp_model1=DISP_MODEL,
-                  zi_model1=ZI_MODEL,
-                  fixed_model2=FIXED_MODEL,
-                  disp_model2=DISP_MODEL,
-                  zi_model2=ZI_MODEL,
-                  alpha=FDR_ALPHA,
-                  validate_fit=True,
-                  two_pass=False):
-        """
-        Using the prepared data, fit the Zinb model and adjust
-        the resulting p-values for FDR.
-
-        :param n_samples: the number of samples to use in fitting
-        :param fixed_model1: custom fixed-effects model for R
-        :param disp_model1: custom dispersion model for R
-        :param zi_model1: custom zero-inflation model for R
-        :param fixed_model2: custom fixed-effects model for R
-        :param disp_model2: custom dispersion model for R
-        :param zi_model2: custom zero-inflation model for R
-        :param alpha: the target family-wise error rate to control FDR
-        :param validate_fit: carry out validation tests for model fit
-        :param two_pass: use two-pass fitting procedure
-        """
-        self.estimate_significance_model(n_samples,
-                                         fixed_model1=fixed_model1,
-                                         disp_model1=disp_model1,
-                                         zi_model1=zi_model1,
-                                         fixed_model2=fixed_model2,
-                                         disp_model2=disp_model2,
-                                         zi_model2=zi_model2,
-                                         validate_fit=validate_fit,
-                                         two_pass=two_pass)
-
-        n_signif = len(self.all_contacts.query('adj_pvalue < @alpha'))
-        logger.info('Using adjusted p-values there were {:,} interactions (p<{:.2e}) ({:.2f}%)'.format(
-            n_signif, alpha, n_signif / len(self.all_contacts) * 100))
-
-        self.write_table(self.all_contacts, 'prediction', 'predictions')
+    # def fit_model(self,
+    #               n_samples=N_SAMPLES,
+    #               fixed_model1=FIXED_MODEL,
+    #               disp_model1=DISP_MODEL,
+    #               zi_model1=ZI_MODEL,
+    #               fixed_model2=FIXED_MODEL,
+    #               disp_model2=DISP_MODEL,
+    #               zi_model2=ZI_MODEL,
+    #               alpha=FDR_ALPHA,
+    #               validate_fit=True,
+    #               two_pass=False):
+    #     """
+    #     Using the prepared data, fit the Zinb model and adjust
+    #     the resulting p-values for FDR.
+    #
+    #     :param n_samples: the number of samples to use in fitting
+    #     :param fixed_model1: custom fixed-effects model for R
+    #     :param disp_model1: custom dispersion model for R
+    #     :param zi_model1: custom zero-inflation model for R
+    #     :param fixed_model2: custom fixed-effects model for R
+    #     :param disp_model2: custom dispersion model for R
+    #     :param zi_model2: custom zero-inflation model for R
+    #     :param alpha: the target family-wise error rate to control FDR
+    #     :param validate_fit: carry out validation tests for model fit
+    #     :param two_pass: use two-pass fitting procedure
+    #     """
+    #     self.estimate_significance_model(n_samples,
+    #                                      fixed_model1=fixed_model1,
+    #                                      disp_model1=disp_model1,
+    #                                      zi_model1=zi_model1,
+    #                                      fixed_model2=fixed_model2,
+    #                                      disp_model2=disp_model2,
+    #                                      zi_model2=zi_model2,
+    #                                      validate_fit=validate_fit,
+    #                                      two_pass=two_pass)
+    #
+    #     n_signif = len(self.all_contacts.query('adj_pvalue < @alpha'))
+    #     logger.info('Using adjusted p-values there were {:,} interactions (p<{:.2e}) ({:.2f}%)'.format(
+    #         n_signif, alpha, n_signif / len(self.all_contacts) * 100))
+    #
+    #     self.write_table(self.all_contacts, 'prediction', 'predictions')
