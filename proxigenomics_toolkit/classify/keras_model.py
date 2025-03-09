@@ -16,13 +16,15 @@ from tensorflow.keras.metrics import Precision, Recall, Metric
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.optimizers import AdamW
 from tensorflow.keras.regularizers import L2
-
+import keras
 
 logger = logging.getLogger(__name__)
 
 
-L2_KERNEL = 0.067
-L2_BIAS = 0.026
+# L2_KERNEL = 0.067
+# L2_BIAS = 0.026
+L2_KERNEL = 0.2
+L2_BIAS = 0.2
 DROPOUT_RATE = 0.3
 LEARNING_RATE = 0.0001
 
@@ -71,81 +73,6 @@ class StatefullBinaryFBeta(Metric):
         self.actual_positive.assign(0) # resets actual positives to zero
 
 
-def kfold_model_training(seed, n_folds, n_epochs, batch_size, X, y, out_dir):
-
-    tf.keras.backend.clear_session()
-    hidden_layer_sizes = [72]*4
-    kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-
-    validation = {'precision': [],
-                  'recall': [],
-                  'accuracy': [],
-                  'loss': [],
-                  'crossentropy': [],
-                  'fbeta': [],
-                  }
-
-    histories = []
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=seed, stratify=y)
-    logger.info(f'Number samples: train {X_train.shape[0]}, test {X_test.shape[0]}, all {X.shape[0]}')
-
-    for n_fold, (train_index, val_index) in enumerate(kfold.split(X_train, y_train), start=1):
-
-        logger.info(f"Computing fold: {n_fold}")
-
-        Xf, yf = X_train[train_index], y_train[train_index]
-        Xv, yv = X_train[val_index], y_train[val_index]
-
-        best_model_file = f'{out_dir}/kfold_bestmodel_{n_fold}.keras'
-
-        checkpoint = tf.keras.callbacks.ModelCheckpoint(best_model_file,
-                                                        monitor='val_precision', verbose=0,
-                                                        save_best_only=True, mode='max')
-
-        # earlystop = tf.keras.callbacks.EarlyStopping(patience=10, verbose=1)
-
-        estimator = KerasClassifier(model=create_baseline,
-                                    epochs=n_epochs,
-                                    batch_size=batch_size,
-                                    random_state=seed,
-                                    verbose=0,
-                                    callbacks=[checkpoint], #earlystop],
-                                    hidden_layer_sizes=hidden_layer_sizes, )
-
-        model = estimator.fit(Xf, yf, validation_data=(Xv, yv))
-
-        histories.append(pd.DataFrame(model.history_))
-
-        m = model.model_
-        m.load_weights(best_model_file)
-        results = m.evaluate(X_test, y_test, batch_size=250)
-        results = dict(zip(m.metrics_names, results))
-        for k, v in results.items():
-            validation[k].append(v)
-
-        tf.keras.backend.clear_session()
-
-    for k in validation:
-        logger.info(f'metric: {k:<15} mean: {np.mean(validation[k]):8.5f}, sd: {np.std(validation[k]):8.5f}')
-
-    for n, df in enumerate(histories, start=1):
-        df['fold'] = n
-
-
-    df_plot = pd.concat(histories)
-    _tra = df_plot.loc[:, ~df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
-    _tra['set_type' ] = 'training'
-    _val = df_plot.loc[:, df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
-    _val['set_type' ] = 'validation'
-    _val.columns = _tra.columns
-    df_plot = pd.concat([_val, _tra]).reset_index()
-    df_plot.melt(id_vars=['index', 'set_type', 'fold'])
-
-    p = (ggplot(df_plot.query('index>=1').melt(id_vars=['index', 'set_type', 'fold']))
-         + geom_point(aes(x='index', y='value', group='set_type', color='set_type'), size=0.5)
-         + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6], legend_position="right"))
-    p.save(filename=os.path.join(out_dir, 'kfold_model.svg'), verbose=False)
 
 
 def create_baseline(hidden_layer_sizes, meta):
@@ -171,18 +98,34 @@ def create_baseline(hidden_layer_sizes, meta):
 
 class ContactClassifier(object):
 
+    _METRIC_NAME = 'fbeta'
     _FIT_VARS = ['similarity', 'freq_z', 'cov_z', 'linkage']
     _CLASS_VAR = 'intra_z'
 
-    def __init__(self, df_contacts, seed, n_epochs, batch_size, output_dir):
-        self.df_contacts = df_contacts
-        self.df_train = df_contacts.query('train==True')
+    _HIDDEN_SIZE = 36
+    _HIDDEN_DEPTH = 4
+
+    OUTPUT_TABLES = {
+        'predictions': 'predictions.csv',
+    }
+
+    @staticmethod
+    def get_output_path(parent_dir, table_name) -> str:
+        return os.path.join(parent_dir, str(ContactClassifier.OUTPUT_TABLES[table_name]))
+
+    def __init__(self, output_dir, complete_labelled_file, seed, n_epochs, batch_size, enable_tb):
+        self.output_dir = output_dir
+        self.complete_labeled_file = complete_labelled_file
         self.seed = seed
         self.n_epochs = n_epochs
         self.batch_size = batch_size
-        self.output_dir = output_dir
-        self.monitor_metric = 'fbeta'
         self.model = None
+        self.enable_tb = enable_tb
+        # read data for training
+        self.df_combined = pd.read_csv(complete_labelled_file)
+        self.df_train = self.df_combined.query('train==True')
+
+
 
     @staticmethod
     def _get_fit_variables(df):
@@ -197,6 +140,18 @@ class ContactClassifier(object):
         df = pd.DataFrame({ContactClassifier._CLASS_VAR: y})
         df[ContactClassifier._FIT_VARS] = X
         return df
+
+    def write_table(self, df, table_name, description, index):
+        """
+        Standardised writing of a table to a file
+        :param df: the pandas table
+        :param table_name: name of the table to write (obtains file name)
+        :param description: a description of logging
+        :param index: whether to include
+        """
+        file_path = ContactClassifier.get_output_path(self.output_dir, table_name)
+        logger.info(f'Writing {description} to {file_path}')
+        df.to_csv(file_path, index=index)
 
     def plot_variable_scatter(self, df, base_name, n_points=5000):
         with PdfPages(os.path.join(self.output_dir, base_name)) as pdf:
@@ -228,34 +183,45 @@ class ContactClassifier(object):
 
         return X, y, X_aug, y_aug
 
+    def tensorboard_callback(self):
+        return keras.callbacks.TensorBoard(
+            log_dir=os.path.join(self.output_dir, 'logs'),
+            histogram_freq=0,
+            embeddings_freq=0,
+            update_freq="epoch")
+
+    def checkpoint_callback(self, best_model_file):
+        return tf.keras.callbacks.ModelCheckpoint(best_model_file,
+                                                  monitor=ContactClassifier._METRIC_NAME,
+                                                  verbose=True,
+                                                  save_best_only=True,
+                                                  mode='max')
+
     def train_full_model(self):
 
         X, y, X_aug, y_aug = self.apply_imbalanced_data_augmentation()
 
         tf.keras.backend.clear_session()
 
-        best_model = os.path.join(self.output_dir, f'full_best_{self.monitor_metric}.keras')
+        best_model_file = os.path.join(self.output_dir, f'full_best_{ContactClassifier._METRIC_NAME}.keras')
 
-        checkpoint = tf.keras.callbacks.ModelCheckpoint(
-            best_model,
-            monitor=self.monitor_metric,
-            verbose=False,
-            save_best_only=True,
-            mode='max')
+        callbacks = [self.checkpoint_callback(best_model_file)]
+        if self.enable_tb:
+            callbacks.append(self.tensorboard_callback())
 
         estimator = KerasClassifier(model=create_baseline,
                                     epochs=self.n_epochs,
                                     batch_size=self.batch_size,
                                     random_state=self.seed,
                                     verbose=False,
-                                    callbacks=[checkpoint],
-                                    hidden_layer_sizes=[72]*4)
+                                    callbacks=callbacks,
+                                    hidden_layer_sizes=[ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH)
 
         logging.info('Beginning model training')
         model = estimator.fit(X_aug, y_aug)
 
         logger.info('Loading best model weights')
-        model.model_.load_weights(best_model)
+        model.model_.load_weights(best_model_file)
         self.model = model
 
         logger.info(f'Full model score: {model.score(X, y)}')
@@ -266,10 +232,92 @@ class ContactClassifier(object):
              + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
         p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
 
-    def classify(self, df):
+    def classify(self, df=None):
         assert self.model is not None, 'Model has not been trained.'
+        if df is None:
+            df = self.df_combined.copy()
         X = ContactClassifier._get_fit_variables(df)
         pred_significance = self.model.predict_proba(X)
         df['prob_intra'] = pred_significance[:, 1]
-        df.to_csv(os.path.join(self.output_dir, 'predictions.csv'))
+        self.write_table(df, 'predictions', 'final predictions', index=False)
         return df
+
+    def train_kfold_model(self, n_folds):
+
+        tf.keras.backend.clear_session()
+
+        X, y, X_aug, y_aug = self.apply_imbalanced_data_augmentation()
+
+        hidden_layer_sizes = [ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH
+        kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=self.seed)
+
+        testing = {'precision': [],
+                      'recall': [],
+                      'accuracy': [],
+                      'loss': [],
+                      'crossentropy': [],
+                      'fbeta': [],
+                      }
+
+        histories = []
+
+        X_train, X_test, y_train, y_test = train_test_split(X_aug, y_aug,
+                                                            test_size=0.2, random_state=self.seed, stratify=y_aug)
+
+        logger.info(f'Number samples: train {X_train.shape[0]}, test {X_test.shape[0]}, all {X.shape[0]}')
+
+        for n_fold, (train_index, val_index) in enumerate(kfold.split(X_train, y_train), start=1):
+
+            logger.info(f"Computing fold: {n_fold}")
+
+            Xf, yf = X_train[train_index], y_train[train_index]
+            Xv, yv = X_train[val_index], y_train[val_index]
+
+            best_model_file = os.path.join(self.output_dir, f'kfold_bestmodel_{n_fold}.keras')
+
+            callbacks = [self.checkpoint_callback(best_model_file)]
+            if self.enable_tb:
+                callbacks.append(self.tensorboard_callback())
+            # earlystop = tf.keras.callbacks.EarlyStopping(patience=10, verbose=1)
+
+            estimator = KerasClassifier(model=create_baseline,
+                                        epochs=self.n_epochs,
+                                        batch_size=self.batch_size,
+                                        random_state=self.seed,
+                                        verbose=0,
+                                        callbacks=callbacks,
+                                        hidden_layer_sizes=hidden_layer_sizes, )
+
+            model = estimator.fit(Xf, yf, validation_data=(Xv, yv))
+
+            histories.append(pd.DataFrame(model.history_))
+
+            m = model.model_
+            m.load_weights(best_model_file)
+            results = m.evaluate(X_test, y_test, batch_size=250)
+            results = dict(zip(m.metrics_names, results))
+            for k, v in results.items():
+                testing[k].append(v)
+
+            tf.keras.backend.clear_session()
+
+        for k in testing:
+            logger.info(f'Test data - {k:>12} mean: {np.mean(testing[k]):8.5f}, sd: {np.std(testing[k]):8.5f}')
+
+        for n, df in enumerate(histories, start=1):
+            df['fold'] = n
+
+        df_plot = pd.concat(histories)
+        _tra = df_plot.loc[:, ~df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
+        _tra['set_type' ] = 'training'
+        _val = df_plot.loc[:, df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
+        _val['set_type' ] = 'validation'
+        _val.columns = _tra.columns
+        df_plot = pd.concat([_val, _tra]).reset_index()
+        df_plot.melt(id_vars=['index', 'set_type', 'fold'])
+
+        p = (ggplot(df_plot.query('index>=1').melt(id_vars=['index', 'set_type', 'fold']))
+             + geom_point(aes(x='index', y='value', group='set_type', color='set_type'), size=0.5)
+             # + geom_line(aes(x='index', y='value', group='set_type', color='set_type'))
+             + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6], legend_position="right"))
+        p.save(filename=os.path.join(self.output_dir, 'kfold_model.svg'), verbose=False)
