@@ -676,6 +676,18 @@ class SignificantLinks(object):
     FDR_ALPHA = 0.01
     FDR_METHOD = 'fdr_bh'
 
+    OUTPUT_TABLES = {
+        'raw': 'raw.csv',
+        'spurious_final': 'spurious_final.csv',
+        'spurious_raw': 'spurious_raw.csv',
+        'singletons': 'singletons.csv',
+        'all_contacts': 'all_contacts.csv'
+    }
+
+    @staticmethod
+    def get_output_path(parent_dir, table_name):
+        return os.path.join(parent_dir, SignificantLinks.OUTPUT_TABLES[table_name])
+
     def __init__(self, contact_map_file, clustering_file, coverage_file,
                  mappability_file, mappability_k,
                  output_dir, seed):
@@ -709,16 +721,16 @@ class SignificantLinks(object):
     #         robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
     #         return robjects.globalenv[func_name]
 
-    def write_table(self, df, suffix, description):
+    def write_table(self, df, table_name, description):
         """
         Standardised writing of a table to a file
         :param df: the pandas table
-        :param suffix: file name suffix to include
+        :param table_name: name of the table to write (obtains filename)
         :param description: a description of logging
         """
-        file_name = os.path.join(self.output_dir, f'significance_{suffix}.csv')
-        logger.info(f'Writing {description} to {file_name}')
-        df.to_csv(file_name)
+        file_path = SignificantLinks.get_output_path(self.output_dir, table_name)
+        logger.info(f'Writing {description} to {file_path}')
+        df.to_csv(file_path)
 
     def create_seq2cluster_graph(self, sep=',', min_seq_length=5000):
         """
@@ -855,7 +867,7 @@ class SignificantLinks(object):
             g.map_upper(sb.scatterplot, s=15)
             g.map_lower(sb.kdeplot)
             g.map_diag(sb.kdeplot, lw=2)
-            g.savefig(os.path.join(self.output_dir, f'significance_outliers_stage{_stage}.{_format}'))
+            g.savefig(os.path.join(self.output_dir, f'contact_outliers_stage{_stage}.{_format}'))
 
         def zscore(_df, _mu=None, _std=None):
             """
@@ -925,7 +937,7 @@ class SignificantLinks(object):
 
         self.spurious = df_all
         logger.info('After outlier filtering, {:,} observations passed'.format(len(self.spurious)))
-        self.write_table(self.spurious, 'spurious_no_outliers', 'outlier filtered contacts')
+        self.write_table(self.spurious, 'spurious_final', 'outlier filtered contacts')
 
     def create_spurious_table(self, excluded_clusters=None, excluded_sequences=None,
                               min_bin_size=5, min_bin_length=100000,
@@ -1002,7 +1014,7 @@ class SignificantLinks(object):
         ix_accepted &= ~ix_singletons
 
         spurious = spurious[ix_accepted]
-        self.write_table(spurious, 'spurious', 'spurious interactions')
+        self.write_table(spurious,'spurious_raw', 'spurious interactions')
         logger.info('After basic rejections, {:,} observations passed'.format(len(spurious)))
 
         self.spurious = spurious
@@ -1016,7 +1028,7 @@ class SignificantLinks(object):
         self.write_table(self.symbolic, 'singletons', 'singletons with symbolic contacts')
 
         self.all_contacts = self.all_contacts.query('contacts != @SYMBOLIC_SELF_CONTACTS').copy()
-        self.write_table(self.all_contacts, 'all_real', 'all real contacts')
+        self.write_table(self.all_contacts, 'all_contacts', 'all real contacts')
 
     # def estimate_significance_model(self,
     #                                 n_samples=N_SAMPLES,
