@@ -21,10 +21,8 @@ import keras
 logger = logging.getLogger(__name__)
 
 
-# L2_KERNEL = 0.067
-# L2_BIAS = 0.026
-L2_KERNEL = 0.2
-L2_BIAS = 0.2
+L2_KERNEL = 0.1
+L2_BIAS = 0.02
 DROPOUT_RATE = 0.3
 LEARNING_RATE = 0.0001
 
@@ -73,8 +71,6 @@ class StatefullBinaryFBeta(Metric):
         self.actual_positive.assign(0) # resets actual positives to zero
 
 
-
-
 def create_baseline(hidden_layer_sizes, meta):
     model = Sequential()
     model.add(Input(shape=(meta['n_features_in_'],)))
@@ -85,7 +81,6 @@ def create_baseline(hidden_layer_sizes, meta):
                         bias_regularizer=L2(l2=L2_BIAS)))
         if n < len(hidden_layer_sizes):
             model.add(Dropout(DROPOUT_RATE))
-            # model.add(Dropout(DROPOUT_RATE, seed=1234))
     model.add(Dense(meta['n_outputs_'], activation='sigmoid'))
 
     loss_func = BinaryCrossentropy()
@@ -102,8 +97,9 @@ class ContactClassifier(object):
     _FIT_VARS = ['similarity', 'freq_z', 'cov_z', 'linkage']
     _CLASS_VAR = 'intra_z'
 
-    _HIDDEN_SIZE = 36
+    _HIDDEN_SIZE = 64
     _HIDDEN_DEPTH = 4
+    _PATIENCE = 20
 
     OUTPUT_TABLES = {
         'predictions': 'predictions.csv',
@@ -113,7 +109,9 @@ class ContactClassifier(object):
     def get_output_path(parent_dir, table_name) -> str:
         return os.path.join(parent_dir, str(ContactClassifier.OUTPUT_TABLES[table_name]))
 
-    def __init__(self, output_dir, complete_labelled_file, seed, n_epochs, batch_size, enable_tb):
+    def __init__(self, output_dir, complete_labelled_file, seed, n_epochs, batch_size,
+                 enable_tb, enable_es):
+
         self.output_dir = output_dir
         self.complete_labeled_file = complete_labelled_file
         self.seed = seed
@@ -121,10 +119,12 @@ class ContactClassifier(object):
         self.batch_size = batch_size
         self.model = None
         self.enable_tb = enable_tb
+        self.enable_es = enable_es
         # read data for training
         self.df_combined = pd.read_csv(complete_labelled_file)
         self.df_train = self.df_combined.query('train==True')
 
+        print(f"DID I ENABLE ES? -> {self.enable_es}")
 
 
     @staticmethod
@@ -153,7 +153,7 @@ class ContactClassifier(object):
         logger.info(f'Writing {description} to {file_path}')
         df.to_csv(file_path, index=index)
 
-    def plot_variable_scatter(self, df, base_name, n_points=5000):
+    def plot_variable_scatter(self, df, base_name, n_points=5000, best=None):
         with PdfPages(os.path.join(self.output_dir, base_name)) as pdf:
             if len(df) > n_points:
                 df = df.sample(n_points, random_state=self.seed)
@@ -184,11 +184,22 @@ class ContactClassifier(object):
         return X, y, X_aug, y_aug
 
     def tensorboard_callback(self):
+
         return keras.callbacks.TensorBoard(
             log_dir=os.path.join(self.output_dir, 'logs'),
-            histogram_freq=0,
-            embeddings_freq=0,
+            histogram_freq=1,
+            embeddings_freq=1,
+            write_graph=True,
+            write_images=True,
             update_freq="epoch")
+
+    def earlystopping_callback(self):
+        return tf.keras.callbacks.EarlyStopping(monitor='fbeta',
+                                                patience=ContactClassifier._PATIENCE,
+                                                mode='max',
+                                                min_delta=1e-4,
+                                                start_from_epoch=50,
+                                                verbose=True)
 
     def checkpoint_callback(self, best_model_file):
         return tf.keras.callbacks.ModelCheckpoint(best_model_file,
@@ -196,6 +207,68 @@ class ContactClassifier(object):
                                                   verbose=True,
                                                   save_best_only=True,
                                                   mode='max')
+
+    # def hp_tuning(self):
+    #
+    #     from tensorboard.plugins.hparams import api as hp
+    #
+    #     X, y, X_aug, y_aug = self.apply_imbalanced_data_augmentation()
+    #     X_train, X_test, y_train, y_test = train_test_split(X_aug, y_aug,
+    #                                                         test_size=0.2, random_state=self.seed, stratify=y_aug)
+    #
+    #     tf.keras.backend.clear_session()
+    #
+    #     HP_NUM_UNITS = hp.HParam('hidden_size', hp.Discrete([32, 64, 128]))
+    #     # HP_DROPOUT = hp.HParam('dropout', hp.Discrete([0.3])) #    RealInterval(0.1, 0.5))
+    #     HP_LEARNING_RATE = hp.HParam('learning_rate', hp.RealInterval(0.00001, 0.001))
+    #     # HP_OPTIMIZER = hp.HParam('optimizer', hp.Discrete(['adam', 'adamw', 'sgd', 'rmsprop']))
+    #     # HP_L2BIAS = hp.HParam('l2_bias', hp.RealInterval(0.01, 0.15))
+    #     # HP_L2KERNEL = hp.HParam('l2_kernel', hp.RealInterval(0.01, 0.1))
+    #
+    #     with tf.summary.create_file_writer('logs/hparam_tuning').as_default():
+    #         hp.hparams_config(
+    #             hparams=[HP_NUM_UNITS, HP_LEARNING_RATE],
+    #             metrics=[hp.Metric(ContactClassifier._METRIC_NAME, display_name='fBeta')],)
+    #
+    #     def create_hp_model(hparams):
+    #         model = Sequential()
+    #         model.add(Input(shape=(4,)))
+    #         for n in range(1, 5):
+    #             model.add(Dense(hparams[HP_NUM_UNITS], kernel_initializer='he_uniform',
+    #                             activation='relu',
+    #                             kernel_regularizer=L2(l2=L2_KERNEL),
+    #                             bias_regularizer=L2(l2=L2_BIAS)))
+    #             if n < 4:
+    #                 model.add(Dropout(DROPOUT_RATE))
+    #         model.add(Dense(1, activation='sigmoid'))
+    #
+    #         loss_func = BinaryCrossentropy()
+    #         model.compile(loss=loss_func,
+    #           optimizer=AdamW(learning_rate=hparams[HP_LEARNING_RATE]),
+    #           metrics=['accuracy', Precision(), Recall(), StatefullBinaryFBeta(), 'crossentropy'])
+    #
+    #         model.fit(X_train, y_train, epochs=20)
+    #         loss, accuracy, precision, recall, f_beta, cross_entropy = model.evaluate(X_test, y_test)
+    #         return f_beta
+    #
+    #     def experiment(experiment_dir, hparams):
+    #         with tf.summary.create_file_writer(experiment_dir).as_default():
+    #             hp.hparams(hparams)
+    #             accuracy = create_hp_model(hparams)
+    #             tf.summary.scalar(ContactClassifier._METRIC_NAME, accuracy, step=1)
+    #
+    #     experiment_no = 0
+    #     for num_units in HP_NUM_UNITS.domain.values:
+    #         for lr in np.linspace(HP_LEARNING_RATE.domain.min_value, HP_LEARNING_RATE.domain.max_value, 5):
+    #             hparams = {
+    #                 HP_NUM_UNITS: num_units,
+    #                 HP_LEARNING_RATE: lr, }
+    #
+    #             experiment_name = f'Experiment {experiment_no}'
+    #             print(f'Starting Experiment: {experiment_name}')
+    #             print({h.name: hparams[h] for h in hparams})
+    #             experiment('logs/hparam_tuning/' + experiment_name, hparams)
+    #             experiment_no += 1
 
     def train_full_model(self):
 
@@ -208,6 +281,8 @@ class ContactClassifier(object):
         callbacks = [self.checkpoint_callback(best_model_file)]
         if self.enable_tb:
             callbacks.append(self.tensorboard_callback())
+        if self.enable_es:
+            callbacks.append(self.earlystopping_callback())
 
         estimator = KerasClassifier(model=create_baseline,
                                     epochs=self.n_epochs,
@@ -278,7 +353,8 @@ class ContactClassifier(object):
             callbacks = [self.checkpoint_callback(best_model_file)]
             if self.enable_tb:
                 callbacks.append(self.tensorboard_callback())
-            # earlystop = tf.keras.callbacks.EarlyStopping(patience=10, verbose=1)
+            if self.enable_es:
+                callbacks.append(self.earlystopping_callback())
 
             estimator = KerasClassifier(model=create_baseline,
                                         epochs=self.n_epochs,
