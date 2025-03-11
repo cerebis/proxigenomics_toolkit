@@ -57,7 +57,7 @@ def high_quality_clusters(binning_qc_file, min_completeness, max_contamination, 
     :param binning_qc_file:
     :param min_completeness:
     :param max_contamination:
-    :param qc_method: eg. CheckMv1, CheckMv2, CoCoPye
+    :param qc_method: e.g. CheckMv1, CheckMv2, CoCoPye
     :return: set of cluster IDs
     """
     # Binning QC summary to eliminate contaminated bins

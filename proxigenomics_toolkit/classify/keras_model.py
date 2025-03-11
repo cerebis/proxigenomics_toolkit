@@ -27,42 +27,46 @@ DROPOUT_RATE = 0.3
 LEARNING_RATE = 0.0001
 
 
-class StatefullBinaryFBeta(Metric):
+class StatefulBinaryFBeta(Metric):
     """
     Custom metric for fbeta maximisation
     """
 
     def __init__(self, name='fbeta', beta=1, threshold=0.5, epsilon=1e-7, **kwargs):
         # initializing an object of the super class
-        super(StatefullBinaryFBeta, self).__init__(name=name, **kwargs)
+        super(StatefulBinaryFBeta, self).__init__(name=name, **kwargs)
 
         # initializing state variables
         self.tp = self.add_weight(name='tp', initializer='zeros') # initializing true positives
         self.actual_positive = self.add_weight(name='fp', initializer='zeros') # initializing actual positives
         self.predicted_positive = self.add_weight(name='fn', initializer='zeros') # initializing predicted positives
 
-        # initializing other atrributes that wouldn't be changed for every object of this class
+        # initializing other attributes that wouldn't be changed for every object of this class
         self.beta_squared = beta**2
         self.threshold = threshold
         self.epsilon = epsilon
+        self.precision = None
+        self.recall = None
+        self.fb = None
 
-    def update_state(self, ytrue, ypred, sample_weight=None):
-        # casting ytrue and ypred as float dtype
-        ytrue = tf.cast(ytrue, tf.float32)
-        ypred = tf.cast(ypred, tf.float32)
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        # casting y_true and y_pred as float dtype
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
 
-        # setting values of ypred greater than the set threshold to 1 while those lesser to 0
-        ypred = tf.cast(tf.greater_equal(ypred, tf.constant(self.threshold)), tf.float32)
+        # setting values of y_pred greater than the set threshold to 1 while those lesser to 0
+        y_pred = tf.cast(tf.greater_equal(y_pred, tf.constant(self.threshold)), tf.float32)
 
-        self.tp.assign_add(tf.reduce_sum(ytrue*ypred)) # updating true positives atrribute
-        self.predicted_positive.assign_add(tf.reduce_sum(ypred)) # updating predicted positive atrribute
-        self.actual_positive.assign_add(tf.reduce_sum(ytrue)) # updating actual positive atrribute
+        self.tp.assign_add(tf.reduce_sum(y_true * y_pred)) # updating true positives attribute
+        self.predicted_positive.assign_add(tf.reduce_sum(y_pred)) # updating predicted positive attribute
+        self.actual_positive.assign_add(tf.reduce_sum(y_true)) # updating actual positive attribute
 
     def result(self):
         self.precision = self.tp/(self.predicted_positive+self.epsilon) # calculates precision
         self.recall = self.tp/(self.actual_positive+self.epsilon) # calculates recall
         # calculating fbeta
-        self.fb = (1+self.beta_squared)*self.precision*self.recall / (self.beta_squared*self.precision + self.recall + self.epsilon)
+        self.fb = (1 + self.beta_squared) * self.precision*self.recall / \ 
+                   (self.beta_squared*self.precision + self.recall + self.epsilon)
         return self.fb
 
     def reset_state(self):
@@ -87,7 +91,7 @@ def create_baseline(hidden_layer_sizes, meta):
 
     model.compile(loss=loss_func,
                   optimizer=AdamW(learning_rate=LEARNING_RATE),
-                  metrics=['accuracy', Precision(), Recall(), StatefullBinaryFBeta(), 'crossentropy'])
+                  metrics=['accuracy', Precision(), Recall(), StatefulBinaryFBeta(), 'crossentropy'])
     return model
 
 
@@ -136,9 +140,9 @@ class ContactClassifier(object):
         return df.loc[:, ContactClassifier._CLASS_VAR].values
 
     @staticmethod
-    def _make_table(X, y):
+    def _make_table(x, y):
         df = pd.DataFrame({ContactClassifier._CLASS_VAR: y})
-        df[ContactClassifier._FIT_VARS] = X
+        df[ContactClassifier._FIT_VARS] = x
         return df
 
     def write_table(self, df, table_name, description, index):
@@ -153,7 +157,7 @@ class ContactClassifier(object):
         logger.info(f'Writing {description} to {file_path}')
         df.to_csv(file_path, index=index)
 
-    def plot_variable_scatter(self, df, base_name, n_points=5000, best=None):
+    def plot_variable_scatter(self, df, base_name, n_points=5000):
         with PdfPages(os.path.join(self.output_dir, base_name)) as pdf:
             if len(df) > n_points:
                 df = df.sample(n_points, random_state=self.seed)
@@ -168,20 +172,20 @@ class ContactClassifier(object):
         #  - random under-sampling
         self.plot_variable_scatter(self.df_train, 'raw_training_scatter.pdf')
 
-        X = ContactClassifier._get_fit_variables(self.df_train)
+        x = ContactClassifier._get_fit_variables(self.df_train)
         y = ContactClassifier._get_class_variable(self.df_train)
-        logger.info(f'Original set size:  X={X.shape}, y={y.shape}, class sizes: {np.bincount(y)}')
+        logger.info(f'Original set size:  x={x.shape}, y={y.shape}, class sizes: {np.bincount(y)}')
 
         sampler = RandomUnderSampler(random_state=self.seed)
         logger.info('Applying random under-sampling to balance classes')
-        X_aug, y_aug = sampler.fit_resample(X, y)
+        x_aug, y_aug = sampler.fit_resample(x, y)
         logger.info('After application of random under-sampling: '
-                    f'X={X_aug.shape}, y={y_aug.shape}, class sizes: {np.bincount(y_aug)}')
+                    f'x={x_aug.shape}, y={y_aug.shape}, class sizes: {np.bincount(y_aug)}')
 
-        df_aug = ContactClassifier._make_table(X_aug, y_aug)
+        df_aug = ContactClassifier._make_table(x_aug, y_aug)
         self.plot_variable_scatter(df_aug, 'augmented_training_scatter.pdf')
 
-        return X, y, X_aug, y_aug
+        return x, y, x_aug, y_aug
 
     def tensorboard_callback(self):
 
@@ -193,15 +197,16 @@ class ContactClassifier(object):
             write_images=True,
             update_freq="epoch")
 
-    def earlystopping_callback(self):
-        return tf.keras.callbacks.EarlyStopping(monitor='fbeta',
+    @staticmethod
+    def earlystopping_callback(metric):
+        return tf.keras.callbacks.EarlyStopping(monitor=metric,
                                                 patience=ContactClassifier._PATIENCE,
                                                 mode='max',
                                                 min_delta=1e-4,
                                                 start_from_epoch=50,
                                                 verbose=True)
-
-    def checkpoint_callback(self, best_model_file):
+    @staticmethod
+    def checkpoint_callback(best_model_file):
         return tf.keras.callbacks.ModelCheckpoint(best_model_file,
                                                   monitor=ContactClassifier._METRIC_NAME,
                                                   verbose=True,
@@ -245,7 +250,7 @@ class ContactClassifier(object):
     #         loss_func = BinaryCrossentropy()
     #         model.compile(loss=loss_func,
     #           optimizer=AdamW(learning_rate=hparams[HP_LEARNING_RATE]),
-    #           metrics=['accuracy', Precision(), Recall(), StatefullBinaryFBeta(), 'crossentropy'])
+    #           metrics=['accuracy', Precision(), Recall(), StatefulBinaryFBeta(), 'crossentropy'])
     #
     #         model.fit(X_train, y_train, epochs=20)
     #         loss, accuracy, precision, recall, f_beta, cross_entropy = model.evaluate(X_test, y_test)
@@ -272,7 +277,7 @@ class ContactClassifier(object):
 
     def train_full_model(self):
 
-        X, y, X_aug, y_aug = self.apply_imbalanced_data_augmentation()
+        x, y, x_aug, y_aug = self.apply_imbalanced_data_augmentation()
 
         tf.keras.backend.clear_session()
 
@@ -282,7 +287,7 @@ class ContactClassifier(object):
         if self.enable_tb:
             callbacks.append(self.tensorboard_callback())
         if self.enable_es:
-            callbacks.append(self.earlystopping_callback())
+            callbacks.append(self.earlystopping_callback('fbeta'))
 
         estimator = KerasClassifier(model=create_baseline,
                                     epochs=self.n_epochs,
@@ -293,13 +298,13 @@ class ContactClassifier(object):
                                     hidden_layer_sizes=[ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH)
 
         logging.info('Beginning model training')
-        model = estimator.fit(X_aug, y_aug)
+        model = estimator.fit(x_aug, y_aug)
 
         logger.info('Loading best model weights')
         model.model_.load_weights(best_model_file)
         self.model = model
 
-        logger.info(f'Full model score: {model.score(X, y)}')
+        logger.info(f'Full model score: {model.score(x, y)}')
 
         df_plot = pd.DataFrame(model.history_).reset_index().rename(columns={'index': 'epoch'})
         p = (ggplot(df_plot.query('epoch>=1').melt(id_vars='epoch'))
@@ -311,8 +316,8 @@ class ContactClassifier(object):
         assert self.model is not None, 'Model has not been trained.'
         if df is None:
             df = self.df_combined.copy()
-        X = ContactClassifier._get_fit_variables(df)
-        pred_significance = self.model.predict_proba(X)
+        x = ContactClassifier._get_fit_variables(df)
+        pred_significance = self.model.predict_proba(x)
         df['prob_intra'] = pred_significance[:, 1]
         self.write_table(df, 'predictions', 'final predictions', index=False)
         return df
@@ -321,7 +326,7 @@ class ContactClassifier(object):
 
         tf.keras.backend.clear_session()
 
-        X, y, X_aug, y_aug = self.apply_imbalanced_data_augmentation()
+        x, y, x_aug, y_aug = self.apply_imbalanced_data_augmentation()
 
         hidden_layer_sizes = [ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH
         kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=self.seed)
@@ -336,17 +341,17 @@ class ContactClassifier(object):
 
         histories = []
 
-        X_train, X_test, y_train, y_test = train_test_split(X_aug, y_aug,
+        x_train, x_test, y_train, y_test = train_test_split(x_aug, y_aug,
                                                             test_size=0.2, random_state=self.seed, stratify=y_aug)
 
-        logger.info(f'Number samples: train {X_train.shape[0]}, test {X_test.shape[0]}, all {X.shape[0]}')
+        logger.info(f'Number samples: train {x_train.shape[0]}, test {x_test.shape[0]}, all {x.shape[0]}')
 
-        for n_fold, (train_index, val_index) in enumerate(kfold.split(X_train, y_train), start=1):
+        for n_fold, (train_index, val_index) in enumerate(kfold.split(x_train, y_train), start=1):
 
             logger.info(f"Computing fold: {n_fold}")
 
-            Xf, yf = X_train[train_index], y_train[train_index]
-            Xv, yv = X_train[val_index], y_train[val_index]
+            x_fit, y_fit = x_train[train_index], y_train[train_index]
+            x_val, y_val = x_train[val_index], y_train[val_index]
 
             best_model_file = os.path.join(self.output_dir, f'kfold_bestmodel_{n_fold}.keras')
 
@@ -354,7 +359,7 @@ class ContactClassifier(object):
             if self.enable_tb:
                 callbacks.append(self.tensorboard_callback())
             if self.enable_es:
-                callbacks.append(self.earlystopping_callback())
+                callbacks.append(self.earlystopping_callback('fbeta'))
 
             estimator = KerasClassifier(model=create_baseline,
                                         epochs=self.n_epochs,
@@ -364,13 +369,13 @@ class ContactClassifier(object):
                                         callbacks=callbacks,
                                         hidden_layer_sizes=hidden_layer_sizes, )
 
-            model = estimator.fit(Xf, yf, validation_data=(Xv, yv))
+            model = estimator.fit(x_fit, y_fit, validation_data=(x_val, y_val))
 
             histories.append(pd.DataFrame(model.history_))
 
             m = model.model_
             m.load_weights(best_model_file)
-            results = m.evaluate(X_test, y_test, batch_size=250)
+            results = m.evaluate(x_test, y_test, batch_size=250)
             results = dict(zip(m.metrics_names, results))
             for k, v in results.items():
                 testing[k].append(v)

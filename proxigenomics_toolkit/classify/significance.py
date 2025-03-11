@@ -147,7 +147,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
         """
         Check that a sequence belongs to a cluster and is sufficiently long. In addition, the
         method keeps track of accepted/rejected sequences and their attributes for each cluster.
-        This is later used to calculate updated cluster attributes. As a consequence, this methods
+        This is later used to calculate updated cluster attributes. As a consequence, this method
         modifies nodes within the graph.
         :ix: sequence index
         :seq_name: sequence name
@@ -1156,7 +1156,7 @@ class SignificantLinks(object):
         Apply Benjamini-Hochberge false-discovery rate correction. The adjusted p-values will
         appear as a new column `adj_pvalue` in the all_contacts table.
 
-        Currently two-step BH is used.
+        Currently, two-step BH is used.
 
         :param alpha: target family-wise error rate
         :param method: method to use in correction Benjamini-Hochberg (fdr_bh)
