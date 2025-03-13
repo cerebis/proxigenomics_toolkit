@@ -26,15 +26,18 @@ def scaler(arr, mu=None, sig=None):
 
 def transform(df):
     return df.assign(intra_z   = lambda x: x.intra.astype(np.uint8),
-                     # freq_z   = lambda x: scaler(np.log(x.contacts / (x.cov_u*x.cov_v*x.uf_u*x.uf_v*x.sites_u*x.sites_v)))[0],
-                     freq_z   = lambda x: scaler(np.log(x.contacts / (x.cov_u*x.cov_v*x.sites_u*x.sites_v)))[0],
-                     # effcov_z  = lambda x: scaler(np.log(x.cov_u * x.uf_u * x.cov_v * x.uf_v))[0],
-                     density_z = lambda x: scaler(np.log(x.sites_u/x.length_u * x.sites_v/x.length_v))[0],
-                     length_z  = lambda x: scaler(np.log(x.length_u * x.length_v))[0],
-                     sites_z   = lambda x: scaler(np.log(x.sites_u * x.sites_v))[0],
                      cov_z     = lambda x: scaler(np.log(x.cov_u * x.cov_v))[0],
-                     uf_z      = lambda x: scaler(np.arcsin(x.uf_u * x.uf_v))[0],
-                     gc_z      = lambda x: scaler(np.arcsin(x.gc_u - x.gc_v))[0],
+                     freq_z   = lambda x: scaler(np.log(x.contacts / (x.sites_u*x.sites_v * x.uf_u*x.uf_v)))[0],
+                     # freq_z   = lambda x: scaler(np.log(x.contacts / (x.cov_u*x.cov_v * x.sites_u*x.sites_v)))[0],
+                     # freq_z   = lambda x: scaler(np.log(x.contacts / (x.uf_u*x.uf_v * x.sites_u*x.sites_v)))[0],
+                     # freq_z    = lambda x: scaler(np.log(x.contacts /
+                     #                                    (x.cov_u*x.cov_v * x.uf_u*x.uf_v * x.sites_u*x.sites_v)))[0],
+                     # effcov_z  = lambda x: scaler(np.log(x.cov_u * x.uf_u * x.cov_v * x.uf_v))[0],
+                     # density_z = lambda x: scaler(np.log(x.sites_u/x.length_u * x.sites_v/x.length_v))[0],
+                     # length_z  = lambda x: scaler(np.log(x.length_u * x.length_v))[0],
+                     # sites_z   = lambda x: scaler(np.log(x.sites_u * x.sites_v))[0],
+                     # uf_z      = lambda x: scaler(np.arcsin(x.uf_u * x.uf_v))[0],
+                     # gc_z      = lambda x: scaler(np.arcsin(x.gc_u - x.gc_v))[0],
                      )
 
 
@@ -230,6 +233,7 @@ class DataLabeller(object):
         # make sure that any occasional zero is instead a small value
         df_cmb.loc[df_cmb.cov_u == 0, 'cov_u'] = DataLabeller._SMALL_COV
         df_cmb.loc[df_cmb.cov_v == 0, 'cov_v'] = DataLabeller._SMALL_COV
+        df_cmb.loc[df_cmb.uf_u == 0, 'uf_u'] = DataLabeller._SMALL_UF
         df_cmb.loc[df_cmb.uf_v == 0, 'uf_v'] = DataLabeller._SMALL_UF
 
         # calculate similarity between sequence and cluster
@@ -241,7 +245,10 @@ class DataLabeller(object):
         df_cmb = df_cmb.sort_values(['seq','cluster']).reset_index(drop=True)
         # calculate linkage coefficient and assign
         linkage = df_cmb.groupby('seq').apply(out_degree_pow, p=0.5, include_groups=False)
-        df_cmb['linkage'] = linkage.droplevel(0)
+        # Log-transform and standardise the linkage coefficient, as its distribution is far
+        # from smooth, with significant mass close to zero (spurious contacts).
+        df_cmb['linkage'] = scaler(np.log(linkage.droplevel(0)))[0]
+        # df_cmb['linkage'] = linkage.droplevel(0)
 
         logger.info('Standardising all observations together')
         df_cmb = transform(df_cmb)
