@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 L2_KERNEL = 0.1
 L2_BIAS = 0.02
 DROPOUT_RATE = 0.3
-LEARNING_RATE = 0.0001
 
 
 class StatefulBinaryFBeta(Metric):
@@ -32,7 +31,7 @@ class StatefulBinaryFBeta(Metric):
     Custom metric for fbeta maximisation
     """
 
-    def __init__(self, name='fbeta', beta=1, threshold=0.5, epsilon=1e-7, **kwargs):
+    def __init__(self, name='fbeta', beta=1.0, threshold=0.5, epsilon=1e-7, **kwargs):
         # initializing an object of the super class
         super(StatefulBinaryFBeta, self).__init__(name=name, **kwargs)
 
@@ -65,7 +64,7 @@ class StatefulBinaryFBeta(Metric):
         self.precision = self.tp/(self.predicted_positive+self.epsilon) # calculates precision
         self.recall = self.tp/(self.actual_positive+self.epsilon) # calculates recall
         # calculating fbeta
-        self.fb = (1 + self.beta_squared) * self.precision*self.recall / \ 
+        self.fb = (1 + self.beta_squared) * self.precision*self.recall / \
                    (self.beta_squared*self.precision + self.recall + self.epsilon)
         return self.fb
 
@@ -75,7 +74,7 @@ class StatefulBinaryFBeta(Metric):
         self.actual_positive.assign(0) # resets actual positives to zero
 
 
-def create_baseline(hidden_layer_sizes, meta):
+def create_baseline(hidden_layer_sizes, learning_rate, meta):
     model = Sequential()
     model.add(Input(shape=(meta['n_features_in_'],)))
     for n, n_nodes in enumerate(hidden_layer_sizes, 1):
@@ -90,8 +89,8 @@ def create_baseline(hidden_layer_sizes, meta):
     loss_func = BinaryCrossentropy()
 
     model.compile(loss=loss_func,
-                  optimizer=AdamW(learning_rate=LEARNING_RATE),
-                  metrics=['accuracy', Precision(), Recall(), StatefulBinaryFBeta(), 'crossentropy'])
+                  optimizer=AdamW(learning_rate=learning_rate),
+                  metrics=['accuracy', Precision(), Recall(), StatefulBinaryFBeta(beta=1.0), 'crossentropy'])
     return model
 
 
@@ -101,7 +100,7 @@ class ContactClassifier(object):
     _FIT_VARS = ['similarity', 'freq_z', 'cov_z', 'linkage']
     _CLASS_VAR = 'intra_z'
 
-    _HIDDEN_SIZE = 64
+    _HIDDEN_SIZE = 32
     _HIDDEN_DEPTH = 4
     _PATIENCE = 20
 
@@ -114,22 +113,35 @@ class ContactClassifier(object):
         return os.path.join(parent_dir, str(ContactClassifier.OUTPUT_TABLES[table_name]))
 
     def __init__(self, output_dir, complete_labelled_file, seed, n_epochs, batch_size,
-                 enable_tb, enable_es):
+                 learning_rate=0.001, enable_tb=False, enable_es=True, verbose=False):
+        """
+        An MLP classifier for Hi-C contacts, where classification decides if an accumulated contact
+        between a single sequence as a genome_bin is intra- or inter- cellular.
+
+        :param output_dir: parent directory to which results are written
+        :param complete_labelled_file: labelled training data
+        :param seed: a random seed
+        :param n_epochs: number of epochs for training
+        :param batch_size: batch size for training
+        :param learning_rate: global learning rate of AdamW optimizer
+        :param enable_tb: enable tensorboard logging
+        :param enable_es: enable early stopping callback when training ceases to improve for 20 iterations
+        :param verbose: verbosity of logging
+        """
 
         self.output_dir = output_dir
         self.complete_labeled_file = complete_labelled_file
         self.seed = seed
         self.n_epochs = n_epochs
         self.batch_size = batch_size
+        self.learning_rate = learning_rate
         self.model = None
         self.enable_tb = enable_tb
         self.enable_es = enable_es
         # read data for training
         self.df_combined = pd.read_csv(complete_labelled_file)
         self.df_train = self.df_combined.query('train==True')
-
-        print(f"DID I ENABLE ES? -> {self.enable_es}")
-
+        self.verbose = verbose
 
     @staticmethod
     def _get_fit_variables(df):
@@ -165,6 +177,8 @@ class ContactClassifier(object):
             pdf.savefig(sb.jointplot(df, x='similarity', y='cov_z', hue="intra_z").figure)
             pdf.savefig(sb.jointplot(df, x='similarity', y='linkage', hue="intra_z").figure)
             pdf.savefig(sb.jointplot(df, x='freq_z', y='cov_z', hue="intra_z").figure)
+            pdf.savefig(sb.jointplot(df, x='freq_z', y='linkage', hue="intra_z").figure)
+            pdf.savefig(sb.jointplot(df, x='cov_z', y='linkage', hue="intra_z").figure)
 
     def apply_imbalanced_data_augmentation(self):
 
@@ -198,18 +212,18 @@ class ContactClassifier(object):
             update_freq="epoch")
 
     @staticmethod
-    def earlystopping_callback(metric):
+    def earlystopping_callback(metric, verbose=False):
         return tf.keras.callbacks.EarlyStopping(monitor=metric,
                                                 patience=ContactClassifier._PATIENCE,
                                                 mode='max',
                                                 min_delta=1e-4,
                                                 start_from_epoch=50,
-                                                verbose=True)
+                                                verbose=verbose)
     @staticmethod
-    def checkpoint_callback(best_model_file):
+    def checkpoint_callback(best_model_file, verbose=False):
         return tf.keras.callbacks.ModelCheckpoint(best_model_file,
                                                   monitor=ContactClassifier._METRIC_NAME,
-                                                  verbose=True,
+                                                  verbose=verbose,
                                                   save_best_only=True,
                                                   mode='max')
 
@@ -287,15 +301,16 @@ class ContactClassifier(object):
         if self.enable_tb:
             callbacks.append(self.tensorboard_callback())
         if self.enable_es:
-            callbacks.append(self.earlystopping_callback('fbeta'))
+            callbacks.append(self.earlystopping_callback('fbeta', verbose=self.verbose))
 
         estimator = KerasClassifier(model=create_baseline,
                                     epochs=self.n_epochs,
                                     batch_size=self.batch_size,
                                     random_state=self.seed,
-                                    verbose=False,
+                                    verbose=self.verbose,
                                     callbacks=callbacks,
-                                    hidden_layer_sizes=[ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH)
+                                    hidden_layer_sizes=[ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH,
+                                    learning_rate=self.learning_rate)
 
         logging.info('Beginning model training')
         model = estimator.fit(x_aug, y_aug)
@@ -359,15 +374,16 @@ class ContactClassifier(object):
             if self.enable_tb:
                 callbacks.append(self.tensorboard_callback())
             if self.enable_es:
-                callbacks.append(self.earlystopping_callback('fbeta'))
+                callbacks.append(self.earlystopping_callback('fbeta', verbose=self.verbose))
 
             estimator = KerasClassifier(model=create_baseline,
                                         epochs=self.n_epochs,
                                         batch_size=self.batch_size,
                                         random_state=self.seed,
-                                        verbose=0,
+                                        verbose=self.verbose,
                                         callbacks=callbacks,
-                                        hidden_layer_sizes=hidden_layer_sizes, )
+                                        hidden_layer_sizes=hidden_layer_sizes,
+                                        learning_rate=self.learning_rate)
 
             model = estimator.fit(x_fit, y_fit, validation_data=(x_val, y_val))
 
