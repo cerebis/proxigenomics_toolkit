@@ -362,7 +362,7 @@ class ContactClassifier(object):
 
         x, y, x_aug, y_aug = self.apply_imbalanced_data_augmentation()
 
-        hidden_layer_sizes = [ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH
+        hidden_layer_sizes = [self.num_nodes] * self.num_layers
         kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=self.seed)
 
         testing = {'precision': [],
