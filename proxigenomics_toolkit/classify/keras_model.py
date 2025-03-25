@@ -21,7 +21,7 @@ import keras
 logger = logging.getLogger(__name__)
 
 
-L2_KERNEL = 0.1
+L2_KERNEL = 0.15
 L2_BIAS = 0.02
 DROPOUT_RATE = 0.3
 
@@ -78,7 +78,9 @@ def create_baseline(hidden_layer_sizes, learning_rate, meta):
     model = Sequential()
     model.add(Input(shape=(meta['n_features_in_'],)))
     for n, n_nodes in enumerate(hidden_layer_sizes, 1):
-        model.add(Dense(n_nodes, kernel_initializer='he_uniform',
+        model.add(Dense(n_nodes,
+                        kernel_initializer='he_uniform',
+                        bias_initializer='zeros',
                         activation='relu',
                         kernel_regularizer=L2(l2=L2_KERNEL),
                         bias_regularizer=L2(l2=L2_BIAS)))
@@ -89,8 +91,13 @@ def create_baseline(hidden_layer_sizes, learning_rate, meta):
     loss_func = BinaryCrossentropy()
 
     model.compile(loss=loss_func,
-                  optimizer=AdamW(learning_rate=learning_rate),
-                  metrics=['accuracy', Precision(), Recall(), StatefulBinaryFBeta(beta=1.0), 'crossentropy'])
+                  optimizer=AdamW(learning_rate=learning_rate,
+                                  amsgrad=True),
+                  metrics=['accuracy',
+                           Precision(),
+                           Recall(),
+                           StatefulBinaryFBeta(beta=1.0),
+                           'crossentropy'])
     return model
 
 
@@ -99,9 +106,6 @@ class ContactClassifier(object):
     _METRIC_NAME = 'fbeta'
     _FIT_VARS = ['similarity', 'freq_z', 'cov_z', 'linkage']
     _CLASS_VAR = 'intra_z'
-
-    _HIDDEN_SIZE = 32
-    _HIDDEN_DEPTH = 4
     _PATIENCE = 20
 
     OUTPUT_TABLES = {
@@ -112,8 +116,16 @@ class ContactClassifier(object):
     def get_output_path(parent_dir, table_name) -> str:
         return os.path.join(parent_dir, str(ContactClassifier.OUTPUT_TABLES[table_name]))
 
-    def __init__(self, output_dir, complete_labelled_file, seed, n_epochs, batch_size,
-                 learning_rate=0.001, enable_tb=False, enable_es=True, verbose=False):
+    def __init__(self,
+                 output_dir,
+                 complete_labelled_file,
+                 seed,
+                 n_epochs,
+                 batch_size,
+                 num_nodes=24,
+                 num_layers=5,
+                 learning_rate=1e-4,
+                 enable_tb=False, enable_es=True, verbose=False):
         """
         An MLP classifier for Hi-C contacts, where classification decides if an accumulated contact
         between a single sequence as a genome_bin is intra- or inter- cellular.
@@ -123,6 +135,8 @@ class ContactClassifier(object):
         :param seed: a random seed
         :param n_epochs: number of epochs for training
         :param batch_size: batch size for training
+        :param num_nodes: number of nodes in the hidden layers
+        :param num_layers: number of hidden layers
         :param learning_rate: global learning rate of AdamW optimizer
         :param enable_tb: enable tensorboard logging
         :param enable_es: enable early stopping callback when training ceases to improve for 20 iterations
@@ -134,6 +148,8 @@ class ContactClassifier(object):
         self.seed = seed
         self.n_epochs = n_epochs
         self.batch_size = batch_size
+        self.num_nodes = num_nodes
+        self.num_layers = num_layers
         self.learning_rate = learning_rate
         self.model = None
         self.enable_tb = enable_tb
@@ -142,6 +158,10 @@ class ContactClassifier(object):
         self.df_combined = pd.read_csv(complete_labelled_file)
         self.df_train = self.df_combined.query('train==True')
         self.verbose = verbose
+
+        # set a global seed through Keras, since there are
+        #   many objects within the package which consume a seed.
+        keras.utils.set_random_seed(self.seed)
 
     @staticmethod
     def _get_fit_variables(df):
@@ -202,14 +222,12 @@ class ContactClassifier(object):
         return x, y, x_aug, y_aug
 
     def tensorboard_callback(self):
-
-        return keras.callbacks.TensorBoard(
-            log_dir=os.path.join(self.output_dir, 'logs'),
-            histogram_freq=1,
-            embeddings_freq=1,
-            write_graph=True,
-            write_images=True,
-            update_freq="epoch")
+        return keras.callbacks.TensorBoard(log_dir=os.path.join(self.output_dir, 'logs'),
+                                           histogram_freq=1,
+                                           embeddings_freq=1,
+                                           write_graph=True,
+                                           write_images=True,
+                                           update_freq="epoch")
 
     @staticmethod
     def earlystopping_callback(metric, verbose=False):
@@ -219,6 +237,7 @@ class ContactClassifier(object):
                                                 min_delta=1e-4,
                                                 start_from_epoch=50,
                                                 verbose=verbose)
+
     @staticmethod
     def checkpoint_callback(best_model_file, verbose=False):
         return tf.keras.callbacks.ModelCheckpoint(best_model_file,
@@ -297,7 +316,7 @@ class ContactClassifier(object):
 
         best_model_file = os.path.join(self.output_dir, f'full_best_{ContactClassifier._METRIC_NAME}.keras')
 
-        callbacks = [self.checkpoint_callback(best_model_file)]
+        callbacks = [self.checkpoint_callback(best_model_file, self.verbose)]
         if self.enable_tb:
             callbacks.append(self.tensorboard_callback())
         if self.enable_es:
@@ -309,7 +328,7 @@ class ContactClassifier(object):
                                     random_state=self.seed,
                                     verbose=self.verbose,
                                     callbacks=callbacks,
-                                    hidden_layer_sizes=[ContactClassifier._HIDDEN_SIZE] * ContactClassifier._HIDDEN_DEPTH,
+                                    hidden_layer_sizes=[self.num_nodes] * self.num_layers,
                                     learning_rate=self.learning_rate)
 
         logging.info('Beginning model training')
@@ -370,7 +389,7 @@ class ContactClassifier(object):
 
             best_model_file = os.path.join(self.output_dir, f'kfold_bestmodel_{n_fold}.keras')
 
-            callbacks = [self.checkpoint_callback(best_model_file)]
+            callbacks = [self.checkpoint_callback(best_model_file, self.verbose)]
             if self.enable_tb:
                 callbacks.append(self.tensorboard_callback())
             if self.enable_es:
