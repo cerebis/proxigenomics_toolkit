@@ -25,19 +25,9 @@ def scaler(arr, mu=None, sig=None):
 
 
 def transform(df):
-    return df.assign(intra_z   = lambda x: x.intra.astype(np.uint8),
-                     cov_z     = lambda x: scaler(np.log(x.cov_u * x.cov_v))[0],
-                     freq_z   = lambda x: scaler(np.log(x.contacts / (x.sites_u*x.sites_v * x.uf_u*x.uf_v)))[0],
-                     # freq_z   = lambda x: scaler(np.log(x.contacts / (x.cov_u*x.cov_v * x.sites_u*x.sites_v)))[0],
-                     # freq_z   = lambda x: scaler(np.log(x.contacts / (x.uf_u*x.uf_v * x.sites_u*x.sites_v)))[0],
-                     # freq_z    = lambda x: scaler(np.log(x.contacts /
-                     #                                    (x.cov_u*x.cov_v * x.uf_u*x.uf_v * x.sites_u*x.sites_v)))[0],
-                     # effcov_z  = lambda x: scaler(np.log(x.cov_u * x.uf_u * x.cov_v * x.uf_v))[0],
-                     # density_z = lambda x: scaler(np.log(x.sites_u/x.length_u * x.sites_v/x.length_v))[0],
-                     # length_z  = lambda x: scaler(np.log(x.length_u * x.length_v))[0],
-                     # sites_z   = lambda x: scaler(np.log(x.sites_u * x.sites_v))[0],
-                     # uf_z      = lambda x: scaler(np.arcsin(x.uf_u * x.uf_v))[0],
-                     # gc_z      = lambda x: scaler(np.arcsin(x.gc_u - x.gc_v))[0],
+    return df.assign(intra_z = lambda x: x.intra.astype(np.uint8),
+                     cov_z   = lambda x: scaler(np.log(x.cov_u * x.cov_v))[0],
+                     freq_z  = lambda x: scaler(np.log(x.contacts / (x.sites_u*x.sites_v * x.uf_u*x.uf_v)))[0],
                      )
 
 
@@ -122,9 +112,41 @@ def seq2cluster_similarity(df, embeddings):
     return np.fromiter((linear_kernel(u[[i]], v[[i]])[0][0] for i in range(u.shape[0])), dtype='f8')
 
 
-def out_degree_pow(x, p):
-    edge_weight = x.contacts / np.power((x.sites_v * x.cov_v * x.uf_v), p)
+def normalised_out_degree(x):
+    """
+    NOTE: Intended to be performed on a dataframe of associations grouped by sequence name.
+
+    For each association made by an individual sequence, calculate the proportion of contacts
+    made between that sequence and the associated cluster. The contact count is normalised
+    by cluster length, coverage and uniqueness factor.
+
+    :param x:
+    :return:
+    """
+    # TODO this commented out formulation does not test as well, yet logically I'd expect
+    #   it to be the more correct.
+    #
+    # # Compensate for the fact that contact counts are only between the sequence
+    # # and other members of the cluster -- no self contacts. For very large
+    # # members, we must remove their site count before normalising.
+    # vdelu_sites = (x.sites_v - x.sites_u)
+    # # ensure that there are no zeros in the denominator vector (singletons)
+    # vdelu_sites[vdelu_sites <= 0] = 1
+    # edge_weight = x.contacts / np.sqrt(vdelu_sites * x.cov_v * x.uf_v)
+
+    edge_weight = x.contacts / np.sqrt(x.sites_v * x.cov_v * x.uf_v)
     return edge_weight / edge_weight.sum()
+
+
+def replace_zeros(x, reduction_factor):
+    """
+    Replace zeros in a pandas series with a small value relative to the minimum non-zero value.
+    :param x: series
+    :param reduction_factor: the factor by which to multiply the minimum non-zero value
+    :return: updated series
+    """
+    min_val = (x[x > 0]).min()
+    return x.replace(0, reduction_factor * min_val)
 
 
 class DataLabeller(object):
@@ -230,11 +252,12 @@ class DataLabeller(object):
             .sort_values('group', ascending=False) \
             .drop_duplicates(['seq','cluster'], keep='first')
 
-        # make sure that any occasional zero is instead a small value
-        df_cmb.loc[df_cmb.cov_u == 0, 'cov_u'] = DataLabeller._SMALL_COV
-        df_cmb.loc[df_cmb.cov_v == 0, 'cov_v'] = DataLabeller._SMALL_COV
-        df_cmb.loc[df_cmb.uf_u == 0, 'uf_u'] = DataLabeller._SMALL_UF
-        df_cmb.loc[df_cmb.uf_v == 0, 'uf_v'] = DataLabeller._SMALL_UF
+        # make sure that any zeros are replaced with a small value determined
+        # by the supplied vector
+        df_cmb['cov_u'] = replace_zeros(df_cmb.cov_u, 0.5)
+        df_cmb['cov_v'] = replace_zeros(df_cmb.cov_v, 0.5)
+        df_cmb['uf_u'] = replace_zeros(df_cmb.uf_u, 0.5)
+        df_cmb['uf_v'] = replace_zeros(df_cmb.uf_v, 0.5)
 
         # calculate similarity between sequence and cluster
         logger.info('Calculating similarities')
@@ -242,13 +265,15 @@ class DataLabeller(object):
 
         # reset the index to a simple integer, after first insuring an intuitive ordering
         logger.info('Calculating linkage coefficient')
+        # calculate the proportion the sequence represents relative to the clusters extent
+        df_cmb = df_cmb.assign(prop_cl = lambda x: x.length_u / x.length_v)
         df_cmb = df_cmb.sort_values(['seq','cluster']).reset_index(drop=True)
         # calculate linkage coefficient and assign
-        linkage = df_cmb.groupby('seq').apply(out_degree_pow, p=0.5, include_groups=False)
+        linkage = df_cmb.groupby('seq', group_keys=False) \
+                        .apply(normalised_out_degree, include_groups=False)
         # Log-transform and standardise the linkage coefficient, as its distribution is far
         # from smooth, with significant mass close to zero (spurious contacts).
-        df_cmb['linkage'] = scaler(np.log(linkage.droplevel(0)))[0]
-        # df_cmb['linkage'] = linkage.droplevel(0)
+        df_cmb['linkage'] = scaler(np.log(linkage))[0]
 
         logger.info('Standardising all observations together')
         df_cmb = transform(df_cmb)
