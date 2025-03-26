@@ -6,6 +6,7 @@ import numpy as np
 import os
 
 from imblearn.under_sampling import RandomUnderSampler
+from imblearn.ensemble import BalancedBaggingClassifier
 from matplotlib.backends.backend_pdf import PdfPages
 from plotnine import *
 from scikeras.wrappers import KerasClassifier
@@ -125,6 +126,9 @@ class ContactClassifier(object):
                  num_nodes=24,
                  num_layers=5,
                  learning_rate=1e-4,
+                 num_estimators=10,
+                 test_size=None,
+                 enable_bag=False,
                  enable_tb=False, enable_es=True, verbose=False):
         """
         An MLP classifier for Hi-C contacts, where classification decides if an accumulated contact
@@ -138,6 +142,9 @@ class ContactClassifier(object):
         :param num_nodes: number of nodes in the hidden layers
         :param num_layers: number of hidden layers
         :param learning_rate: global learning rate of AdamW optimizer
+        :param num_estimators: number of estimators to use when the balanced bagging classifier is enabled
+        :param test_size: if not None, set aside a portion of the data for testing vals:[0-1]
+        :param enable_bag: enable balanced bagging classifier, rather than balancing data
         :param enable_tb: enable tensorboard logging
         :param enable_es: enable early stopping callback when training ceases to improve for 20 iterations
         :param verbose: verbosity of logging
@@ -151,31 +158,120 @@ class ContactClassifier(object):
         self.num_nodes = num_nodes
         self.num_layers = num_layers
         self.learning_rate = learning_rate
-        self.model = None
+        self.num_estimators = num_estimators
+        self.test_size = test_size
+        self.enable_bag = enable_bag
         self.enable_tb = enable_tb
         self.enable_es = enable_es
-        # read data for training
-        self.df_combined = pd.read_csv(complete_labelled_file)
-        self.df_train = self.df_combined.query('train==True')
         self.verbose = verbose
+
+        # read data for training
+        self.df_complete = pd.read_csv(complete_labelled_file)
+        # separate out the complete training set
+        self.df_full_training = ContactClassifier._separate_training(self.df_complete)
+
+        self.model = None
+        self.x_full = None
+        self.y_full = None
+        self.x_train = None
+        self.y_train = None
+        self.x_test = None
+        self.y_test = None
 
         # set a global seed through Keras, since there are
         #   many objects within the package which consume a seed.
         keras.utils.set_random_seed(self.seed)
+        # prepare the training and possibly test dataset(s)
+        self.prepare_training_data()
 
     @staticmethod
-    def _get_fit_variables(df):
+    def _separate_training(df):
+        """
+        Simply return the table containing only the data marked for training.
+        :param df: a pandas dataframe
+        :return: dataframe containing just training data
+        """
+        return df.query('train==True')
+
+    @staticmethod
+    def _extract_x(df):
+        """
+        Extract only the columns used in modelling contacts.
+        :param df:
+        :return: numpy array
+        """
         return df.loc[:, ContactClassifier._FIT_VARS].values
 
     @staticmethod
-    def _get_class_variable(df):
+    def _extract_y(df):
+        """
+        Extract the class variable used in modelling contacts.
+        :param df:
+        :return: numpy array
+        """
         return df.loc[:, ContactClassifier._CLASS_VAR].values
 
     @staticmethod
     def _make_table(x, y):
+        """
+        Convenience method for making a dataframe from fit and class variables.
+        :param x: fit variables
+        :param y: class variable
+        :return: dataframe
+        """
         df = pd.DataFrame({ContactClassifier._CLASS_VAR: y})
         df[ContactClassifier._FIT_VARS] = x
         return df
+
+    def prepare_training_data(self):
+        """
+        Prepare the training data for the model.
+        This can involve splitting training and test sets, as well
+        as applying data augmentation to balance the classes.
+        """
+        _x = ContactClassifier._extract_x(self.df_full_training)
+        _y = ContactClassifier._extract_y(self.df_full_training)
+        self.x_full = _x
+        self.y_full = _y
+
+        if not self.enable_bag:
+            _x, _y = self.balance_data(_x, _y)
+
+        if self.test_size is not None:
+            (self.x_train,
+             self.x_test,
+             self.y_train,
+             self.y_test) = train_test_split(_x, _y,
+                                             test_size=self.test_size,
+                                             random_state=self.seed,
+                                             stratify=_y)
+            logger.info(f'Split data into training (size: {len(self.x_train):,}) '
+                        f'and test (size: {len(self.x_test):,}) sets')
+        else:
+            self.x_train = _x
+            self.y_train = _y
+
+    def balance_data(self, x, y):
+        """
+        Apply data augmentation to equalise the training classes sizes using
+        a random undersampling procedure.
+        :param x: fit variables
+        :param y: class variable
+        :return: balanced fit and class arrays
+        """
+        self.plot_variable_scatter(x, y, 'raw_training_scatter.pdf')
+
+        logger.info(f'Original set size:  x={x.shape}, y={y.shape}, class sizes: {np.bincount(y)}')
+
+        sampler = RandomUnderSampler(random_state=self.seed)
+        logger.info('Applying random under-sampling to balance classes')
+        x_aug, y_aug = sampler.fit_resample(x, y)
+        logger.info('After application of random under-sampling: '
+                    f'x={x_aug.shape}, y={y_aug.shape}, class sizes: {np.bincount(y_aug)}')
+
+        self.plot_variable_scatter(x_aug, y_aug, 'augmented_training_scatter.pdf')
+
+        return x_aug, y_aug
 
     def write_table(self, df, table_name, description, index):
         """
@@ -189,7 +285,17 @@ class ContactClassifier(object):
         logger.info(f'Writing {description} to {file_path}')
         df.to_csv(file_path, index=index)
 
-    def plot_variable_scatter(self, df, base_name, n_points=5000):
+    def plot_variable_scatter(self, x, y, base_name, n_points=5000):
+        """
+        Create scatterplots of the different fit variable combinations and save
+        to PDF.
+        :param x:
+        :param y:
+        :param base_name:
+        :param n_points:
+        :return:
+        """
+        df = ContactClassifier._make_table(x, y)
         with PdfPages(os.path.join(self.output_dir, base_name)) as pdf:
             if len(df) > n_points:
                 df = df.sample(n_points, random_state=self.seed)
@@ -199,27 +305,6 @@ class ContactClassifier(object):
             pdf.savefig(sb.jointplot(df, x='freq_z', y='cov_z', hue="intra_z").figure)
             pdf.savefig(sb.jointplot(df, x='freq_z', y='linkage', hue="intra_z").figure)
             pdf.savefig(sb.jointplot(df, x='cov_z', y='linkage', hue="intra_z").figure)
-
-    def apply_imbalanced_data_augmentation(self):
-
-        # Apply data augmentation to equalise the training classes sizes
-        #  - random under-sampling
-        self.plot_variable_scatter(self.df_train, 'raw_training_scatter.pdf')
-
-        x = ContactClassifier._get_fit_variables(self.df_train)
-        y = ContactClassifier._get_class_variable(self.df_train)
-        logger.info(f'Original set size:  x={x.shape}, y={y.shape}, class sizes: {np.bincount(y)}')
-
-        sampler = RandomUnderSampler(random_state=self.seed)
-        logger.info('Applying random under-sampling to balance classes')
-        x_aug, y_aug = sampler.fit_resample(x, y)
-        logger.info('After application of random under-sampling: '
-                    f'x={x_aug.shape}, y={y_aug.shape}, class sizes: {np.bincount(y_aug)}')
-
-        df_aug = ContactClassifier._make_table(x_aug, y_aug)
-        self.plot_variable_scatter(df_aug, 'augmented_training_scatter.pdf')
-
-        return x, y, x_aug, y_aug
 
     def tensorboard_callback(self):
         return keras.callbacks.TensorBoard(log_dir=os.path.join(self.output_dir, 'logs'),
@@ -235,6 +320,7 @@ class ContactClassifier(object):
                                                 patience=ContactClassifier._PATIENCE,
                                                 mode='max',
                                                 min_delta=1e-4,
+                                                restore_best_weights=True,
                                                 start_from_epoch=50,
                                                 verbose=verbose)
 
@@ -308,10 +394,33 @@ class ContactClassifier(object):
     #             experiment('logs/hparam_tuning/' + experiment_name, hparams)
     #             experiment_no += 1
 
+    def classify(self, df=None):
+        """
+        Apply the trained model to the data and write the predictions to a file.
+        :param df: optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
+        :return: updated dataframe with probabilities column
+        """
+        assert self.model is not None, 'Model has not been trained.'
+        if df is None:
+            df = self.df_complete.copy()
+        x = ContactClassifier._extract_x(df)
+        df['prob_intra'] = self.model.predict_proba(x)[:, 1]
+        self.write_table(df, 'predictions', 'final predictions', index=False)
+        return df
+
     def train_full_model(self):
+        """
+        Train the model on the full dataset.
+        Depending on options at instantiation-time, this model is either fit using data-augmentation
+        or a balanced bagging classifier. This is necessary as commonly there are many more negative
+        class (not an intra-cellular contact) examples and positive (is an intra-cellular contact) class
+        examples.
 
-        x, y, x_aug, y_aug = self.apply_imbalanced_data_augmentation()
+        The model can employ callbacks to record "best model", tensorboard and early-stopping. If
+        early-stopping occurs, the best model is automatically reloaded.
 
+        The history of the optimisation process is also saved to file.
+        """
         tf.keras.backend.clear_session()
 
         best_model_file = os.path.join(self.output_dir, f'full_best_{ContactClassifier._METRIC_NAME}.keras')
@@ -330,110 +439,137 @@ class ContactClassifier(object):
                                     callbacks=callbacks,
                                     hidden_layer_sizes=[self.num_nodes] * self.num_layers,
                                     learning_rate=self.learning_rate)
+        if self.enable_bag:
+            logging.info('Classifier training will use balanced bagging')
+            # wrap the base classifier in a balanced bagging classifier
+            estimator = BalancedBaggingClassifier(estimator,
+                                                  n_estimators=self.num_estimators,
+                                                  replacement=False,
+                                                  random_state=self.seed,
+                                                  verbose=self.verbose)
+
 
         logging.info('Beginning model training')
-        model = estimator.fit(x_aug, y_aug)
-
-        logger.info('Loading best model weights')
-        model.model_.load_weights(best_model_file)
+        model = estimator.fit(self.x_train, self.y_train)
         self.model = model
 
-        logger.info(f'Full model score: {model.score(x, y)}')
+        if self.enable_bag:
+            # plot history of all estimators used in bagging
+            df_plots = []
+            for n, en in enumerate(model.estimators_, start=1):
+                _model = en._final_estimator
+                logger.info(f'Full dataset model score: {_model.score(self.x_full, self.y_full)}')
+                _df = pd.DataFrame(_model.history_) \
+                    .reset_index() \
+                    .rename(columns={'index': 'epoch',
+                                     f'precision_{n-1}': 'precision',
+                                     f'recall_{n-1}': 'recall'})
+                _df['estimator'] = n
+                df_plots.append(_df)
+            df_plots = pd.concat(df_plots)
 
-        df_plot = pd.DataFrame(model.history_).reset_index().rename(columns={'index': 'epoch'})
-        p = (ggplot(df_plot.query('epoch>=1').melt(id_vars='epoch'))
-             + geom_line(aes(x='epoch', y='value'), color='red')
-             + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
-        p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
+            p = (ggplot(df_plots.query('epoch>=1').melt(id_vars=['epoch','estimator']))
+                 + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
+                 + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6])
+                 + scale_color_discrete(name = "Estimator#"))
+            p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
 
-    def classify(self, df=None):
-        assert self.model is not None, 'Model has not been trained.'
-        if df is None:
-            df = self.df_combined.copy()
-        x = ContactClassifier._get_fit_variables(df)
-        pred_significance = self.model.predict_proba(x)
-        df['prob_intra'] = pred_significance[:, 1]
-        self.write_table(df, 'predictions', 'final predictions', index=False)
-        return df
+        else:
+            # plot history of the single estimator
+            logger.info(f'Full dataset model score: {model.score(self.x_full, self.y_full)}')
 
-    def train_kfold_model(self, n_folds):
+            df_plot = pd.DataFrame(model.history_).reset_index().rename(columns={'index': 'epoch'})
+            p = (ggplot(df_plot.query('epoch>=1').melt(id_vars='epoch'))
+                 + geom_line(aes(x='epoch', y='value'), color='red')
+                 + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
+            p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
 
-        tf.keras.backend.clear_session()
-
-        x, y, x_aug, y_aug = self.apply_imbalanced_data_augmentation()
-
-        hidden_layer_sizes = [self.num_nodes] * self.num_layers
-        kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=self.seed)
-
-        testing = {'precision': [],
-                      'recall': [],
-                      'accuracy': [],
-                      'loss': [],
-                      'crossentropy': [],
-                      'fbeta': [],
-                      }
-
-        histories = []
-
-        x_train, x_test, y_train, y_test = train_test_split(x_aug, y_aug,
-                                                            test_size=0.2, random_state=self.seed, stratify=y_aug)
-
-        logger.info(f'Number samples: train {x_train.shape[0]}, test {x_test.shape[0]}, all {x.shape[0]}')
-
-        for n_fold, (train_index, val_index) in enumerate(kfold.split(x_train, y_train), start=1):
-
-            logger.info(f"Computing fold: {n_fold}")
-
-            x_fit, y_fit = x_train[train_index], y_train[train_index]
-            x_val, y_val = x_train[val_index], y_train[val_index]
-
-            best_model_file = os.path.join(self.output_dir, f'kfold_bestmodel_{n_fold}.keras')
-
-            callbacks = [self.checkpoint_callback(best_model_file, self.verbose)]
-            if self.enable_tb:
-                callbacks.append(self.tensorboard_callback())
-            if self.enable_es:
-                callbacks.append(self.earlystopping_callback('fbeta', verbose=self.verbose))
-
-            estimator = KerasClassifier(model=create_baseline,
-                                        epochs=self.n_epochs,
-                                        batch_size=self.batch_size,
-                                        random_state=self.seed,
-                                        verbose=self.verbose,
-                                        callbacks=callbacks,
-                                        hidden_layer_sizes=hidden_layer_sizes,
-                                        learning_rate=self.learning_rate)
-
-            model = estimator.fit(x_fit, y_fit, validation_data=(x_val, y_val))
-
-            histories.append(pd.DataFrame(model.history_))
-
-            m = model.model_
-            m.load_weights(best_model_file)
-            results = m.evaluate(x_test, y_test, batch_size=250)
-            results = dict(zip(m.metrics_names, results))
-            for k, v in results.items():
-                testing[k].append(v)
-
-            tf.keras.backend.clear_session()
-
-        for k in testing:
-            logger.info(f'Test data - {k:>12} mean: {np.mean(testing[k]):8.5f}, sd: {np.std(testing[k]):8.5f}')
-
-        for n, df in enumerate(histories, start=1):
-            df['fold'] = n
-
-        df_plot = pd.concat(histories)
-        _tra = df_plot.loc[:, ~df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
-        _tra['set_type' ] = 'training'
-        _val = df_plot.loc[:, df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
-        _val['set_type' ] = 'validation'
-        _val.columns = _tra.columns
-        df_plot = pd.concat([_val, _tra]).reset_index()
-        df_plot.melt(id_vars=['index', 'set_type', 'fold'])
-
-        p = (ggplot(df_plot.query('index>=1').melt(id_vars=['index', 'set_type', 'fold']))
-             + geom_point(aes(x='index', y='value', group='set_type', color='set_type'), size=0.5)
-             # + geom_line(aes(x='index', y='value', group='set_type', color='set_type'))
-             + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6], legend_position="right"))
-        p.save(filename=os.path.join(self.output_dir, 'kfold_model.svg'), verbose=False)
+    # TODO kfold needs better awareness for supporting the new logic to set aside a
+    #  test set instantiation time. Currently, this logic is contained with the method
+    #  below, and is now redundant. However, there is interference, as we might also have
+    #  the case that no test set was set aside. The folds need to be analyzed using balanced
+    #  data, which includes test, training and validation data.
+    # def train_kfold_model(self, n_folds):
+    #
+    #     assert self.test_size is not None, 'test_size must be set to use kfold cross-validation'
+    #
+    #     x_aug, y_aug = self.apply_imbalanced_data_augmentation()
+    #
+    #     tf.keras.backend.clear_session()
+    #
+    #     hidden_layer_sizes = [self.num_nodes] * self.num_layers
+    #     kfold = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=self.seed)
+    #
+    #     testing = {'precision': [],
+    #                   'recall': [],
+    #                   'accuracy': [],
+    #                   'loss': [],
+    #                   'crossentropy': [],
+    #                   'fbeta': [],
+    #                   }
+    #
+    #     histories = []
+    #     # TODO this is now redundant of the class can split data
+    #     #   so remove when refactoring
+    #     # x_train, x_test, y_train, y_test = train_test_split(x_aug, y_aug,
+    #     #                                                     test_size=0.2, random_state=self.seed, stratify=y_aug)
+    #
+    #     logger.info(f'Number samples: train {x_train.shape[0]}, test {x_test.shape[0]}')
+    #
+    #     for n_fold, (train_index, val_index) in enumerate(kfold.split(x_train, y_train), start=1):
+    #
+    #         logger.info(f"Computing fold: {n_fold}")
+    #
+    #         x_fit, y_fit = x_train[train_index], y_train[train_index]
+    #         x_val, y_val = x_train[val_index], y_train[val_index]
+    #
+    #         best_model_file = os.path.join(self.output_dir, f'kfold_bestmodel_{n_fold}.keras')
+    #
+    #         callbacks = [self.checkpoint_callback(best_model_file, self.verbose)]
+    #         if self.enable_tb:
+    #             callbacks.append(self.tensorboard_callback())
+    #         if self.enable_es:
+    #             callbacks.append(self.earlystopping_callback('fbeta', verbose=self.verbose))
+    #
+    #         estimator = KerasClassifier(model=create_baseline,
+    #                                     epochs=self.n_epochs,
+    #                                     batch_size=self.batch_size,
+    #                                     random_state=self.seed,
+    #                                     verbose=self.verbose,
+    #                                     callbacks=callbacks,
+    #                                     hidden_layer_sizes=hidden_layer_sizes,
+    #                                     learning_rate=self.learning_rate)
+    #
+    #         model = estimator.fit(x_fit, y_fit, validation_data=(x_val, y_val))
+    #
+    #         histories.append(pd.DataFrame(model.history_))
+    #
+    #         m = model.model_
+    #         m.load_weights(best_model_file)
+    #         results = m.evaluate(x_test, y_test, batch_size=250)
+    #         results = dict(zip(m.metrics_names, results))
+    #         for k, v in results.items():
+    #             testing[k].append(v)
+    #
+    #         tf.keras.backend.clear_session()
+    #
+    #     for k in testing:
+    #         logger.info(f'Test data - {k:>12} mean: {np.mean(testing[k]):8.5f}, sd: {np.std(testing[k]):8.5f}')
+    #
+    #     for n, df in enumerate(histories, start=1):
+    #         df['fold'] = n
+    #
+    #     df_plot = pd.concat(histories)
+    #     _tra = df_plot.loc[:, ~df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
+    #     _tra['set_type' ] = 'training'
+    #     _val = df_plot.loc[:, df_plot.columns.str.startswith('val_') | (df_plot.columns == 'fold')].copy()
+    #     _val['set_type' ] = 'validation'
+    #     _val.columns = _tra.columns
+    #     df_plot = pd.concat([_val, _tra]).reset_index()
+    #     df_plot.melt(id_vars=['index', 'set_type', 'fold'])
+    #
+    #     p = (ggplot(df_plot.query('index>=1').melt(id_vars=['index', 'set_type', 'fold']))
+    #          + geom_point(aes(x='index', y='value', group='set_type', color='set_type'), size=0.5)
+    #          # + geom_line(aes(x='index', y='value', group='set_type', color='set_type'))
+    #          + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6], legend_position="right"))
+    #     p.save(filename=os.path.join(self.output_dir, 'kfold_model.svg'), verbose=False)
