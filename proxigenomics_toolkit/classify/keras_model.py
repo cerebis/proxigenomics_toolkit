@@ -11,6 +11,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from plotnine import *
 from scikeras.wrappers import KerasClassifier
 from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.metrics import precision_recall_curve
 from tensorflow.keras.layers import Input, Dense, Dropout
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.metrics import Precision, Recall, Metric
@@ -120,6 +121,7 @@ class ContactClassifier(object):
     def __init__(self,
                  output_dir,
                  complete_labelled_file,
+                 hq_cluster_file,
                  seed,
                  n_epochs,
                  batch_size,
@@ -136,6 +138,7 @@ class ContactClassifier(object):
 
         :param output_dir: parent directory to which results are written
         :param complete_labelled_file: labelled training data
+        :param hq_cluster_file: file containing cluster ids pertaining to those deemed high-quality
         :param seed: a random seed
         :param n_epochs: number of epochs for training
         :param batch_size: batch size for training
@@ -152,6 +155,7 @@ class ContactClassifier(object):
 
         self.output_dir = output_dir
         self.complete_labeled_file = complete_labelled_file
+        self.hq_cluster_file = hq_cluster_file
         self.seed = seed
         self.n_epochs = n_epochs
         self.batch_size = batch_size
@@ -169,6 +173,7 @@ class ContactClassifier(object):
         self.df_complete = pd.read_csv(complete_labelled_file)
         # separate out the complete training set
         self.df_full_training = ContactClassifier._separate_training(self.df_complete)
+        self.hq_clusters = set(pd.read_csv(hq_cluster_file)['cluster'].values)
 
         self.model = None
         self.x_full = None
@@ -394,20 +399,6 @@ class ContactClassifier(object):
     #             experiment('logs/hparam_tuning/' + experiment_name, hparams)
     #             experiment_no += 1
 
-    def classify(self, df=None):
-        """
-        Apply the trained model to the data and write the predictions to a file.
-        :param df: optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
-        :return: updated dataframe with probabilities column
-        """
-        assert self.model is not None, 'Model has not been trained.'
-        if df is None:
-            df = self.df_complete.copy()
-        x = ContactClassifier._extract_x(df)
-        df['prob_intra'] = self.model.predict_proba(x)[:, 1]
-        self.write_table(df, 'predictions', 'final predictions', index=False)
-        return df
-
     def train_full_model(self):
         """
         Train the model on the full dataset.
@@ -483,6 +474,58 @@ class ContactClassifier(object):
                  + geom_line(aes(x='epoch', y='value'), color='red')
                  + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
             p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
+
+    def predict_best_threshold(self, df, plot=False):
+        """
+        Find the highest value for f1-score and associated threshold probability
+        :param df: training data
+        :return: best f1_score and threshold
+        """
+        df_test = df.query('cluster_name in @self.hq_clusters')
+        precision, recall, thres = precision_recall_curve(df_test['intra_z'], df_test['pr_intracellular'])
+        # avoid zeros in the denominator
+        denominator = recall+precision
+        denominator[denominator == 0] = 0.01
+        f1_scores = 2 * recall * precision / denominator
+        ix_max = np.argmax(f1_scores)
+        logger.info(f'Probability threshold of {thres[ix_max]:.5f} achieves the '
+                    f'highest F1-score: {f1_scores[ix_max]:.5f}')
+
+        if plot:
+            df_plot = pd.DataFrame({'Precision': precision[1:],
+                                    'Recall': recall[1:],
+                                    'F1-score': f1_scores[1:],
+                                    'Pr_threshold': thres})
+            p = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
+                    + geom_line()
+                    + scale_x_continuous(breaks=np.arange(0, 1.01, 0.1))
+                    + scale_y_continuous(breaks=np.arange(0, 1.01, 0.1))
+                    + theme(figure_size=[10,8]))
+            p.save(filename=os.path.join(self.output_dir, 'precision_recall_curve.svg'), verbose=False)
+
+        return f1_scores[ix_max], thres[ix_max]
+
+    def classify(self, df=None):
+        """
+        Apply the trained model to the data and write the predictions to a file.
+        :param df: optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
+        :return: updated dataframe with probabilities column
+        """
+        assert self.model is not None, 'Model has not been trained.'
+        if df is None:
+            df = self.df_complete.copy()
+        x = ContactClassifier._extract_x(df)
+        df['pr_intracellular'] = self.model.predict_proba(x)[:, 1]
+
+        # Using the training data, find the threshold probability returning the highest f1-score.
+        f1_best, thres_best = self.predict_best_threshold(df, plot=True)
+        # Use this threshold as a decision boundary on whether a contact is intra-cellular.
+        df = df.assign(is_intracellular = lambda x: x.pr_intracellular > thres_best)
+        # rename the original column to reduce confusion
+        df.rename(columns={'intra': 'intracluster'}, inplace=True)
+        self.write_table(df, 'predictions', 'final predictions', index=False)
+        return df
+
 
     # TODO kfold needs better awareness for supporting the new logic to set aside a
     #  test set instantiation time. Currently, this logic is contained with the method
