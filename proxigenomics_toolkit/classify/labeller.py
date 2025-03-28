@@ -172,7 +172,9 @@ class DataLabeller(object):
     OUTPUT_TABLES = {
         'training': 'training.csv',
         'undecided': 'undecided.csv',
-        'combined': 'combined.csv'
+        'combined': 'combined.csv',
+        'hq_clusters': 'hq_clusters.csv',
+        'pure_clusters': 'pure_clusters.csv',
     }
 
     @staticmethod
@@ -227,12 +229,20 @@ class DataLabeller(object):
         df_spur = pd.read_csv(self.spurious_file, index_col=0)
         # Read table of all real contacts (not the symbolic closed-sequence to singleton-cluster)
         df_all = pd.read_csv(self.all_contacts_file, index_col=0)
+
+        # Remove unwanted columns
+        df_spur = df_spur.drop(columns=list(set(df_spur.columns) & {'cpcc', 'cpss', 'pr_norm'}))
+        df_all = df_all.drop(columns=list(set(df_all.columns) & {'cpcc', 'cpss', 'pr_norm'}))
+
         logger.info(f'Before exclusion counts spurious: {len(df_spur)}, all: {len(df_all)}')
 
         hq_clusters = high_quality_clusters(self.binning_qc_file,
                                             DataLabeller._HQ_COMPL,
                                             DataLabeller._HQ_CONTAM,
                                             self.qc_method)
+        # keep a record of those clusters deemed high-quality
+        self.write_table(pd.DataFrame({'cluster': list(hq_clusters)}), 'hq_clusters',
+                         'clusters deemed high quality', index=False)
 
         # Reduce false positive rate in spurious table by keeping only
         # contacts involving sufficiently complete and uncontaminated clusters.
@@ -317,6 +327,10 @@ class DataLabeller(object):
             pure_clusters = high_quality_clusters(self.binning_qc_file,
                                                   DataLabeller._PURE_COMPL, DataLabeller._PURE_CONTAM,
                                                   self.qc_method)
+            # keep a record of those clusters deemed as "pure"
+            self.write_table(pd.DataFrame({'cluster': list(pure_clusters)}), 'pure_clusters',
+                             'clusters selected as pure', index=False)
+
             df_suspected = identify_suspected_intra(df_undecided.reset_index(), pure_clusters,
                                                     DataLabeller._SUSP_MIN_SIM,
                                                     DataLabeller._SUSP_MIN_NUM_OBS,
