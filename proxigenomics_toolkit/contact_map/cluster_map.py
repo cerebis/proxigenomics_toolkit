@@ -475,15 +475,19 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
             partitions = algorithm(g)
 
         logger.debug(f'Cluster {cl_id} was split into {len(partitions)}')
-        for members in partitions:
+        for member_seqs in partitions:
             n_new += 1
-            _seqs = np.sort([name2id[nm] for nm in members])
+            # look up the internal ids for these sequence names
+            _seq_ids = np.array([name2id[nm] for nm in member_seqs])
+            # find the element order by descending ID.
+            ix_ord = np.argsort(_seq_ids)
             # negative ints as temporary keys
             revised[-n_new] = {
-                'seq_ids': _seqs,
-                'extent': contact_map.order.lengths()[_seqs].sum(),
+                'seq_names': np.array(list(member_seqs))[ix_ord],
+                'seq_ids': _seq_ids[ix_ord],
+                'extent': contact_map.order.lengths()[_seq_ids].sum(),
                 'status': 'revised',
-                'report': np.squeeze(np.vstack([seq2report[_si] for _si in _seqs]))
+                'report': np.squeeze(np.vstack([seq2report[_si] for _si in _seq_ids]))
             }
 
     if only_new:
