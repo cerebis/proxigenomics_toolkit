@@ -433,6 +433,12 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
     }
     try:
         algorithm = algorithm_repository[algorithm_name]
+        if algorithm_name == 'greedy_modularity':
+            if alg_args is None:
+                alg_args = {}
+            if 'best_n' not in alg_args:
+                alg_args['best_n'] = 2
+
         logger.info(f'Revising selected clusters using: {algorithm_name}')
     except KeyError:
         raise ApplicationException(f'Unknown community detection algorithm {algorithm_name}. '
