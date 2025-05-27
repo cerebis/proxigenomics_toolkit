@@ -3,8 +3,8 @@ requires = ["setuptools>=45", "wheel", "Cython", "numpy<=1.26"]
 build-backend = "setuptools.build_meta"
 
 [project]
+dynamic = ["version"]
 name = "proxigenomics_toolkit"
-version = '0.9.dev0'
 description = "A collection of classes and methods for the analysis of 3C-based sequencing data"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -16,6 +16,7 @@ authors = [
 keywords = ["bioinformatics", "3C", "genomics", "metagenomics"]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Operating System :: POSIX :: Linux",
     "Intended Audience :: Science/Research",
@@ -57,9 +58,12 @@ Homepage = "https://github.com/cerebis/proxigenomics_toolkit"
 Repository = "https://github.com/cerebis/proxigenomics_toolkit.git"
 
 [tool.setuptools]
-packages = ["proxigenomics_toolkit"]
+#packages = ["proxigenomics_toolkit"]
 include-package-data = true
 zip-safe = false
 
 [tool.setuptools.package-data]
 proxigenomics_toolkit = ["external/*"]
+
+[tool.setuptools.packages]
+find = {}
