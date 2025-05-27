@@ -22,14 +22,25 @@ A number of toolkit dependencies are built from source and as such bring along a
   - bzip2
   - curl 
   - openssl
+  - OpenMP
 
+At installation time, users must ensure that the above libraries are accessible to the chosen C++ compiler. When not installed at the system-level, the employed build tools (such as Make, Cmake, C/C++ compiler, etc) may be unaware of their existence. In such cases, it is possible to specify their location using shell environment variables.
+
+Eg. On MacOS, Homebrew can be used to install OpenMP as the package "libomp", which by default is symbolically linked at `/opt/homebrew/opt/libomp/`. These locations would be taken up automatically during installation if the following environment variables are set.
+```bash
+# When invoking C compiler
+export CPPFLAGS="/opt/homebrew/opt/libomp/include"
+# When invoking C++ compiler
+export CXXFLAGS="/opt/homebrew/opt/libomp/include"
+# Linker
+export LDFLAGS="/opt/homebrew/opt/libomp/lib"
+```
 
 ## Installation
 
 ###Requirements
 - Python 2.7
 - GNU C/C++ compiler (not clang)
-
 
 Step 1. install NumPy and Cython
 
