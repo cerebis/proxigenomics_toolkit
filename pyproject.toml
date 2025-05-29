@@ -58,7 +58,6 @@ Homepage = "https://github.com/cerebis/proxigenomics_toolkit"
 Repository = "https://github.com/cerebis/proxigenomics_toolkit.git"
 
 [tool.setuptools]
-#packages = ["proxigenomics_toolkit"]
 include-package-data = true
 zip-safe = false
 
