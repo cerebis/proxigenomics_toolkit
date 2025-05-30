@@ -11,7 +11,7 @@ with open('README.md', 'r') as fh:
     long_description = fh.read()
 
 version_str = None
-VERSION_FILE = "{}/_version.py".format(pkg_name)
+VERSION_FILE = f'src/{pkg_name}/_version.py'
 with open(VERSION_FILE, "rt") as vh:
     for _line in vh:
         mo = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", _line, re.M)
@@ -20,7 +20,7 @@ with open(VERSION_FILE, "rt") as vh:
             break
 
 if version_str is None:
-    raise RuntimeError("Unable to find version string in {}".format(VERSION_FILE))
+    raise RuntimeError(f'Unable to find version string in {VERSION_FILE}')
 
 
 class TarballExtension(Extension, object):
@@ -50,7 +50,7 @@ class TarballExtension(Extension, object):
         """
         :return: a name for the tarball based on the extension name
         """
-        return '{}_tarball.tar.gz'.format(self.name)
+        return f'{self.name}_tarball.tar.gz'
 
     @property
     def exe_name(self):
@@ -118,7 +118,8 @@ setup(
     description='Tools for 3C-based sequencing',
     long_description=long_description,
     url='https://github.com/cerebis/proxigenomics_toolkit',
-    packages=find_packages(),
+    packages=find_packages('src'),
+    package_dir={'': 'src'},
     license='GNU Affero General Public License v3',
     platforms='Linux-86_x64',
     include_package_data=True,

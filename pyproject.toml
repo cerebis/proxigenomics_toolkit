@@ -64,5 +64,12 @@ zip-safe = false
 [tool.setuptools.package-data]
 proxigenomics_toolkit = ["external/*"]
 
-[tool.setuptools.packages]
-find = {}
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["proxi*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+addopts = [
+    "--import-mode=importlib",
+]
