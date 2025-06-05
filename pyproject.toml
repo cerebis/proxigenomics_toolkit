@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "Cython", "numpy<=1.26"]
+requires = ["setuptools==80.9.0", "wheel", "Cython", "numpy<=1.26"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -53,6 +53,16 @@ dependencies = [
     "plotnine"
 ]
 
+[dependency-groups]
+docs = ["sphinx"]
+test = ["pytest == 8.3.5"]
+lint = ["mypy == 1.16.0", "ruff == 0.11.12"]
+dev = [
+    {include-group = "test"},
+    {include-group = "lint"},
+    {include-group = "docs"},
+]
+
 [project.urls]
 Homepage = "https://github.com/cerebis/proxigenomics_toolkit"
 Repository = "https://github.com/cerebis/proxigenomics_toolkit.git"
@@ -66,10 +76,38 @@ proxigenomics_toolkit = ["external/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["proxi*"]
+include = ["proxigenomics_toolkit*"]
+exclude = ["proxigenomics_toolkit.egg-info*"]
 namespaces = false
 
 [tool.pytest.ini_options]
 addopts = [
     "--import-mode=importlib",
 ]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+disallow_untyped_defs = true
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.ruff.lint]
+select = [
+    "F",   # pyflakes
+    "E",   # pycodestyle
+    "I",   # isort
+    "ANN", # flake8 type annotations
+    "RUF", # ruff-specific rules
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

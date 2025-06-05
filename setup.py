@@ -1,6 +1,6 @@
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext as build_ext_orig
-from shutil import copyfile
+import shutil
 import subprocess
 import os
 import re
@@ -80,7 +80,7 @@ class build_tarball(build_ext_orig, object):
     """
     Build a C/C++ Make projects from remote tarballs and place the binaries in proxigenomics_toolkit/external
 
-    Build at install time allows easier support of runtime architectures which vary widely in age, making
+    Build at install-time allows easier support of runtime architectures which vary widely in age, making
     supplying a universal static binaries for external helpers difficult.
     """
     def run(self):
@@ -95,18 +95,30 @@ class build_tarball(build_ext_orig, object):
         elif wget_exists():
             self.spawn(['wget', '-O', ext.tarball, ext.url])
         else:
-            raise IOError('Building {} requires either curl or wget be installed'.format(pkg_name))
+            raise IOError(f'Building {pkg_name} requires either curl or wget be installed')
 
-        build_dir = os.path.join(self.build_lib, pkg_name)
+        if self.inplace:
+            build_dir = os.path.join('src', pkg_name)
+        else:
+            build_dir = os.path.join(self.build_lib, pkg_name)
+
         # rename parent folder to something simple and consistent
-        self.spawn([ext.tar_cmd, '--transform=s,[^/]*,{},'.format(ext.name), '-xzvf', ext.tarball])
+        self.spawn([ext.tar_cmd,
+                    '--no-same-permissions',
+                    f'--transform=s,[^/]*,{ext.name},',
+                    '-xzvf',
+                    ext.tarball])
 
         # build
         self.spawn(['make', '-j4', '-C', ext.name])
         # copy the built binary to package folder
         src = os.path.join(ext.name, ext.exe_path)
         dest = os.path.join(build_dir, 'external', ext.exe_name)
-        copyfile(src, dest)
+        # remove existing binary, which will require permission change
+        if os.path.exists(dest):
+            os.chmod(dest, 0o777)
+            os.remove(dest)
+        shutil.copyfile(src, dest)
         os.chmod(dest, 0o555)
 
 
