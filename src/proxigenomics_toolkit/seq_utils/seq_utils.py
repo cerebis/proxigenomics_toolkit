@@ -22,10 +22,10 @@ import multiprocessing
 logger = logging.getLogger(__name__)
 
 # translation table used for complementation
-COMPLEMENT_TABLE = str.maketrans('acgtumrwsykvhdbnACGTUMRWSYKVHDBN',
-                                 'TGCAAnnnnnnnnnnnTGCAANNNNNNNNNNN')
-
-
+# COMPLEMENT_TABLE = str.maketrans('acgtumrwsykvhdbnACGTUMRWSYKVHDBN',
+#                                  'TGCAAnnnnnnnnnnnTGCAANNNNNNNNNNN')
+COMPLEMENT_TABLE = str.maketrans('acgtbdefhijklmnopqrsuvwxyzACGTBDEFHIJKLMNOPQRSUVWXYZ',
+                                 'tgcannnnnnnnnnnnnnnnnnnnnnTGCANNNNNNNNNNNNNNNNNNNNNN')
 def revcomp(seq):
     """
     Reverse complement a string representation of a sequence. This uses string.translate.
@@ -82,10 +82,12 @@ def count_fasta_sequences(file_name):
     else:
         proc_read = subprocess.Popen(['grep', r'^>', file_name], stdout=subprocess.PIPE)
 
-    n = 0
-    for _ in proc_read.stdout:
-        n += 1
-    return n
+    seq_count = sum(1 for _ in proc_read.stdout)
+
+    if seq_count == 0:
+        raise NoRecordsException('fasta', file_name)
+
+    return seq_count
 
 
 class IndexedFasta(Mapping):

@@ -20,7 +20,7 @@ def save_object(file_name, obj):
     :param file_name: output file name
     :param obj: object to serialize
     """
-    with open_output(file_name, compress='gzip') as out_h:
+    with open_output(file_name, compress='gzip', mode='wb') as out_h:
         pickle.dump(obj, out_h)
 
 
@@ -58,7 +58,7 @@ def open_input(file_name, mode='rb'):
     return open(file_name, mode)
 
 
-def open_output(file_name, append=False, compress=None):
+def open_output(file_name, append=False, compress=None, mode='w'):
     """
     Open a text stream for reading or writing. Compression can be enabled
     with either 'bzip2' or 'gzip'. Additional option for gzip compression
@@ -67,10 +67,15 @@ def open_output(file_name, append=False, compress=None):
     :param file_name: file name of output
     :param append: append to any existing file
     :param compress: gzip, bzip2
+    :param mode: file access mode, default 'w' for writing, 'a' for appending.
     :return:
     """
-
-    mode = 'w' if not append else 'w+'
+    if append:
+        if not mode.endswith('+'):
+            mode += '+'
+    else:
+        if mode.endswith('+'):
+            raise IOError(f'Append set to false while mode was {mode}')
 
     if compress == 'bzip2':
         if not file_name.endswith('.bz2'):
@@ -81,22 +86,24 @@ def open_output(file_name, append=False, compress=None):
     elif compress == 'gzip':
         if not file_name.endswith('.gz'):
             file_name += '.gz'
-        return io.BufferedWriter(gzip.open(file_name, mode))
+        return gzip.open(file_name, mode)
     else:
-        return io.BufferedWriter(io.FileIO(file_name, mode))
+        out_h = io.BufferedWriter(io.FileIO(file_name, mode))
+        if 'b' not in mode:
+            return io.TextIOWrapper(out_h)
+        return out_h
 
 
-def multicopy_tostream(file_name, *ostreams, **kwargs):
+def multicopy_tostream(file_name, *ostreams, bufsize=None, binary_io=False):
     """
     Copy an input file to multiple output streams.
     :param file_name: input file name
     :param ostreams: output streams
-    :param kwargs: optional parameters: write_mode (default 'w'), compress [gzip, bzip2] default: None
+    :param bufsize: buffer size
+    :param binary_io: use binary I/O for output files. Default: False.
     :return:
     """
-    bufsize = DEF_BUFFER if 'bufsize' not in kwargs else kwargs['bufsize']
-
-    with open(file_name, 'r') as in_h:
+    with open(file_name, 'rb' if binary_io else 'r') as in_h:
         done = False
         while not done:
             buf = in_h.read(bufsize)
@@ -106,35 +113,42 @@ def multicopy_tostream(file_name, *ostreams, **kwargs):
                 oi.write(buf)
 
 
-def multicopy_tofile(file_name, *onames, **kwargs):
+def multicopy_tofile(file_name, *output_names, bufsize=None, binary_io=False, compress=None):
     """
     Copy an input file to multiple output files.
     :param file_name: input file name
-    :param onames: output file names
-    :param kwargs: optional parameters: write_mode (default 'w'), compress [gzip, bzip2] default: None
+    :param output_names: output file names
+    :param bufsize: buffer size
+    :param binary_io: use binary I/O for output files. Default: False.
+    :param compress: gzip, bzip2, None
     :return:
     """
-    bufsize = DEF_BUFFER if 'bufsize' not in kwargs else kwargs['bufsize']
-    write_mode = "w" if 'write_mode' not in kwargs else kwargs['write_mode']
-    compress = None if 'compress' not in kwargs else kwargs['compress']
+    assert compress is None or compress in ['gzip', 'bzip2'], 'compress must be \"gzip\" or \"bzip2\"'
+    if binary_io:
+        read_mode = 'rb'
+        write_mode = 'wb'
+    else:
+        read_mode = 'r'
+        write_mode = 'w'
 
     out_h = None
     try:
-        in_h = open(file_name, 'r')
-        out_h = [open_output(oi, write_mode, compress) for oi in onames]
+        print(read_mode,write_mode)
+        in_h = open(file_name, read_mode)
+        out_h = [open_output(_name, compress=compress, mode=write_mode) for _name in output_names]
 
         done = False
         while not done:
             buf = in_h.read(bufsize)
             if not buf:
                 done = True
-            for oi in out_h:
-                oi.write(buf)
+            for _hndl in out_h:
+                _hndl.write(buf)
     finally:
         if out_h:
-            for oi in out_h:
-                if oi:
-                    oi.close()
+            for _hndl in out_h:
+                if _hndl:
+                    _hndl.close()
 
 
 def write_to_stream(stream, data, fmt='plain'):
@@ -152,6 +166,8 @@ def write_to_stream(stream, data, fmt='plain'):
         json.dump(data, stream, indent=1)
     elif fmt == 'plain':
         stream.write('{0}\n'.format(data))
+    else:
+        raise ValueError('Unsupported format: {0}'.format(fmt))
 
 
 def read_from_stream(stream, fmt='yaml'):
@@ -168,50 +184,6 @@ def read_from_stream(stream, fmt='yaml'):
     if fmt == 'yaml':
         return yaml.safe_load(stream)
     elif fmt == 'json':
-        return json_load_byteified(stream)
-
-
-"""
-Code below taken from Stack Exchange question.
-http://stackoverflow.com/questions/956867/how-to-get-string-objects-instead-of-unicode-ones-from-json-in-python
-
-JSON loading with UTF-8 encoding.
-
-The following functions returns JSON results where Unicode strings are converted to UTF-8. Potentially an
-unnecessary step as Python will handle referencing these strings transparently, but I wish to keep exchanged
-data tables in a single encoding.
-
-Attribution: Mirec Miskuf
-"""
-
-
-def json_loads_byteified(json_text):
-    return _byteify(
-        json.loads(json_text, object_hook=_byteify),
-        ignore_dicts=True
-    )
-
-
-def json_load_byteified(file_handle):
-    return _byteify(
-        json.load(file_handle, object_hook=_byteify),
-        ignore_dicts=True
-    )
-
-
-def _byteify(data, ignore_dicts=False):
-    # if this is a unicode string, return its string representation
-    if isinstance(data, str):
-        return data.encode('utf-8')
-    # if this is a list of values, return list of byteified values
-    if isinstance(data, list):
-        return [_byteify(item, ignore_dicts=True) for item in data]
-    # if this is a dictionary, return dictionary of byteified keys and values
-    # but only if we haven't already byteified it
-    if isinstance(data, dict) and not ignore_dicts:
-        return {
-            _byteify(key, ignore_dicts=True): _byteify(value, ignore_dicts=True)
-            for key, value in data.items()
-            }
-    # if it's anything else, return it in its original form
-    return data
+        return json.load(stream)
+    else:
+        raise ValueError('Unsupported format: {0}'.format(fmt))

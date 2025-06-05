@@ -47,6 +47,11 @@ class ZeroLengthException(ApplicationException):
         super(ZeroLengthException, self).__init__('Sequence [{}] has zero length'.format(seq_name))
 
 
+class NoRecordsException(ApplicationException):
+    """No records were found"""
+    def __init__(self, file_format, file_name):
+        super(NoRecordsException, self).__init__(f'No {file_format} format records were found in {file_name}')
+
 class NotFoundException(ApplicationException):
     """General Not Found exception"""
     def __init__(self, context, _id):

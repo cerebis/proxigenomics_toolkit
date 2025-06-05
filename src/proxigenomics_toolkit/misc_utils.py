@@ -21,10 +21,10 @@ def make_dir(path, exist_ok=False):
     """
     if not os.path.exists(path):
         os.mkdir(path)
-    elif not exist_ok:
-        raise IOError('output directory already exists!')
     elif os.path.isfile(path):
         raise IOError('output path already exists and is a file!')
+    elif not exist_ok:
+        raise IOError('output directory already exists!')
 
 
 def app_path(subdir, filename):
@@ -46,6 +46,8 @@ def package_path(subdir, filename):
     :param filename: name of file
     :return: absolute path
     """
+    assert subdir, 'subdir cannot be empty'
+    assert filename, 'filename cannot be empty'
     return os.path.join(get_python_lib(), __name__.split('.')[0], subdir, filename)
 
 
