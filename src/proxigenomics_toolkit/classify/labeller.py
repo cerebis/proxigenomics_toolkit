@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import linear_kernel
 
 from .embedding import MetagenomeEmbeddings
+from .significance import robust_read_csv
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -160,6 +161,8 @@ class DataLabeller(object):
     _HQ_CONTAM = 10
     _PURE_COMPL = 50
     _PURE_CONTAM = 10
+    _MQ_COMPL = 30
+    _MQ_CONTAM = 10
 
     _SUSP_MIN_CLUSTER_EXTENT = 1_000_000
     _SUSP_MIN_SEQ_LENGTH = 500_000
@@ -171,7 +174,8 @@ class DataLabeller(object):
         'training': 'training.csv',
         'undecided': 'undecided.csv',
         'combined': 'combined.csv',
-        'hq_clusters': 'hq_clusters.csv',
+        'spurious_acceptable_clusters': 'spurious_acceptable_clusters.csv',
+        'intra_acceptable_clusters': 'intra_acceptable_clusters.csv',
         'pure_clusters': 'pure_clusters.csv',
     }
 
@@ -186,6 +190,7 @@ class DataLabeller(object):
                  faidx_file,
                  spurious_file,
                  all_contacts_file,
+                 excluded_file,
                  binning_qc_file,
                  qc_method='CheckMv1',
                  use_suspected=False,
@@ -197,12 +202,20 @@ class DataLabeller(object):
         self.faidx_file = faidx_file
         self.spurious_file = spurious_file
         self.all_contacts_file = all_contacts_file
+        self.excluded_file = excluded_file
         self.binning_qc_file = binning_qc_file
         self.use_suspected = use_suspected
         self.qc_method = qc_method
+
         self.embeddings = MetagenomeEmbeddings(self.embeddings_file,
                                                self.clustering_file,
                                                self.faidx_file)
+
+        self.excluded_seqs = set(robust_read_csv(self.excluded_file,
+                                                 {'seq': str}).seq.values)
+        logger.info(f'There were {len(self.excluded_seqs)} sequences excluded from '
+                    'clustering and therefore from training.')
+
         if plot_projection:
             self.embeddings.plot_scatter_projection(
                 os.path.join(output_dir, 'Embedding_UMAP_Manhattan_projection.svg'),
@@ -232,23 +245,28 @@ class DataLabeller(object):
         df_spur = df_spur.drop(columns=list(set(df_spur.columns) & {'cpcc', 'cpss', 'pr_norm'}))
         df_all = df_all.drop(columns=list(set(df_all.columns) & {'cpcc', 'cpss', 'pr_norm'}))
 
-        logger.info(f'Before exclusion counts spurious: {len(df_spur)}, all: {len(df_all)}')
+        logger.info(f'Spurious pool: count before exclusion: {len(df_spur)}, all: {len(df_all)}')
 
         hq_clusters = high_quality_clusters(self.binning_qc_file,
                                             DataLabeller._HQ_COMPL,
                                             DataLabeller._HQ_CONTAM,
                                             self.qc_method)
         # keep a record of those clusters deemed high-quality
-        self.write_table(pd.DataFrame({'cluster': list(hq_clusters)}), 'hq_clusters',
+        self.write_table(pd.DataFrame({'cluster': list(hq_clusters)}), 'spurious_acceptable_clusters',
                          'clusters deemed high quality', index=False)
 
         # Reduce false positive rate in spurious table by keeping only
         # contacts involving sufficiently complete and uncontaminated clusters.
         n_before = len(df_spur)
-        df_spur = df_spur.query('cluster_name in @hq_clusters').copy()
-        logger.info(f'After filtering for high quality clusters: in={n_before}, out={len(df_spur)}')
+        df_spur = df_spur.query('cluster_name in @hq_clusters')
+        logger.info(f'Spurious pool: after filtering for high quality clusters: in={n_before}, out={len(df_spur)}')
+        # and any contacts involving sequences intentionally held-out from clustering
+        n_before = len(df_spur)
+        df_spur = df_spur.query('seq not in @self.excluded_seqs').copy()
+        logger.info(f'Spurious pool: after excluding sequences held-out from clustering: in={n_before}, out={len(df_spur)}')
+
         df_all = anti_join(df_all, df_spur)
-        logger.info(f'Applying exclusion to all-contacts: {len(df_all)}')
+        logger.info(f'General pool: after subtracting spurious set: {len(df_all)}')
 
         # concatenate the two tables, assigning a group label for later separation.
         df_all['group'] = DataLabeller._GROUP_A
@@ -281,7 +299,8 @@ class DataLabeller(object):
                         .apply(normalised_out_degree, include_groups=False)
         # Log-transform and standardise the linkage coefficient, as its distribution is far
         # from smooth, with significant mass close to zero (spurious contacts).
-        df_cmb['linkage'] = scaler(np.log(linkage))[0]
+        # df_cmb['linkage'] = scaler(np.log(linkage))[0]
+        df_cmb['linkage'] = linkage
 
         logger.info('Standardising all observations together')
         df_cmb = transform(df_cmb)
@@ -301,19 +320,29 @@ class DataLabeller(object):
                               ' and length_u < length_v'
                               f' and length_v > {DataLabeller._MIN_EXTENT}') \
                        .set_index(['seq','cluster'])
-        logger.info(f'Contacts after basic filtering: {len(df_all)} ')
+        logger.info(f'General pool: after basic filtering: {len(df_all)} ')
 
         # STEP TWO: keep those that are intra-cluster contacts (intra=True) where the cluster is of reasonable size
         df_signif = df_all.query(f'intra and length_v > {DataLabeller._BIG_EXTENT}').copy()
-        logger.info(f'Reliable intra-cluster contacts: {len(df_signif)}')
+        logger.info(f'Intra pool: initial contact count: {len(df_signif)}')
+
+        mq_clusters = high_quality_clusters(self.binning_qc_file,
+                                            DataLabeller._MQ_COMPL,
+                                            DataLabeller._MQ_CONTAM,
+                                            self.qc_method)
+        self.write_table(pd.DataFrame({'cluster': list(mq_clusters)}), 'intra_acceptable_clusters',
+                         'clusters deemed medium quality', index=False)
+        n_before = len(df_signif)
+        df_signif = df_signif.query('cluster_name in @mq_clusters').copy()
+        logger.info(f'Intra pool: after excluding contaminated clusters: in={n_before}, out={len(df_signif)}')
 
         # STEP THREE: prepare a table of undecided contacts by removing those determined to be reliably intra or inter
         # intra removal
         df_undecided = df_all[~df_all.index.isin(df_signif.index)].copy()
-        logger.info(f'Undecided contacts, after removing reliable: {len(df_undecided)}')
+        logger.info(f'Undecided pool: after subtracting those assigned intra: {len(df_undecided)}')
         # spurious removal
         df_undecided = df_undecided[~df_undecided.index.isin(df_spur.index)]
-        logger.info(f'Undecided contacts, after removing spurious: {len(df_undecided)}')
+        logger.info(f'Undecided pool: after subtracting those assigned spurious: {len(df_undecided)}')
 
         # Add initial training labels
         df_spur['intra_z'] = 0
@@ -348,8 +377,8 @@ class DataLabeller(object):
         logger.info(f'Undecided set: {len(df_undecided)}')
 
         # label contacts acceptable for training
-        self.write_table(df_train, 'training', 'labelled training data', index=False)
-        self.write_table(df_undecided, 'undecided', 'undecided contacts', index=False)
+        self.write_table(df_train, 'training', 'labelled training data', index=True)
+        self.write_table(df_undecided, 'undecided', 'undecided contacts', index=True)
         df_train['train'] = True
         df_undecided['train'] = False
 

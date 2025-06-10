@@ -164,7 +164,7 @@ setup(
                       #'rpy2',
                       'scipy',
                       'seaborn',
-                      'scikit-learn',
+                      'scikit-learn<1.6',
                       'sparse',
                       'statsmodels',
                       'tqdm',
