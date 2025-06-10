@@ -1,9 +1,10 @@
 import bz2
-import pickle
 import gzip
-import json
 import io
+import json
 import logging
+import pickle
+
 import yaml
 
 logger = logging.getLogger(__name__)

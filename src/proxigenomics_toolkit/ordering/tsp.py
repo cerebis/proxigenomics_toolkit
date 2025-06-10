@@ -1,9 +1,10 @@
 import logging
-import numpy as np
-import scipy.sparse as sparse
 import os
 import re
 import subprocess
+
+import numpy as np
+import scipy.sparse as sparse
 
 logger = logging.getLogger(__name__)
 
@@ -187,18 +188,18 @@ def write_lkh(base_name, m, dim, max_trials=None, runs=None, seed=None, mat_fmt=
     :param pop_size: population size of tours used in special genetic algorithm component (default: runs/4)
     """
 
-    def write_full_matrix(out_h, m):
-        out_h.write('EDGE_WEIGHT_TYPE: EXPLICIT\n')
-        out_h.write('EDGE_WEIGHT_FORMAT: FULL_MATRIX\n')
-        out_h.write('EDGE_WEIGHT_SECTION\n')
-        np.savetxt(out_h, m, fmt='%d')
+    def write_full_matrix(_out_h, _m):
+        _out_h.write('EDGE_WEIGHT_TYPE: EXPLICIT\n')
+        _out_h.write('EDGE_WEIGHT_FORMAT: FULL_MATRIX\n')
+        _out_h.write('EDGE_WEIGHT_SECTION\n')
+        np.savetxt(_out_h, _m, fmt='%d')
 
-    def write_upper_row(out_h, m):
-        out_h.write('EDGE_WEIGHT_TYPE: EXPLICIT\n')
-        out_h.write('EDGE_WEIGHT_FORMAT: UPPER_ROW\n')
+    def write_upper_row(_out_h, _m):
+        _out_h.write('EDGE_WEIGHT_TYPE: EXPLICIT\n')
+        _out_h.write('EDGE_WEIGHT_FORMAT: UPPER_ROW\n')
         out_h.write('EDGE_WEIGHT_SECTION\n')
         for i in range(len(m)-1):
-            out_h.write(' '.join([str(int(vi)) for vi in m[i, i+1:]]))
+            out_h.write(' '.join([str(int(vi)) for vi in _m[i, i+1:]]))
             out_h.write('\n')
 
     assert isinstance(m, np.ndarray), 'the matrix must be a numpy array'

@@ -1,7 +1,8 @@
-import numpy as np
-import Bio.SeqIO as SeqIO
 import logging
 import os
+
+import Bio.SeqIO as SeqIO
+import numpy as np
 
 # package logger
 logger = logging.getLogger(__name__)

@@ -1,7 +1,9 @@
-from ..exceptions import *
 import logging
-import numpy as np
 import os
+
+import numpy as np
+
+from ..exceptions import *
 
 logger = logging.getLogger(__name__)
 

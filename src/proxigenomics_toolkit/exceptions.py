@@ -1,7 +1,8 @@
 
 class ApplicationException(Exception):
     def __init__(self, message):
-        super(ApplicationException, self).__init__(message)
+        super(ApplicationException, self).__init__()
+        self.message = message
 
 
 class UnknownEnzymeException(ApplicationException):

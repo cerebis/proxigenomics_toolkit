@@ -1,22 +1,27 @@
-from ..io_utils import io_utils
-from ..linalg import sparse_utils
-from ..misc_utils import package_path
-from .. import ordering
-from ..seq_utils.seq_utils import *
-from collections import OrderedDict, namedtuple, defaultdict
+import logging
+import math
+from collections import OrderedDict, defaultdict, namedtuple
 from functools import partial
-from scipy.stats import binom, poisson
-from statsmodels.stats.multitest import multipletests
-import numba as nb
+
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
-import logging
+import matplotlib
+import numba as nb
 import numpy as np
-import math
+import os
 import pysam
 import scipy.sparse as sp
 import tqdm
-import matplotlib
+from scipy.stats import binom, poisson
+from statsmodels.stats.multitest import multipletests
+
+from .. import ordering
+from ..exceptions import *
+from ..io_utils import io_utils
+from ..linalg import sparse_utils
+from ..misc_utils import package_path
+from ..seq_utils import SiteCounter, count_bam_reads, count_fasta_sequences, revcomp
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -1861,7 +1866,7 @@ class ContactMap(object):
         self.plot(fname, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=tick_labs, **kwargs)
 
     def plot(self, fname, simple=False, tick_locs=None, tick_labs=None, norm=True, permute=False, pattern_only=False,
-             dpi=180, width=25, height=22, zero_diag=True, alpha=0.001, robust=False, max_image_size=None,
+             dpi=180, width=25, height=22, zero_diag=True, alpha=0.001, max_image_size=None,
              flatten=False, norm_method=None, bisto=True):
         """
         Plot the contact map. This can either be as a sparse pattern (requiring much less memory but without visual
@@ -1879,10 +1884,10 @@ class ContactMap(object):
         :param height: plot height in inches
         :param zero_diag: set bright self-interactions to zero
         :param alpha: log intensities are log (x + alpha)
-        :param robust: use seaborn robust dynamic range feature
         :param max_image_size: maximum allowable image size before rescale occurs
         :param flatten: for tip-based, flatten matrix rather than marginalise
         :param norm_method: normalisation method to apply to contact map
+        :param bisto: make map bistochastic
         """
 
         plt.style.use('ggplot')

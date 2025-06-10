@@ -1,25 +1,27 @@
-from ..misc_utils import package_path, make_dir
-from ..seq_utils import IndexedFasta
-from ..linalg import kr_bistochastic
-from ..exceptions import *
-from .contact_map import SeqOrder
-from collections import defaultdict
-from gfa_io import GFA
-from copy import deepcopy
-import Bio.SeqIO as SeqIO
-import Bio.SeqUtils as SeqUtils
 import contextlib
 import logging
+import os
+import re
+import subprocess
+import warnings
+from collections import defaultdict
+from copy import deepcopy
+
+import Bio.SeqIO as SeqIO
+import Bio.SeqUtils as SeqUtils
 import networkx as nx
 import numpy as np
-import os
 import pandas
 import pysam
-import re
 import scipy.sparse as sp
-import subprocess
 import tqdm
-import warnings
+from gfa_io import GFA
+
+from ..exceptions import *
+from ..linalg import kr_bistochastic
+from ..misc_utils import make_dir, package_path
+from ..seq_utils import IndexedFasta
+from .contact_map import SeqOrder
 
 logger = logging.getLogger(__name__)
 
@@ -421,6 +423,7 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
     :param bisto: additionally make adjacency matrix bistochastic
     :param scale: scale weights (max_w = 1)
     :param norm_method: normalisation method to apply to contact map
+    :param fdr_alpha: false discovery rate
     :param only_new: only return clusters that were newly created
     :param alg_args: a dict of additional arguments to pass to the partitioning algorithm
     :return: revised clustering object
@@ -469,7 +472,7 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
 
         # partition the subgraph into communities
         if alg_args is not None:
-            assert isinstance(alg_args, dict), f'Algorithm optional parameters must be in the form of a dictionary'
+            assert isinstance(alg_args, dict), 'Algorithm optional parameters must be in the form of a dictionary'
             partitions = algorithm(g, **alg_args)
         else:
             partitions = algorithm(g)

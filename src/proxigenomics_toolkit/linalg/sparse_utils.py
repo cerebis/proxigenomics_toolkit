@@ -1,9 +1,10 @@
 import logging
-import numpy as np
+from math import ceil
+
 import numba as nb
+import numpy as np
 import scipy.sparse as scisp
 import sparse
-from math import ceil
 
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.INFO)
@@ -15,7 +16,7 @@ def add_matrices(a, b):
     elif isinstance(a, sparse.COO) and isinstance(b, sparse.COO):
         return sparse.elemwise(np.add, a, b)
     else:
-        logger.error('Adding two different matrix types is not supported')
+        raise ValueError('Adding two different matrix types is not supported')
 
 
 def is_hermitian(m, tol=1e-6):

@@ -1,24 +1,24 @@
-import seaborn as sb
-import tensorflow as tf
 import logging
-import pandas as pd
-import numpy as np
 import os
 
-from imblearn.under_sampling import RandomUnderSampler
+import keras
+import numpy as np
+import pandas as pd
+import seaborn as sb
+import tensorflow as tf
 from imblearn.ensemble import BalancedBaggingClassifier
+from imblearn.under_sampling import RandomUnderSampler
 from matplotlib.backends.backend_pdf import PdfPages
 from plotnine import *
 from scikeras.wrappers import KerasClassifier
-from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import precision_recall_curve
-from tensorflow.keras.layers import Input, Dense, Dropout
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.losses import BinaryCrossentropy
-from tensorflow.keras.metrics import Precision, Recall, Metric
+from tensorflow.keras.metrics import Metric, Precision, Recall
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.optimizers import AdamW
 from tensorflow.keras.regularizers import L2
-import keras
 
 logger = logging.getLogger(__name__)
 
@@ -479,6 +479,7 @@ class ContactClassifier(object):
         """
         Find the highest value for f1-score and associated threshold probability
         :param df: training data
+        :param plot: if true write plot to file
         :return: best f1_score and threshold
         """
         df_test = df.query('cluster_name in @self.hq_clusters')
@@ -520,7 +521,7 @@ class ContactClassifier(object):
         # Using the training data, find the threshold probability returning the highest f1-score.
         f1_best, thres_best = self.predict_best_threshold(df, plot=True)
         # Use this threshold as a decision boundary on whether a contact is intra-cellular.
-        df = df.assign(is_intracellular = lambda x: x.pr_intracellular > thres_best)
+        df = df.assign(is_intracellular = lambda row: row.pr_intracellular > thres_best)
         # rename the original column to reduce confusion
         df.rename(columns={'intra': 'intracluster'}, inplace=True)
         self.write_table(df, 'predictions', 'final predictions', index=False)

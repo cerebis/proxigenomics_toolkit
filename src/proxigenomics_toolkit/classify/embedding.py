@@ -1,14 +1,14 @@
-from ..io_utils import load_object
-
-import pickle
 import gzip
-import pandas as pd
-import numpy as np
-import umap
 import logging
+import pickle
 
+import numpy as np
+import pandas as pd
+import umap
+from plotnine import aes, geom_point, ggplot, labs, theme
 from sklearn.preprocessing import normalize
-from plotnine import ggplot, geom_point, theme, labs, aes
+
+from ..io_utils import load_object
 
 logger = logging.getLogger(__name__)
 

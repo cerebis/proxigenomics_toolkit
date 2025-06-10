@@ -1,6 +1,7 @@
 import itertools
+
 import numpy as np
-from numba import jit, vectorize, int32, float64
+from numba import float64, int32, jit, vectorize
 from numpy import log, pi
 
 # Likelihood Pareto2 parameters

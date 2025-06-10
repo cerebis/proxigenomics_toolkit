@@ -1,11 +1,4 @@
+from . import clustering, contact_map, io_utils, linalg, misc_utils, ordering, seq_utils
 from ._version import __version__
-
-from . import clustering
-from . import contact_map
-from . import io_utils
-from . import linalg
-from . import misc_utils
-from . import ordering
-from . import seq_utils
 
 name = 'proxigenomics_toolkit'

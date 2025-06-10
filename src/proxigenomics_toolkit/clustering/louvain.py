@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-import community as com
 import logging
+
+import community as com
 import networkx as nx
 import numpy as np
 

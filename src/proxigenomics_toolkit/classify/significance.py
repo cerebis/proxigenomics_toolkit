@@ -1,29 +1,32 @@
-from ..contact_map import to_graph
-from ..exceptions import RejectedSequenceException
-from ..io_utils import load_object, open_input
-from ..linalg import is_hermitian, make_symmetric
-
 import logging
-from collections import Counter, namedtuple, OrderedDict, defaultdict
+import os
+
+# TODO suppressing FutureWarnings from seaborn until a release (>12.2) addresses (added 2023-09-18)
+import warnings
+from collections import Counter, OrderedDict, defaultdict, namedtuple
 
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-import os
 import pandas
+
 #import rpy2.robjects as robjects
 import scipy.sparse as sp
 import scipy.stats as st
 import seaborn as sb
 import tqdm
 from astropy.stats import sigma_clip
+
 #from rpy2.robjects import pandas2ri
 #from rpy2.robjects.conversion import localconverter
 from sklearn.mixture import BayesianGaussianMixture
 from statsmodels.stats.multitest import multipletests
 
-# TODO suppressing FutureWarnings from seaborn until a release (>12.2) addresses (added 2023-09-18)
-import warnings
+from ..contact_map import to_graph
+from ..exceptions import RejectedSequenceException
+from ..io_utils import load_object, open_input
+from ..linalg import is_hermitian, make_symmetric
+
 warnings.filterwarnings('ignore', category=FutureWarning, module='seaborn')
 
 logger = logging.getLogger(__name__)
@@ -520,23 +523,23 @@ def mappability_report(filename, kmer_size):
     :return: pandas.DataFrame
     """
 
-    def read_genmap(filename):
+    def read_genmap(_filename):
         """
         Generator for reading records from the fasta-format genmap text output.
         The first line of each record is the standard FASTA header, while the next contains space-delimited
         floats represent relative uniqueness of the k-mer that begins at that position.
 
-        :param filename: genmap text file
+        :param _filename: genmap text file
         :return: tuple(seq_id, numpy array of mappability values)
         """
-        with open_input(filename, 'rt') as input_h:
+        with open_input(_filename, 'rt') as input_h:
             try:
                 while True:
                     header = next(input_h).strip()
                     assert header.startswith('>'), f'Invalid genmap text file: {filename}'
-                    seq = header[1:].split(' ')[0]
-                    data = np.fromiter((float(vi) for vi in next(input_h).split(' ')), dtype=float)
-                    yield seq, data
+                    _seq = header[1:].split(' ')[0]
+                    _data = np.fromiter((float(vi) for vi in next(input_h).split(' ')), dtype=float)
+                    yield _seq, _data
             except StopIteration:
                 pass
 

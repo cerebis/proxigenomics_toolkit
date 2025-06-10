@@ -1,14 +1,12 @@
-from .embedding import MetagenomeEmbeddings
-
 import logging
-import numpy as np
 import os
-import pandas as pd
 import warnings
 
+import numpy as np
+import pandas as pd
 from sklearn.metrics.pairwise import linear_kernel
 
-
+from .embedding import MetagenomeEmbeddings
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=DeprecationWarning)

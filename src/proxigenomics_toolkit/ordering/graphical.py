@@ -1,11 +1,10 @@
 import logging
-import numpy as np
-import networkx as nx
+
 import community
 import lap
-
-from scipy.cluster.hierarchy import linkage
-from scipy.cluster.hierarchy import dendrogram
+import networkx as nx
+import numpy as np
+from scipy.cluster.hierarchy import dendrogram, linkage
 
 logger = logging.getLogger(__name__)
 

@@ -1,23 +1,25 @@
-from ..exceptions import *
-from ..misc_utils import exe_exists
-from Bio.Restriction import Restriction
-from difflib import SequenceMatcher
-from collections import namedtuple
-from collections.abc import Mapping
-from scipy.stats import mstats
-import Bio.SeqIO as SeqIO
 import heapq
 import itertools
-import numpy as np
-import networkx as nx
+import logging
+import multiprocessing
 import os
 import re
 import subprocess
 import tempfile
 import uuid
+from collections import namedtuple
+from collections.abc import Mapping
+from difflib import SequenceMatcher
+
+import Bio.SeqIO as SeqIO
+import networkx as nx
+import numpy as np
 import yaml
-import logging
-import multiprocessing
+from Bio.Restriction import Restriction
+from scipy.stats import mstats
+
+from ..exceptions import *
+from ..misc_utils import exe_exists
 
 logger = logging.getLogger(__name__)
 
