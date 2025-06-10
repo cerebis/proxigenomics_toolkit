@@ -954,13 +954,29 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
                      max_image_size=max_image_size, flatten=flatten, norm_method=norm_method, **kwargs)
 
 
-def write_report(fname, clustering):
+def write_report(fname, clustering, format_columns=True, sep=','):
     """
     Create a tabular report of each cluster from a clustering report. Write the table to CSV.
 
     :param fname: the CSV output file name
     :param clustering: the input clustering, which contains a report
     """
+    COLUMN_FORMATS = {
+        'id': "{:d}",
+        'name': "{}",
+        'size': "{:d}",
+        'extent': "{:d}",
+        'status': "{}",
+        'n50': "{:d}",
+        'gc_expect': "{:.2f}",
+        'gc_mean': "{:.2f}",
+        'gc_median': "{:.2f}",
+        'cov_expect': "{:.2f}",
+        'cov_mean': "{:.2f}",
+        'cov_median': "{:.2f}",
+        'gc_std': "{:.4e}",
+        'cov_std': "{:.4e}"
+    }
 
     def _expect(w, x):
         """
@@ -1017,9 +1033,18 @@ def write_report(fname, clustering):
     if has_cov:
         _cols.extend(['cov_expect', 'cov_mean', 'cov_median', 'cov_std'])
 
-    df = pandas.DataFrame(df, columns=_cols)
+    if format_columns:
+        # apply column-specific formatting
+        logger.debug('Applying column-specific formatting to report for legibility')
+        df = pandas.DataFrame(df, columns=_cols)
+        for _cn in df.columns:
+            fmt_spec = COLUMN_FORMATS[_cn]
+            df[_cn] = df[_cn].apply(
+                lambda x: '' if pandas.isna(x) else fmt_spec.format(x)
+            )
+
     df.set_index('id', inplace=True)
-    df.to_csv(fname, sep=',')
+    df.to_csv(fname, sep=sep)
 
 
 def find_lost_singletons(contact_map, clustering):
