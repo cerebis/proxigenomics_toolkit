@@ -492,21 +492,21 @@ def rvector2dict(_rvec):
     return dict(_rvec.items())
 
 
-def robust_read_csv(csv_name, sep=','):
+def robust_read_csv(csv_name, column_def, sep=','):
     """
     Read CSV file whether or not it has a header. If a non-numeric row-0 is
     found, drop it from the table.
 
     :param csv_name: csv file name
+    :param column_def: dictionary of column names and types
     :param sep: separator used
     :return: pandas.DataFrame
     """
-    _col_def = OrderedDict({'name': str, 'coverage': np.float64})
     try:
-        df = pandas.read_csv(csv_name, header=None, sep=sep, names=list(_col_def), dtype=_col_def)
+        df = pandas.read_csv(csv_name, header=None, sep=sep, names=list(column_def), dtype=column_def)
     except ValueError:
         # first row was not numeric, re-read assuming the CSV file had a header
-        df = pandas.read_csv(csv_name, sep=sep, skiprows=1, names=list(_col_def), dtype=_col_def)
+        df = pandas.read_csv(csv_name, sep=sep, skiprows=1, names=list(column_def), dtype=column_def)
     return df
 
 
@@ -745,7 +745,10 @@ class SignificantLinks(object):
         clustering = load_object(self.clustering_file)
 
         logger.info('Extracting coverage data')
-        coverage_info = robust_read_csv(self.coverage_file, sep=sep).set_index('name')
+        coverage_info = robust_read_csv(self.coverage_file,
+                                        column_def=OrderedDict({'name': str, 'coverage': np.float64}),
+                                        sep=sep).set_index('name')
+
         logger.info('Reading mappability data')
         mappability_info = mappability_report(self.mappability_file, self.mappability_k)
 

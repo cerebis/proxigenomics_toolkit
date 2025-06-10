@@ -10,6 +10,8 @@ from imblearn.ensemble import BalancedBaggingClassifier
 from matplotlib.backends.backend_pdf import PdfPages
 from plotnine import *
 from scikeras.wrappers import KerasClassifier
+from scipy.interpolate import CubicSpline
+from scipy.optimize import brentq
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import precision_recall_curve
 from tensorflow.keras.layers import Input, Dense, Dropout
@@ -108,7 +110,7 @@ class ContactClassifier(object):
     _METRIC_NAME = 'fbeta'
     _FIT_VARS = ['similarity', 'freq_z', 'cov_z', 'linkage']
     _CLASS_VAR = 'intra_z'
-    _PATIENCE = 20
+    _PATIENCE = 50
 
     OUTPUT_TABLES = {
         'predictions': 'predictions.csv',
@@ -121,7 +123,8 @@ class ContactClassifier(object):
     def __init__(self,
                  output_dir,
                  complete_labelled_file,
-                 hq_cluster_file,
+                 spurious_cluster_file,
+                 intra_cluster_file,
                  seed,
                  n_epochs,
                  batch_size,
@@ -138,7 +141,8 @@ class ContactClassifier(object):
 
         :param output_dir: parent directory to which results are written
         :param complete_labelled_file: labelled training data
-        :param hq_cluster_file: file containing cluster ids pertaining to those deemed high-quality
+        :param spurious_cluster_file: file containing cluster ids accepted for spurious contacts
+        :param intra_cluster_file: file containing cluster ids accepted for intra contacts
         :param seed: a random seed
         :param n_epochs: number of epochs for training
         :param batch_size: batch size for training
@@ -155,7 +159,8 @@ class ContactClassifier(object):
 
         self.output_dir = output_dir
         self.complete_labeled_file = complete_labelled_file
-        self.hq_cluster_file = hq_cluster_file
+        self.spurious_cluster_file = spurious_cluster_file
+        self.intra_cluster_file = intra_cluster_file
         self.seed = seed
         self.n_epochs = n_epochs
         self.batch_size = batch_size
@@ -173,7 +178,8 @@ class ContactClassifier(object):
         self.df_complete = pd.read_csv(complete_labelled_file)
         # separate out the complete training set
         self.df_full_training = ContactClassifier._separate_training(self.df_complete)
-        self.hq_clusters = set(pd.read_csv(hq_cluster_file)['cluster'].values)
+        self.spurious_clusters = set(pd.read_csv(spurious_cluster_file)['cluster'].values)
+        self.intra_clusters = set(pd.read_csv(intra_cluster_file)['cluster'].values)
 
         self.model = None
         self.x_full = None
@@ -234,27 +240,25 @@ class ContactClassifier(object):
         This can involve splitting training and test sets, as well
         as applying data augmentation to balance the classes.
         """
-        _x = ContactClassifier._extract_x(self.df_full_training)
-        _y = ContactClassifier._extract_y(self.df_full_training)
-        self.x_full = _x
-        self.y_full = _y
+        self.x_full = ContactClassifier._extract_x(self.df_full_training)
+        self.y_full = ContactClassifier._extract_y(self.df_full_training)
 
         if not self.enable_bag:
-            _x, _y = self.balance_data(_x, _y)
+            self.x_full, self.y_full = self.balance_data(self.x_full, self.y_full)
 
         if self.test_size is not None:
             (self.x_train,
              self.x_test,
              self.y_train,
-             self.y_test) = train_test_split(_x, _y,
+             self.y_test) = train_test_split(self.x_full, self.y_full,
                                              test_size=self.test_size,
                                              random_state=self.seed,
-                                             stratify=_y)
+                                             stratify=self.y_full)
             logger.info(f'Split data into training (size: {len(self.x_train):,}) '
                         f'and test (size: {len(self.x_test):,}) sets')
         else:
-            self.x_train = _x
-            self.y_train = _y
+            self.x_train = self.x_full
+            self.y_train = self.y_full
 
     def balance_data(self, x, y):
         """
@@ -434,11 +438,11 @@ class ContactClassifier(object):
             logging.info('Classifier training will use balanced bagging')
             # wrap the base classifier in a balanced bagging classifier
             estimator = BalancedBaggingClassifier(estimator,
+                                                  oob_score=True,
                                                   n_estimators=self.num_estimators,
                                                   replacement=False,
                                                   random_state=self.seed,
                                                   verbose=self.verbose)
-
 
         logging.info('Beginning model training')
         model = estimator.fit(self.x_train, self.y_train)
@@ -475,39 +479,94 @@ class ContactClassifier(object):
                  + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
             p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
 
-    def predict_best_threshold(self, df, plot=False):
-        """
-        Find the highest value for f1-score and associated threshold probability
-        :param df: training data
-        :return: best f1_score and threshold
-        """
-        df_test = df.query('cluster_name in @self.hq_clusters')
-        precision, recall, thres = precision_recall_curve(df_test['intra_z'], df_test['pr_intracellular'])
+        # plot combined F1,P,R curves for training and test data if used.
+        pr_train = model.predict_proba(self.x_train)[:, 1]
+        self.assess_predictions('training', self.y_train, pr_train)
+
+        if self.test_size is not None and self.test_size > 0:
+            pr_test = model.predict_proba(self.x_test)[:, 1]
+            self.assess_predictions('test', self.y_test, pr_test)
+
+    def plot_precision_recall_curve(self, file_name: str, precision, recall, f1_scores, thres):
+        df_plot = pd.DataFrame({'Precision': precision[1:],
+                                'Recall': recall[1:],
+                                'F1-score': f1_scores[1:],
+                                'Pr_threshold': thres})
+        p = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
+             + geom_line()
+             + scale_x_continuous(breaks=np.arange(0, 1.01, 0.1))
+             + scale_y_continuous(breaks=np.arange(0, 1.01, 0.1))
+             + theme(figure_size=[10,8]))
+        p.save(filename=os.path.join(self.output_dir, file_name), verbose=False)
+
+    @staticmethod
+    def compute_f1_curve(y_true, y_prob):
+        precision, recall, thres = precision_recall_curve(y_true, y_prob)
         # avoid zeros in the denominator
         denominator = recall+precision
         denominator[denominator == 0] = 0.01
         f1_scores = 2 * recall * precision / denominator
-        ix_max = np.argmax(f1_scores)
-        logger.info(f'Probability threshold of {thres[ix_max]:.5f} achieves the '
-                    f'highest F1-score: {f1_scores[ix_max]:.5f}')
+        return f1_scores, precision, recall, thres
 
-        if plot:
-            df_plot = pd.DataFrame({'Precision': precision[1:],
-                                    'Recall': recall[1:],
-                                    'F1-score': f1_scores[1:],
-                                    'Pr_threshold': thres})
-            p = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
-                    + geom_line()
-                    + scale_x_continuous(breaks=np.arange(0, 1.01, 0.1))
-                    + scale_y_continuous(breaks=np.arange(0, 1.01, 0.1))
-                    + theme(figure_size=[10,8]))
-            p.save(filename=os.path.join(self.output_dir, 'precision_recall_curve.svg'), verbose=False)
+    @staticmethod
+    def find_simple_maximum(x, y):
+        """
+        Find the maximum value of y and the corresponding x value, using simple means without interpolation
+        :param x: independent variable
+        :param y: dependent variable
+        :return: "x at maximum y", "y max"
+        """
+        assert x.ndim == 1 and y.ndim == 1, 'The variables x, and y must be a 1D arrays'
+        ix_max = np.argmax(y)
+        return x[ix_max], y[ix_max]
 
-        return f1_scores[ix_max], thres[ix_max]
+    def assess_predictions(self, name, y_true, y_prob):
+        """
+        Compute and report statistics and plot the models predictive performance.
 
-    def classify(self, df=None):
+        :param name: name of the dataset
+        :param y_true: true class variable
+        :param y_prob: predicted probabilities
+        :return: best f1_score and threshold
+        """
+        f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
+
+        max_thres, max_f1  = ContactClassifier.find_simple_maximum(thres, f1_scores)
+        logger.info(f'{name}: probability threshold of {max_thres:.5f} achieves the '
+                    f'highest F1-score: {max_f1:.5f}')
+
+        self.plot_precision_recall_curve(
+            f'precision_recall_curve_{name}.svg',
+            precision, recall, f1_scores, thres)
+
+        return max_f1, max_thres
+
+    @staticmethod
+    def compute_decision_boundary(name, y_true, y_prob, precision_threshold):
+        """
+        Using predictions and true values, compute the decision boundary (in terms of assigned model probability)
+        at which overall dataset precision exceeds the requested threshold.
+        :param name: data set name
+        :param y_true: true values
+        :param y_prob: model probabilities for the same dataset
+        :param precision_threshold: requested threshold precision
+        :return: probability boundary to achieve requested precision
+        """
+        f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
+        assert precision.max() >= precision_threshold, \
+            (f'The maximum precision score {precision.max()} is less than the requested '
+             f'decision boundary threshold {precision_threshold}')
+        spl_func = CubicSpline(thres, precision[:-1] - precision_threshold)
+        decision_boundary = brentq(spl_func, thres[0], thres[-1])
+        logger.info(f'{name}: requested precision of {precision_threshold:} '
+                    f'achieved for probability threshold of {decision_boundary:.5f} ')
+        return decision_boundary
+
+    def classify(self, precision_thres=None, df=None):
         """
         Apply the trained model to the data and write the predictions to a file.
+
+        :param precision_thres: estimated precision at which to classify intra-cellular contacts
         :param df: optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
         :return: updated dataframe with probabilities column
         """
@@ -517,13 +576,35 @@ class ContactClassifier(object):
         x = ContactClassifier._extract_x(df)
         df['pr_intracellular'] = self.model.predict_proba(x)[:, 1]
 
-        # Using the training data, find the threshold probability returning the highest f1-score.
-        f1_best, thres_best = self.predict_best_threshold(df, plot=True)
-        # Use this threshold as a decision boundary on whether a contact is intra-cellular.
-        df = df.assign(is_intracellular = lambda x: x.pr_intracellular > thres_best)
-        # rename the original column to reduce confusion
-        df.rename(columns={'intra': 'intracluster'}, inplace=True)
-        self.write_table(df, 'predictions', 'final predictions', index=False)
+        # Find the threshold probability returning the highest f1-score.
+        df_all = df.query('(not intra_z and cluster_name in @self.spurious_clusters) '
+                           'or (intra_z and cluster_name in @self.intra_clusters)')
+
+        self.assess_predictions('all-data',
+                                df_all['intra_z'],
+                                df_all['pr_intracellular'])
+
+        self.assess_predictions('full-training',
+                                self.y_full,
+                                self.model.predict_proba(self.x_full)[:, 1])
+
+        # Compute the decision boundary for the requested precision threshold
+        if precision_thres is not None:
+            assert self.test_size is not None and self.test_size > 0, \
+                'Computing a decision boundary requires setting aside a test set'
+
+            pr_test = self.model.predict_proba(self.x_test)[:, 1]
+            boundary = ContactClassifier.compute_decision_boundary('test',
+                                                                   self.y_test,
+                                                                   pr_test,
+                                                                   precision_thres)
+
+            # Use this threshold as a decision boundary on whether a contact is intra-cellular.
+            df = df.assign(is_intracellular = lambda x: x.pr_intracellular > boundary)
+            # rename the original column to reduce confusion
+            df.rename(columns={'intra': 'intracluster'}, inplace=True)
+            self.write_table(df, 'predictions', 'final predictions', index=False)
+
         return df
 
 
