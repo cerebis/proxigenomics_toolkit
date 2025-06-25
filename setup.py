@@ -147,7 +147,7 @@ setup(
         'build_ext': build_tarball
     },
 
-    setup_requires=['numpy', 'cython'],
+    setup_requires=['numpy', 'cython', 'pytest==8.3.5'],
 
     install_requires=['astropy',
                       'biopython < 1.79',

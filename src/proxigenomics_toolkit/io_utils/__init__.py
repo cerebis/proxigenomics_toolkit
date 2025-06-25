@@ -1,22 +1,21 @@
 from .io_utils import (
-    save_object,
     load_object,
+    multicopy_tofile,
+    multicopy_tostream,
     open_input,
     open_output,
-    multicopy_tostream,
-    multicopy_tofile,
+    read_from_stream,
+    save_object,
     write_to_stream,
-    read_from_stream
 )
 
 __all__ = [
-    # Functions from io_utils.py
-    'save_object',
     'load_object',
+    'multicopy_tofile',
+    'multicopy_tostream',
     'open_input',
     'open_output',
-    'multicopy_tostream',
-    'multicopy_tofile',
-    'write_to_stream',
     'read_from_stream',
+    'save_object',
+    'write_to_stream',
 ]

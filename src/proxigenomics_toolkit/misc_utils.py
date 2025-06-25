@@ -5,7 +5,7 @@ from distutils.sysconfig import get_python_lib
 import numpy as np
 
 
-def make_random_seed():
+def make_random_seed() -> int:
     """
     Provide a random seed value between 1 and 10 million.
     :return: integer random seed
@@ -13,11 +13,11 @@ def make_random_seed():
     return np.random.randint(1000000, 10000000)
 
 
-def make_dir(path, exist_ok=False):
+def make_dir(path: str, exist_ok: bool=False) -> None:
     """
     Convenience method for making directories with a standard logic.
     An exception is raised when the specified path exists and is not a directory.
-    :param path: target path to create
+    :param path: Target path to create
     :param exist_ok: if true, an existing directory is ok. Existing files will still cause an exception
     """
     if not os.path.exists(path):
@@ -28,34 +28,34 @@ def make_dir(path, exist_ok=False):
         raise IOError('output directory already exists!')
 
 
-def app_path(subdir, filename):
+def app_path(subdir: str, filename: str) -> str:
     """
-    Return path to named executable in a subdirectory of the running application
+    Return the path to named executable in a subdirectory of the running application
 
-    :param subdir: subdirectory of application path
-    :param filename: name of file
-    :return: absolute path
+    :param subdir: Subdirectory of the application path.
+    :param filename: Name of the file.
+    :return: Absolute path.
     """
     return os.path.join(sys.path[0], subdir, filename)
 
 
-def package_path(subdir, filename):
+def package_path(subdir: str, filename: str) -> str:
     """
     Return the path to a file within the installed location of the containing package.
 
-    :param subdir: subdirectory of application path
-    :param filename: name of file
-    :return: absolute path
+    :param subdir: Subdirectory of the application path.
+    :param filename: Name of the file.
+    :return: Absolute path.
     """
     assert subdir, 'subdir cannot be empty'
     assert filename, 'filename cannot be empty'
     return os.path.join(get_python_lib(), __name__.split('.')[0], subdir, filename)
 
 
-def exe_exists(exe_name):
+def exe_exists(exe_name: str) -> bool:
     """
-    Check that a executable exists on the Path.
-    :param exe_name: the base executable name
+    Check that an executable exists on the Path.
+    :param exe_name: The base executable name
     :return: True, an executable file named exe_name exists and has executable bit set
     """
     p, f = os.path.split(exe_name)

@@ -13,23 +13,23 @@ from ..io_utils import load_object
 logger = logging.getLogger(__name__)
 
 
-def center_of_mass(embeds):
+def center_of_mass(embeds: pd.DataFrame) -> np.ndarray:
     """
     Given the sequences involved in a cluster, calculate the center of mass
     embedding vector (weighted by sequence length).
     :param embeds:
-    :return: normalised CoM of cluster
+    :return: Normalised CoM of cluster
     """
     if len(embeds) == 1:
         return (embeds.values[:,:768]).flatten()
-    v = embeds.iloc[:, :768].values
-    l = embeds.loc[:, ['length']].values
-    return ((l * v).sum(axis=0) / l.sum()).flatten()
+    vals = embeds.iloc[:, :768].values
+    lengths = embeds.loc[:, ['length']].values
+    return ((lengths * vals).sum(axis=0) / lengths.sum()).flatten()
 
 
 class MetagenomeEmbeddings(object):
 
-    def __init__(self, embeddings_file, clustering_file, faidx_file):
+    def __init__(self, embeddings_file: str, clustering_file: str, faidx_file: str) -> None:
         self.embeddings_file = embeddings_file
         self.clustering_file = clustering_file
         self.faidx_file = faidx_file
@@ -42,10 +42,10 @@ class MetagenomeEmbeddings(object):
         self.load_embeddings()
         self.calculate_cluster_embeddings()
 
-    def load_embeddings(self):
+    def load_embeddings(self) -> None:
         """
-        Load the embeddings dictionary produced by the tool seq_embed. Calculate
-        the average normalised embedding for each sequence.
+        Load the embedding dictionary produced by the tool seq_embed. Calculate
+        the average normalized embedding for each sequence.
         """
         with gzip.open(self.embeddings_file, 'rb') as in_h:
             embeds_dict = pickle.load(in_h)
@@ -77,7 +77,7 @@ class MetagenomeEmbeddings(object):
         self.chunk_embeds = chunk_embeds
         self.seq_embeds = seq_embeds
 
-    def calculate_cluster_embeddings(self):
+    def calculate_cluster_embeddings(self) -> None:
         """
         Using the sequence embeddings, calculate a Center of Mass embedding vector for each cluster.
         While performing this calculation, assign the cluster ID to any sequence involved in
@@ -110,18 +110,24 @@ class MetagenomeEmbeddings(object):
         logger.info(f'Number of cluster CoM embeddings: {len(cluster_embeds)}')
         self.cluster_embeds = cluster_embeds
 
-    def plot_scatter_projection(self, output_path, max_clusters=10, verbose=False,
-                                metric='manhattan', n_components=2, n_epochs=500, min_dist=0.2):
+    def plot_scatter_projection(self,
+                                output_path: str,
+                                max_clusters: int=10,
+                                verbose: bool=False,
+                                metric: str='manhattan',
+                                n_components: int=2,
+                                n_epochs: int=500,
+                                min_dist: float=0.2) -> None:
         """
-        Plot the UMAP projection (default 2 component) of the embeddings, with the cluster centers overlaid.
+        Plot the UMAP projection (default 2 components) of the embeddings, with the cluster centers overlaid.
 
-        :param output_path: file path to save images (extension dictates format)
-        :param max_clusters: number of clusters to display
-        :param verbose: verbosity of UMAP call
-        :param metric: distance metric used in projection
-        :param n_components: number of components in project (only first 2 are plotted)
-        :param n_epochs: UMAP epochs
-        :param min_dist: UMAP minimum distance
+        :param output_path: The file path to save images (extension dictates format).
+        :param max_clusters: Number of clusters to display.
+        :param verbose: Verbosity of UMAP call.
+        :param metric: Distance metric used in projection.
+        :param n_components: Number of components in the projection (only first 2 are plotted).
+        :param n_epochs: UMAP epochs.
+        :param min_dist: UMAP minimum distance.
         """
 
         # prepare a model using the chunked embeddings

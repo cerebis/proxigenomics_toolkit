@@ -1,6 +1,6 @@
 import os
 import pytest
-from src.proxigenomics_toolkit.misc_utils import make_random_seed, make_dir, exe_exists, package_path  # Updated import
+from proxigenomics_toolkit.misc_utils import make_random_seed, make_dir, exe_exists, package_path  # Updated import
 
 def test_make_random_seed_range():
     seed = make_random_seed()

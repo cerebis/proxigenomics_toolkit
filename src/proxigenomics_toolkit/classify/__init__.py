@@ -1,78 +1,62 @@
 from .._version import __version__
-
-from .embedding import (
-    MetagenomeEmbeddings,
-    center_of_mass
-)
-from .keras_model import (
-    ContactClassifier,
-    StatefulBinaryFBeta,
-    create_baseline
-)
+from .embedding import MetagenomeEmbeddings, center_of_mass
+from .keras_model import ContactClassifier, StatefulBinaryFBeta, create_baseline
 from .labeller import (
     DataLabeller,
-    scaler,
-    transform,
     anti_join,
-    high_quality_clusters,
     exclude_clusters,
+    high_quality_clusters,
     identify_suspected_intra,
-    seq2cluster_similarity,
     normalised_out_degree,
-    replace_zeros
+    replace_zeros,
+    scaler,
+    seq2cluster_similarity,
+    transform,
 )
 from .significance import (
-    SignificantLinks,
     SequencePromiscuity,
-    sequence_details,
-    get_map,
-    create_seq2cluster_graph,
-    simple_spurious_estimation,
+    SignificantLinks,
     calculate_rejection_thresholds,
+    create_seq2cluster_graph,
     fill_zeros,
-# presently excluding use of r2py
-#    rmatrix2pandas,
-#    rvector2dict,
+    get_map,
+    mappability_report,
+    # presently excluding use of r2py
+    #    rmatrix2pandas,
+    #    rvector2dict,
     robust_read_csv,
-    mappability_report
+    sequence_details,
+    simple_spurious_estimation,
 )
 
 __all__ = [
-    '__version__',
-
-    # From embedding.py
-    'MetagenomeEmbeddings',
-    'center_of_mass',
-
-    # From keras_model.py
     'ContactClassifier',
-    'StatefulBinaryFBeta',
-    'create_baseline',
-
-    # From labeller.py
     'DataLabeller',
-    'scaler',
-    'transform',
+    'MetagenomeEmbeddings',
+    'SequencePromiscuity',
+    'SignificantLinks',
+    'StatefulBinaryFBeta',
+    '__version__',
     'anti_join',
-    'high_quality_clusters',
+    'calculate_rejection_thresholds',
+    'center_of_mass',
+    'create_baseline',
+    'create_seq2cluster_graph',
     'exclude_clusters',
+    'fill_zeros',
+    'get_map',
+    'high_quality_clusters',
     'identify_suspected_intra',
-    'seq2cluster_similarity',
+    'mappability_report',
     'normalised_out_degree',
     'replace_zeros',
-
-    # From significance.py
-    'SignificantLinks',
-    'SequencePromiscuity',
-    'sequence_details',
-    'get_map',
-    'create_seq2cluster_graph',
-    'simple_spurious_estimation',
-    'calculate_rejection_thresholds',
-    'fill_zeros',
-# presently excluding use of r2py
-#    'rmatrix2pandas',
-#    'rvector2dict',
+    # presently excluding use of r2py
+    #    'rmatrix2pandas',
+    #    'rvector2dict',
     'robust_read_csv',
-    'mappability_report',
+    'scaler',
+    'seq2cluster_similarity',
+    'sequence_details',
+    'simple_spurious_estimation',
+    'transform',
 ]

@@ -10,40 +10,48 @@ import uuid
 from collections import namedtuple
 from collections.abc import Mapping
 from difflib import SequenceMatcher
+from typing import Callable, Dict, Hashable, List, Match, Optional, Tuple, TypeVar
 
 import Bio.SeqIO as SeqIO
 import networkx as nx
 import numpy as np
+import numpy.typing as npt
 import yaml
 from Bio.Restriction import Restriction
 from scipy.stats import mstats
 
-from ..exceptions import *
+# from ..contact_map import SeqInfo
+from ..exceptions import NoRecordsException, UnknownEnzymeException
 from ..misc_utils import exe_exists
 
 logger = logging.getLogger(__name__)
 
+EnzymeType = TypeVar('EnzymeType',
+                     Restriction.RestrictionType,
+                     Restriction.AbstractCut,
+                     Restriction.Ov5,
+                     Restriction.Ov3,
+                     Restriction.Defined)
+
 # translation table used for complementation
-# COMPLEMENT_TABLE = str.maketrans('acgtumrwsykvhdbnACGTUMRWSYKVHDBN',
-#                                  'TGCAAnnnnnnnnnnnTGCAANNNNNNNNNNN')
 COMPLEMENT_TABLE = str.maketrans('acgtbdefhijklmnopqrsuvwxyzACGTBDEFHIJKLMNOPQRSUVWXYZ',
                                  'tgcannnnnnnnnnnnnnnnnnnnnnTGCANNNNNNNNNNNNNNNNNNNNNN')
-def revcomp(seq):
+def revcomp(seq: str) -> str:
     """
-    Reverse complement a string representation of a sequence. This uses string.translate.
-    :param seq: input sequence as a string
-    :return: revcomp sequence as a string
+    Reverse-complement a string representation of a sequence. This uses string.translate.
+    :param seq: Input sequence as a string.
+    :return: Revcomp sequence as a string.
     """
     return seq.translate(COMPLEMENT_TABLE)[::-1]
 
 
-def count_bam_reads(file_name, max_cpu=None):
+def count_bam_reads(file_name: str, max_cpu: Optional[int]=None) -> int:
     """
     Use samtools to quickly count the number of non-header lines in a bam file. This is assumed to equal
     the number of mapped reads.
-    :param file_name: a bam file to scan (neither sorted nor an index is required)
-    :param max_cpu: maximum number of cpus to use for accessing bam file
-    :return: estimated number of mapped reads
+    :param file_name: A bam file to scan (neither sorted nor an index is required).
+    :param max_cpu: Maximum number of cpus to use for accessing the bam file.
+    :return: Estimated number of mapped reads.
     """
     assert exe_exists('samtools'), 'required tool samtools was not found on path'
     assert exe_exists('wc'), 'required tool wc was not found on path'
@@ -58,7 +66,7 @@ def count_bam_reads(file_name, max_cpu=None):
         max_cpu = multiprocessing.cpu_count()
     opts.append('-@{}'.format(max_cpu))
 
-    proc = subprocess.Popen(opts + [file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen([*opts, file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     value_txt = proc.stdout.readline().strip()
     try:
@@ -68,15 +76,15 @@ def count_bam_reads(file_name, max_cpu=None):
                            .format(value_txt))
 
 
-def count_fasta_sequences(file_name):
+def count_fasta_sequences(file_name: str) -> int:
     """
     Estimate the number of fasta sequences in a file by counting headers. Decompression is automatically attempted
-    for files ending in .gz. Counting and decompression is by why of subprocess calls to grep and gzip. Uncompressed
-    files are also handled. This is about 8 times faster than parsing a file with BioPython and 6 times faster
-    than reading all lines in Python.
+    for files ending in .gz. Counting and decompression are achieved by way of subprocess calls to grep and gzip.
+    Uncompressed files are also handled. This is about 8 times faster than parsing a file with BioPython and 6
+    times faster than reading all lines in Python.
 
-    :param file_name: the fasta file to inspect
-    :return: the estimated number of records
+    :param file_name: The fasta file to inspect.
+    :return: The estimated number of records.
     """
     if file_name.endswith('.gz'):
         proc_uncomp = subprocess.Popen(['gzip', '-cd', file_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -101,11 +109,10 @@ class IndexedFasta(Mapping):
 
     Wrapped with contextlib.closing(), instances of this object are with() compatible.
     """
-
-    def __init__(self, fasta_file, tmp_path=None):
+    def __init__(self, fasta_file: str, tmp_path: Optional[str]=None) -> None:
         """
-        :param fasta_file: the input fasta file to access
-        :param tmp_path: temporary directory for creating index
+        :param fasta_file: the input fasta file to access.
+        :param tmp_path: temporary directory for creating index.
         """
         if tmp_path is None:
             tmp_path = tempfile.gettempdir()
@@ -115,30 +122,30 @@ class IndexedFasta(Mapping):
         self._fasta_file = fasta_file
         self._index = SeqIO.index_db(self._tmp_file, self._fasta_file, 'fasta')
 
-    def __getitem__(self, _id):
+    def __getitem__(self, _id: str) -> SeqIO.SeqRecord:
         """
         Access a sequence object by its Fasta identifier.
 
-        :param _id: fasta sequence identifier
-        :return: SeqRecord object representing the sequence
+        :param _id: fasta sequence identifier.
+        :return: SeqRecord object representing the sequence.
         """
         return self._index[_id]
 
-    def __iter__(self):
+    def __iter__(self) -> str:
         """
-        :return: iterator over sequence identifiers (keys)
+        :return: iterator over sequence identifiers (keys).
         """
         return iter(self._index)
 
-    def __len__(self):
+    def __len__(self) -> int:
         """
-        :return: the number of sequences in the file
+        :return: the number of sequences in the file.
         """
         return len(self._index)
 
-    def close(self):
+    def close(self) -> None:
         """
-        Close the index and remove the associated temporary file
+        Close the index and remove the associated temporary file.
         """
         if self._index:
             self._index.close()
@@ -156,14 +163,18 @@ ligation_info = namedtuple('ligation_info',
 
 class SiteCounter(object):
 
-    def __init__(self, enzyme_a, enzyme_b=None, tip_size=None, is_linear=True):
+    def __init__(self,
+                 enzyme_a: str,
+                 enzyme_b: Optional[str]=None,
+                 tip_size: Optional[int]=None,
+                 is_linear: Optional[bool]=True) -> None:
         """
         Simple class to count the total number of enzymatic cut sites for the given
         list if enzymes.
 
-        :param enzyme_a: the first enzyme involved in digestion (case sensitive NEB name)
-        :param enzyme_b: the optional second enzyme involved in digestion (case sensitive NEB name)
-        :param tip_size: when using tip based counting, the size in bp
+        :param enzyme_a: The first enzyme involved in digestion (case-sensitive NEB name).
+        :param enzyme_b: The optional second enzyme involved in digestion (case-sensitive NEB name).
+        :param tip_size: When using tip-based counting, the size in bp.
         :param is_linear: Treat sequence as linear.
         """
         self.enzyme_a = SiteCounter._get_enzyme_instance(enzyme_a)
@@ -171,23 +182,23 @@ class SiteCounter(object):
         self.is_linear = is_linear
         self.tip_size = tip_size
         self.junctions = self.junction_duplication()
-        # Digested ends, which are religated will not necessarily possess the entire
+        # Digested ends, which are religated, will not necessarily possess the entire
         # cut-site, but will possess a remnant/vestigial sequence
         self.any_vestigial = re.compile('({})'.format('|'.join(
             sorted(set([v.vestigial for v in self.junctions.values()]),
                    key=lambda x: (-len(x), x))).replace('N', '[ACGT]')))
         self.end_vestigial = re.compile('{}$'.format(self.any_vestigial.pattern))
 
-    def get_vestigial_end_searcher(self):
+    def get_vestigial_end_searcher(self) -> Callable[[str], Match[str]]:
         return self.end_vestigial.search
 
     @staticmethod
-    def _get_enzyme_instance(enz_name):
+    def _get_enzyme_instance(enz_name: str) -> EnzymeType:
         """
         Fetch an instance of a given restriction enzyme by its name.
 
-        :param enz_name: the case-sensitive name of the enzyme
-        :return: RestrictionType the enzyme instance
+        :param enz_name: The case-sensitive name of the enzyme.
+        :return: RestrictionType the enzyme instance.
         """
         try:
             # this has to match exactly
@@ -201,11 +212,11 @@ class SiteCounter(object):
                     similar.append(a)
             raise UnknownEnzymeException(enz_name, similar)
 
-    def find_sites(self, seq):
+    def find_sites(self, seq: str) -> List[int]:
         """
         Find the cut-sites along the given sequence.
-        :param seq: sequence to search
-        :return: a list of genomic coordinates where cut-sites occur, marked by the 5' end of the site.
+        :param seq: Sequence to search.
+        :return: A list of genomic coordinates where cut-sites occur, marked by the 5' end of the site.
         """
         sites = []
         for en in [self.enzyme_a, self.enzyme_b]:
@@ -214,16 +225,16 @@ class SiteCounter(object):
             sites.extend(en.search(seq, self.is_linear))
         return sorted(sites)
 
-    def _count(self, seq):
+    def _count(self, seq: str) -> int:
         return sum(len(en.search(seq, self.is_linear)) for en in [self.enzyme_a, self.enzyme_b] if en is not None)
 
-    def count_sites(self, seq):
+    def count_sites(self, seq: str) -> List[int] | int:
         """
         Count the number of sites found in the given sequence, where sites from
-        all specified enzymes are combined
+        all specified enzymes are combined.
 
-        :param seq: Bio.Seq object
-        :return: the total number of sites
+        :param seq: Bio.Seq object.
+        :return: The total number of sites.
         """
         if self.tip_size:
             seq_len = len(seq)
@@ -235,20 +246,20 @@ class SiteCounter(object):
                 l_tip = seq[:self.tip_size]
                 r_tip = seq[-self.tip_size:]
             # left and right tip counts
-            sites = [self._count(l_tip), self._count(r_tip)]
+            num_sites = [self._count(l_tip), self._count(r_tip)]
         else:
-            # one value for whole sequence
-            sites = self._count(seq)
+            # one value for the whole sequence
+            num_sites = self._count(seq)
 
-        return sites
+        return num_sites
 
     @staticmethod
-    def enzyme_ends(enzyme):
+    def enzyme_ends(enzyme: EnzymeType) -> Tuple[str, str]:
         """
         Determine the 5` and 3` ends of a restriction endonuclease. Here, "ends"
         are the parts of the recognition site not involved in overhang.
-        :param enzyme: Biopython ins
-        :return: a pair of strings containing the 5' and 3' ends
+        :param enzyme: Biopython ins.
+        :return: A pair of strings containing the 5' and 3' ends.
         """
         end5, end3 = '', ''
         ovhg_size = abs(enzyme.ovhg)
@@ -260,21 +271,21 @@ class SiteCounter(object):
         return end5.upper(), end3.upper()
 
     @staticmethod
-    def vestigial_site(enz, junc):
+    def vestigial_site(enzyme: EnzymeType, junc: str) -> str:
         """
         Determine the part of the 5-prime end cut-site that will remain when a ligation junction is
         created. Depending on the enzymes involved, this may be the entire cut-site or a smaller portion
         and begins from the left.
         """
         i = 0
-        while i < enz.size and (enz.site[i] == junc[i] or enz.site[i] == 'N'):
+        while i < enzyme.size and (enzyme.site[i] == junc[i] or enzyme.site[i] == 'N'):
             i += 1
         return str(junc[:i]).upper()
 
-    def junction_duplication(self):
+    def junction_duplication(self) -> Dict[str, ligation_info]:
         """
         For the enzyme cocktail, generate the set of possible ligation junctions.
-        :return: a dictionary of ligation_info objects
+        :return: A dictionary of ligation_info objects.
         """
         end5, end3 = SiteCounter.enzyme_ends(self.enzyme_a)
         enz_list = [digest_info(self.enzyme_a, end5, end3, self.enzyme_a.ovhgseq.upper())]
@@ -303,16 +314,20 @@ class SequenceAnalyzer(object):
                          ('local', np.float64), ('fold', np.float64)])
 
     @staticmethod
-    def read_report(file_name):
+    def read_report(file_name: str) -> object:
         return yaml.safe_load(open(file_name, 'r'))
 
-    def __init__(self, seq_map, seq_report, seq_info, tip_size):
+    def __init__(self,
+                 seq_map: np.ndarray,
+                 seq_report: Dict,
+                 seq_info: List,
+                 tip_size: int) -> None:
         self.seq_map = seq_map
         self.seq_report = seq_report
         self.seq_info = seq_info
         self.tip_size = tip_size
 
-    def _contact_graph(self):
+    def _contact_graph(self) -> nx.Graph:
         g = nx.Graph()
         n_seq = len(self.seq_info)
 
@@ -322,7 +337,7 @@ class SequenceAnalyzer(object):
             if self.tip_size:
                 g.add_node(i, _id=si.name,
                            _cov=float(d['coverage']),
-                           # this is a 2 element list for tip mapping
+                           # this is a 2-element list for tip mapping
                            _sites=d['sites'],
                            _len=int(d['length']))
             else:
@@ -343,18 +358,22 @@ class SequenceAnalyzer(object):
         return g
 
     @staticmethod
-    def _nlargest(g, u, n, k=0, local_set=None):
+    def _nlargest(g: nx.Graph,
+                  u: Hashable,
+                  n: int,
+                  k: int=0,
+                  local_set: Optional[set]=None) -> List[Hashable]:
         """
         Build a list of nodes of length n within a radius k hops of node u in graph g, which have the
-        largest weight. For Hi-C data, after normalisation, high weight can be used as a means of inferring
+        largest weight. For Hi-C data, after normalization, high weight can be used as a means of inferring
         proximity.
 
-        :param g: the graph which to analyse
-        :param u: the target node
-        :param n: the length of the 'nearby nodes' list
-        :param k: the maximum number of hops away from u
-        :param local_set: used in recursion
-        :return: a set of nodes.
+        :param g: The graph to analyze.
+        :param u: The target node.
+        :param n: The length of the 'nearby nodes' list.
+        :param k: The maximum number of hops away from u.
+        :param local_set: used in recursion.
+        :return: A set of nodes.
         """
         if not local_set:
             local_set = set()
@@ -369,19 +388,21 @@ class SequenceAnalyzer(object):
 
         return list(local_set)
 
-    def report_degenerates(self, fold_max, min_len=0):
+    def report_degenerates(self,
+                           fold_max: float,
+                           min_len: int=0) -> npt.NDArray[COV_TYPE]:
         """
         Making the assumption that degenerate sequences (those sequences which are repeats) have high coverage
         relative to their local region, report those nodes in the graph whose coverage exceeds a threshold.
 
-        :param fold_max: the maximum relative coverage allowed (between a node and its local region)
-        :param min_len: the shorest allowable sequence to consider
-        :return: a report of all sequences degenerate status
+        :param fold_max: The maximum relative coverage allowed (between a node and its local region).
+        :param min_len: The shorest allowable sequence to consider.
+        :return: A report of all sequences degenerate status.
         """
 
         g = self._contact_graph()
 
-        degens = []
+        degenerates = []
         for u in g.nodes():
             if g.nodes[u]['_len'] < min_len or g.degree[u] == 0:
                 continue
@@ -392,15 +413,15 @@ class SequenceAnalyzer(object):
 
             is_degen = True if fold_vs_local > fold_max else False
 
-            degens.append((u, is_degen, g.nodes[u]['_cov'], local_mean_cov, fold_vs_local))
+            degenerates.append((u, is_degen, g.nodes[u]['_cov'], local_mean_cov, fold_vs_local))
 
-        degens = np.array(degens, dtype=SequenceAnalyzer.COV_TYPE)
+        degenerates = np.array(degenerates, dtype=SequenceAnalyzer.COV_TYPE)
 
-        if len(degens) == 0:
+        if len(degenerates) == 0:
             logger.debug('No degenerate sequences found')
         else:
             logger.debug('Degenerate sequence report')
-            for di in degens[degens['status']]:
+            for di in degenerates[degenerates['status']]:
                 logger.debug(di)
 
-        return degens
+        return degenerates

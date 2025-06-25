@@ -1,33 +1,46 @@
 import logging
 import os
+from typing import Optional
 
 import numpy as np
 
-from ..exceptions import *
+from ..exceptions import NoneAcceptedException, TooFewException
+from . import ContactMap
 
 logger = logging.getLogger(__name__)
 
 
-def order_clusters(contact_map, clustering, seed, cl_list=None, min_len=None, min_sig=None, max_fold=None,
-                   min_extent=None, min_size=1, work_dir='.', dist_method='neglog', bisto=True, norm_method='sites'):
+def order_clusters(contact_map: ContactMap,
+                   clustering: dict,
+                   seed: int,
+                   cl_list: Optional[list]=None,
+                   min_len: Optional[int]=None,
+                   min_sig: Optional[int]=None,
+                   max_fold: Optional[float]=None,
+                   min_extent: Optional[int]=None,
+                   min_size: Optional[int]=1,
+                   work_dir: str='.',
+                   dist_method: str='neglog',
+                   bisto: bool=True,
+                   norm_method: str='sites') -> dict:
     """
     Determine the order of sequences for a given clustering solution, as returned by cluster_map. The ordering is
-    framed as a Travelling Salesman Problem and uses the LKH solver.
+    framed as a Traveling Salesman Problem and uses the LKH solver.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param clustering: the full clustering solution, derived from the supplied contact map
-    :param seed: random seed
-    :param cl_list: the list of cluster ids to include in plot. If none, include all ordered clusters
-    :param min_len: within a cluster exclude sequences that are too short (bp)
-    :param min_sig: within a cluster exclude sequences with weak signal (counts)
-    :param max_fold: within a cluster, exclude sequences that appear to be overly represented
-    :param min_size: skip clusters which containt too few sequences
-    :param min_extent: skip clusters whose total extent (bp) is too short
-    :param work_dir: working directory
-    :param dist_method: method to use in transforming the contact map to a distance matrix
-    :param bisto: perform bistochastic matrix balancing
-    :param norm_method: normalisation method to apply to contact map
-    :return: map of cluster orders, by cluster id
+    :param contact_map: An instance of ContactMap to cluster.
+    :param clustering: The full clustering solution, derived from the supplied contact map.
+    :param seed: Random seed.
+    :param cl_list: The list of cluster ids to include in plot. If none, include all ordered clusters.
+    :param min_len: Within a cluster exclude sequences that are too short (bp).
+    :param min_sig: Within a cluster exclude sequences with weak signal (counts).
+    :param max_fold: Within a cluster, exclude sequences that appear to be overly represented.
+    :param min_size: Skip clusters which contain too few sequences.
+    :param min_extent: Skip clusters whose total extent (bp) is too short.
+    :param work_dir: Working directory.
+    :param dist_method: Method to use in transforming the contact map to a distance matrix.
+    :param bisto: Perform bistochastic matrix balancing.
+    :param norm_method: Normalisation method to apply to contact map.
+    :return: Map of cluster orders, by cluster id.
     """
     assert os.path.exists(work_dir), 'supplied output path [{}] does not exist'.format(work_dir)
 

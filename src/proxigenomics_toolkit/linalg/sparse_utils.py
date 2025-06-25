@@ -1,16 +1,19 @@
 import logging
 from math import ceil
+from typing import Any, Dict, Optional, Tuple
 
 import numba as nb
 import numpy as np
 import scipy.sparse as scisp
 import sparse
 
+from ..types import SparseMatrix
+
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.INFO)
 
 
-def add_matrices(a, b):
+def add_matrices(a: SparseMatrix, b: SparseMatrix) -> SparseMatrix:
     if isinstance(a, scisp.spmatrix) and isinstance(b, scisp.spmatrix):
         return a.tocsr() + b.tocsr()
     elif isinstance(a, sparse.COO) and isinstance(b, sparse.COO):
@@ -19,7 +22,7 @@ def add_matrices(a, b):
         raise ValueError('Adding two different matrix types is not supported')
 
 
-def is_hermitian(m, tol=1e-6):
+def is_hermitian(m: np.ndarray | SparseMatrix, tol: float=1e-6) -> bool:
     """
     Test that a sparse matrix is hermitian (also suffices for symmetric)
 
@@ -27,10 +30,13 @@ def is_hermitian(m, tol=1e-6):
     :param tol: tolernace above zero for m - m.T < tol
     :return: True matrix is Hermitian
     """
+    if isinstance(m, np.ndarray):
+        return bool(np.all(~(np.abs(m - m.T) >= tol)))
+    m = m.tocsr()
     return np.all(~(np.abs(m - m.conjugate().T) >= tol).data)
 
 
-def make_symmetric(_map, use_upper=True):
+def make_symmetric(_map: SparseMatrix, use_upper: bool=True) -> SparseMatrix:
     """
     Make a sparse matrix symmetric by taking either the upper or lower triangle as the source, and copying
     that to the opposite triangle. Double-summation of the diagonal is avoided.
@@ -45,34 +51,34 @@ def make_symmetric(_map, use_upper=True):
         return scisp.tril(_map) + scisp.tril(_map, k=-1).T
 
 
-def tensor_print(T):
+def tensor_print(tensor: SparseMatrix) -> None:
     """
     Pretty print a dense (numpy) 4D matrix. Users should consider the size of the matrix before
     printing, as they can be large! More useful for smaller objects
 
-    :param T: the tensor to print wit dim: (N,M,n,m)
+    :param tensor: the tensor to print wit dim: (N,M,n,m)
     """
 
     try:
-        pw = int(np.ceil(np.log10(T.max())))
+        pw = int(np.ceil(np.log10(tensor.max())))
     except OverflowError:
         pw = 1
-    for i in range(T.shape[0]):
-        for k in range(T.shape[2]):
+    for _i in range(tensor.shape[0]):
+        for _k in range(tensor.shape[2]):
             print('|', end='')
-            for j in range(T.shape[1]):
+            for _j in range(tensor.shape[1]):
                 print('[', end='')
-                for l in range(T.shape[3]):
-                    print('{0:{1}d}'.format(T[i, j, k, l], pw), end='')
+                for _l in range(tensor.shape[3]):
+                    print('{0:{1}d}'.format(tensor[_i, _j, _k, _l], pw), end='')
 
                 print(']', end='')
             print('|')
-        if i < T.shape[1] - 1:
+        if _i < tensor.shape[1] - 1:
             print('+')
     print('')
 
 
-def downsample(m, block_size, method='mean'):
+def downsample(m: SparseMatrix, block_size: int, method: str='mean') -> SparseMatrix:
     """
     Perform a down-sampling of a 2D matrix (scipy.sparse or ndarray)
     by a factor of block_size in each dimension. Block size must be
@@ -89,7 +95,8 @@ def downsample(m, block_size, method='mean'):
     assert isinstance(m, (np.ndarray, scisp.spmatrix)), 'supplied array must be of type np.ndarray or scipy.spmatrix'
     assert block_size > 1 and isinstance(block_size, int), 'block_size must be an integer larger than 1'
 
-    pad_size = lambda N, n: int(ceil(N / float(n)) * n) - N
+    def pad_size(N: int, n: int) -> int:
+        return int(ceil(N / float(n)) * n) - N
 
     pad_row = pad_size(m.shape[0], block_size)
     pad_col = pad_size(m.shape[1], block_size)
@@ -116,7 +123,12 @@ def downsample(m, block_size, method='mean'):
     return m
 
 
-def kr_bistochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
+def kr_bistochastic(m: SparseMatrix,
+                    tol: float=1e-6,
+                    x0: Optional[float]=None,
+                    delta: float=0.1,
+                    Delta: float=3,
+                    max_iter: int=1000) -> Tuple[SparseMatrix, np.ndarray]:
     """
     Normalise a matrix to be bistochastic using Knight-Ruiz algorithm. This method is expected
     to converge more quickly.
@@ -135,11 +147,11 @@ def kr_bistochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
     _orig = m.copy()
 
     # replace 0 diagonals with 1, on the working matrix. This avoids potentially
-    # exploding scale-factors. KR should be regularlized!
+    # exploding scale-factors. KR should be regularized!
     m = m.tolil()
     is_zero = m.diagonal() == 0
     if np.any(is_zero):
-        logger.warning('treating {} zeros on diagonal as ones'.format(is_zero.sum()))
+        logger.warning('treating {} zeros on diagonal as ones'.format(np.sum(is_zero)))
         ix = np.where(is_zero)
         m[ix, ix] = 1
 
@@ -255,27 +267,27 @@ def kr_bistochastic(m, tol=1e-6, x0=None, delta=0.1, Delta=3, max_iter=1000):
 
 class Sparse2DAccumulator(object):
 
-    def __init__(self, N):
-        self.shape = (N, N)
+    def __init__(self, size: int) -> None:
+        self.shape = (size, size)
         self.mat = {}
         # fixed counting type
         self.dtype = np.uint32
 
-    def __setitem__(self, index, value):
+    def __setitem__(self, index: Tuple[int, int], value: int | np.int32) -> None:
         assert len(index) == 2 and index[0] >= 0 and index[1] >= 0, 'invalid index: {}'.format(index)
         assert isinstance(value, (int, np.int64)), 'values must be integers'
         self.mat[index] = value
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: Tuple[int, int]) -> int | np.int32:
         if index in self.mat:
             return self.mat[index]
         return 0
 
-    def get_coo(self, symm=True):
+    def get_coo(self, make_symm: bool=True) -> SparseMatrix:
         """
         Create a COO format sparse representation of the accumulated values.
 
-        :param symm: ensure matrix is symmetric on return
+        :param make_symm: ensure matrix is symmetric on return
         :return: a scipy.coo_matrix sparse matrix
         """
         _coords = [[], []]
@@ -288,14 +300,14 @@ class Sparse2DAccumulator(object):
 
         _m = scisp.coo_matrix((_data, _coords), shape=self.shape, dtype=self.dtype)
 
-        if symm:
+        if make_symm:
             _m += scisp.tril(_m.T, k=-1)
 
         return _m.tocoo()
 
 
 @nb.jit(nopython=True)
-def fast_offdiag(_data, _row, _col, _shape):
+def fast_offdiag(_data: np.ndarray, _row: np.ndarray, _col: np.ndarray, _shape: np.ndarray) -> np.ndarray:
     """
     Determine the maximum off-diagonal elements using the
     internal attributes of a scipy coo matrix. The matrix
@@ -316,8 +328,7 @@ def fast_offdiag(_data, _row, _col, _shape):
     return mx
 
 
-def max_offdiag(_m):
-    # type: (scisp.spmatrix) -> np.ndarray
+def max_offdiag(_m: SparseMatrix) -> np.ndarray:
     """
     Determine the maximum off-diagonal values of a given symmetric matrix. As this
     is assumed to be symmetric, we consider only the rows.
@@ -332,7 +343,7 @@ def max_offdiag(_m):
 
 
 @nb.jit(nopython=True)
-def fast_zero_weak(_val, _data, _row, _col, _shape):
+def fast_zero_weak(_val: float, _data: np.ndarray, _row: np.ndarray, _col: np.ndarray, _shape: np.ndarray) -> None:
     """
     Modify in-place, zeroing any element of the matrix which
     falls below the threshold minimum value.
@@ -351,8 +362,7 @@ def fast_zero_weak(_val, _data, _row, _col, _shape):
             _data[i] = 0
 
 
-def zero_weak_offdiag(_m, _val):
-    # type: (scisp.spmatrix, float) -> np.ndarray
+def zero_weak_offdiag(_m: SparseMatrix, _val: float) -> SparseMatrix:
     """
     For any non-zero elements below the specified threshold, zero them out.
 
@@ -370,7 +380,11 @@ def zero_weak_offdiag(_m, _val):
 
 
 @nb.jit(nopython=True)
-def fast_retained(_data, _row, _col, _nnz, _mask):
+def fast_retained(_data: np.ndarray,
+                  _row: np.ndarray,
+                  _col: np.ndarray,
+                  _nnz: int,
+                  _mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Given a mask, determine the elements of a coo matrix attributes
     data, row and column and the resulting shifts.
@@ -405,7 +419,7 @@ def fast_retained(_data, _row, _col, _nnz, _mask):
     return keep_data, keep_row, keep_col, shift
 
 
-def compress(_m, _mask):
+def compress(_m: SparseMatrix, _mask: np.ndarray) -> SparseMatrix:
     """
     Remove rows and columns using a 1d boolean mask.
 
@@ -428,13 +442,13 @@ class Sparse4DAccumulator(object):
     Simple square sparse tensor of dimension (N, N, 2, 2)
     There is limited functionality and mainly intended to save memory while not performing operations.
     """
-    def __init__(self, N):
-        self.shape = (N, N, 2, 2)
+    def __init__(self, size: int) -> None:
+        self.shape = (size, size, 2, 2)
         self.mat = {}
         # fixed counting type
         self.dtype = np.uint32
 
-    def __setitem__(self, index, value):
+    def __setitem__(self, index: Tuple[int,int,int,int], value: int | np.int32) -> None:
         assert isinstance(index, tuple), 'index must be a list of indices'
         if len(index) == 4:
             assert 0 <= index[0] < self.shape[0] and \
@@ -452,43 +466,43 @@ class Sparse4DAccumulator(object):
             if index not in self.mat:
                 self.mat.setdefault(index, self._make_elem())[:] = value
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: Tuple[int,int,int,int]) -> np.ndarray:
         return self.mat.setdefault(index, self._make_elem())
 
-    def _make_elem(self):
+    def _make_elem(self) -> np.ndarray:
         return np.zeros((2, 2), dtype=self.dtype)
 
-    def get_coo(self, symm=True):
+    def get_coo(self, make_symm: bool=True) -> SparseMatrix:
         """
         Create a COO format sparse representation of the accumulated values. NOTE: As scipy
         does not support multidimensional arrays, this object is from the "sparse" module.
 
-        :param symm: ensure matrix is symmetric on return
+        :param make_symm: ensure matrix is symmetric on return
         :return: a sparse.COO matrix
         """
         _coords = [[], [], [], []]
         _data = []
         _m = self.mat
         _inner_indices = [[0, 0], [0, 1], [1, 0], [1, 1]]
-        for i, j in _m.keys():
-            for k, l in _inner_indices:
-                v = _m[i, j][k, l]
+        for _i, _j in _m.keys():
+            for _k, _l in _inner_indices:
+                v = _m[_i, _j][_k, _l]
                 if v != 0:
-                    _coords[0].append(i)
-                    _coords[1].append(j)
-                    _coords[2].append(k)
-                    _coords[3].append(l)
+                    _coords[0].append(_i)
+                    _coords[1].append(_j)
+                    _coords[2].append(_k)
+                    _coords[3].append(_l)
                     _data.append(v)
 
         _m = sparse.COO(_coords, _data, self.shape, has_duplicates=False)
 
-        if symm:
+        if make_symm:
             _m = Sparse4DAccumulator.symm(_m)
 
         return _m
 
     @staticmethod
-    def _flip(c_row):
+    def _flip(c_row: np.ndarray) -> np.ndarray:
         """
         Flip indices (coordinates) as pairs: (i,j), (k,l) -> (j,i), (l,k)
 
@@ -501,7 +515,7 @@ class Sparse4DAccumulator(object):
         return c_row
 
     @staticmethod
-    def symm(_m):
+    def symm(_m: SparseMatrix) -> SparseMatrix:
         """
         Make a 4D COO matrix symmetric, all elements above and below the diagonal are included.
         Duplicate entries will be summed.
@@ -518,8 +532,7 @@ class Sparse4DAccumulator(object):
         return sparse.COO(_coords, _data, shape=_m.shape, has_duplicates=True)
 
 
-def max_offdiag_4d(_m):
-    # type: (sparse.COO) -> np.ndarray
+def max_offdiag_4d(_m: SparseMatrix) -> np.ndarray:
     """
     Determine the maximum off-diagonal summed signal, where "summed signal" refers to reducing the
     the tensor to a 2d matrix by summing over the last two axes (2x2 submatrices).
@@ -530,7 +543,7 @@ def max_offdiag_4d(_m):
     return max_offdiag(_m.sum(axis=(2, 3)).tocsr())
 
 
-def flatten_tensor_4d(_m):
+def flatten_tensor_4d(_m: SparseMatrix) -> SparseMatrix:
     """
     Flatten a 4D tensor into 2D by doubling the first two dimensions. It is assumed that the matrix
     has already been made symmetric (if required).
@@ -541,18 +554,18 @@ def flatten_tensor_4d(_m):
     _coords = [[], []]
     _data = []
     for n in range(_m.nnz):
-        i, j, k, l = _m.coords[:, n]
-        ii = 2*i
-        jj = 2*j
-        _coords[0].append(ii+k)
-        _coords[1].append(jj+l)
+        _i, _j, _k, _l = _m.coords[:, n]
+        ii = 2*_i
+        jj = 2*_j
+        _coords[0].append(ii+_k)
+        _coords[1].append(jj+_l)
         _data.append(_m.data[n])
 
     _m = scisp.coo_matrix((_data, _coords), shape=(2*_m.shape[0], 2*_m.shape[1]))
     return _m
 
 
-def compress_4d(_m, _mask):
+def compress_4d(_m: SparseMatrix, _mask: np.ndarray) -> SparseMatrix:
     """
     Remove rows and columns of a sparse 4D matrix using a 1d boolean mask. Masking operates on
     only the first two primary axes (essentially a 2D matrix with 2x2 cells). If the input is not
@@ -587,7 +600,7 @@ def compress_4d(_m, _mask):
     return sparse.COO(keep_coords, keep_data, shape=new_shape, has_duplicates=False)
 
 
-def dotdot(_m, _a):
+def dotdot(_m: SparseMatrix, _a: np.ndarray) -> SparseMatrix:
     """
     Assuming A is a vector representing the trace of a diagonal matrix, dotdot
     performs the transformation dot(A.T,dot(M,A)) on  a sparse matrix.
@@ -602,7 +615,7 @@ def dotdot(_m, _a):
     return _m
 
 
-def kr_bistochastic_4d(m4d, **kwargs):
+def kr_bistochastic_4d(m4d: SparseMatrix, **kwargs: Optional[Dict[str,Any]]) -> Tuple[SparseMatrix, np.ndarray]:
     """
     Knight-Ruiz applied to a NxNx2x2 tensor. The scale factors are determined by first converting
     this to a 2D matrix, summed on axis 2 and 3. The method is intended for determining scale-factors

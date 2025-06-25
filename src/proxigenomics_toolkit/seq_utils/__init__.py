@@ -1,26 +1,23 @@
 from .seq_utils import (
-    revcomp,
+    IndexedFasta,
+    SequenceAnalyzer,
+    SiteCounter,
     count_bam_reads,
     count_fasta_sequences,
-    IndexedFasta,
     digest_info,
     ligation_info,
-    SiteCounter,
-    SequenceAnalyzer
+    revcomp,
 )
 from .splitters import simple_splitter
 
 __all__ = [
-    # From seq_utils.py
-    'revcomp',
+    'IndexedFasta',
+    'SequenceAnalyzer',
+    'SiteCounter',
     'count_bam_reads',
     'count_fasta_sequences',
-    'IndexedFasta',
     'digest_info',
     'ligation_info',
-    'SiteCounter',
-    'SequenceAnalyzer',
-
-    # From splitters.py
+    'revcomp',
     'simple_splitter',
 ]

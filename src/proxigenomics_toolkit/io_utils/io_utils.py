@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import pickle
+from typing import IO, List, Optional, TypeVar
 
 import yaml
 
@@ -12,8 +13,10 @@ logger = logging.getLogger(__name__)
 # default buffer for incremental read/write
 DEF_BUFFER = 16384
 
+T = TypeVar('T')
 
-def save_object(file_name, obj):
+
+def save_object(file_name: str, obj: object) -> None:
     """
     Serialize an object to a file with gzip compression. .gz will automatically be
     added if missing.
@@ -25,7 +28,7 @@ def save_object(file_name, obj):
         pickle.dump(obj, out_h)
 
 
-def load_object(file_name):
+def load_object(file_name: str) -> T:
     """
     Deserialize an object from a file with automatic support for compression.
 
@@ -42,7 +45,7 @@ def load_object(file_name):
             return pickle.load(in_h, encoding='latin1')
 
 
-def open_input(file_name, mode='rb'):
+def open_input(file_name: str, mode: str='rb') -> IO:
     """
     Open a text file for input. The filename is used to indicate if it has been
     compressed. Recognising gzip and bz2.
@@ -59,7 +62,10 @@ def open_input(file_name, mode='rb'):
     return open(file_name, mode)
 
 
-def open_output(file_name, append=False, compress=None, mode='w'):
+def open_output(file_name: str,
+                append: bool=False,
+                compress: Optional[str]=None,
+                mode: str='w') -> IO:
     """
     Open a text stream for reading or writing. Compression can be enabled
     with either 'bzip2' or 'gzip'. Additional option for gzip compression
@@ -95,7 +101,10 @@ def open_output(file_name, append=False, compress=None, mode='w'):
         return out_h
 
 
-def multicopy_tostream(file_name, *ostreams, bufsize=None, binary_io=False):
+def multicopy_tostream(file_name: str,
+                       ostreams: List[IO],
+                       bufsize: Optional[int]=None,
+                       binary_io: bool=False) -> None:
     """
     Copy an input file to multiple output streams.
     :param file_name: input file name
@@ -114,7 +123,11 @@ def multicopy_tostream(file_name, *ostreams, bufsize=None, binary_io=False):
                 oi.write(buf)
 
 
-def multicopy_tofile(file_name, *output_names, bufsize=None, binary_io=False, compress=None):
+def multicopy_tofile(file_name: str,
+                     output_names: List[str],
+                     bufsize: Optional[int]=None,
+                     binary_io: bool=False,
+                     compress: Optional[str]=None) -> None:
     """
     Copy an input file to multiple output files.
     :param file_name: input file name
@@ -151,8 +164,7 @@ def multicopy_tofile(file_name, *output_names, bufsize=None, binary_io=False, co
                 if _hndl:
                     _hndl.close()
 
-
-def write_to_stream(stream, data, fmt='plain'):
+def write_to_stream(stream: IO, data: object, fmt: str= 'plain') -> None:
     """
     Write an object out to a stream, possibly using a serialization format
     different to default string representation.
@@ -171,7 +183,7 @@ def write_to_stream(stream, data, fmt='plain'):
         raise ValueError('Unsupported format: {0}'.format(fmt))
 
 
-def read_from_stream(stream, fmt='yaml'):
+def read_from_stream(stream: IO, fmt: str='yaml') -> object:
     """
     Load an object instance from a serialized format. How, in terms of classes
     the object is represented will depend on the serialized information. For

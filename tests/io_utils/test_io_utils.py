@@ -1,13 +1,21 @@
 import gzip
-import os
 import io
-import pickle
 import json
-import yaml
+import os
+import pickle
 
 import pytest
-from src.proxigenomics_toolkit.io_utils.io_utils import save_object, open_output, load_object, multicopy_tostream, \
-    multicopy_tofile, write_to_stream, read_from_stream
+import yaml
+
+from proxigenomics_toolkit.io_utils.io_utils import (
+    load_object,
+    multicopy_tofile,
+    multicopy_tostream,
+    open_output,
+    read_from_stream,
+    save_object,
+    write_to_stream,
+)
 
 
 def test_save_object_creates_file():
@@ -196,7 +204,7 @@ def test_multicopy_tostream_writes_to_multiple_streams2(text_data, binary_data):
     for _d, _isbin in [(text_data, False), (binary_data, True)]:
         # Create output file streams and write data
         with open(_d['out1'], _d['wmode']) as out1, open(_d['out2'], _d['wmode']) as out2:
-            multicopy_tostream(_d['in'], out1, out2, binary_io=_isbin)
+            multicopy_tostream(_d['in'], [out1, out2], binary_io=_isbin)
         # Verify _d in both output files
         with open(_d['out1'], _d['rmode']) as out1, open(_d['out2'], _d['rmode']) as out2:
             assert out1.read() == _d['data'], "Data mismatch in output_file1."
@@ -205,7 +213,7 @@ def test_multicopy_tostream_writes_to_multiple_streams2(text_data, binary_data):
 
 def test_multicopy_tofile_copies_to_multiple_files(text_data, binary_data):
     for _d, _isbin in [(text_data, False), (binary_data, True)]:
-        multicopy_tofile(_d['in'], _d['out1'], _d['out2'], binary_io=_isbin)
+        multicopy_tofile(_d['in'], [_d['out1'], _d['out2']], binary_io=_isbin)
         with open(_d['out1'], _d['rmode']) as out1, open(_d['out2'], _d['rmode']) as out2:
             assert out1.read() == _d['data'], "Data mismatch in output_file1."
             assert out2.read() == _d['data'], "Data mismatch in output_file2."

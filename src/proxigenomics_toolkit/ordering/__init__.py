@@ -1,36 +1,28 @@
 from .graphical import (
-    hc_order,
     adhoc_order,
     decompose_graph,
-    inter_weight_matrix,
     dfs_weighted,
+    dijkstra_all_shortest_numpy,
     edgeiter_to_nodelist,
-    inverse_edge_weights
+    hc_order,
+    inter_weight_matrix,
+    inverse_edge_weights,
 )
-from .tsp import (
-    reciprocal_counts,
-    scale_mat,
-    similarity_to_distance,
-    lkh_order,
-    write_lkh,
-    read_lkh
-)
+from .tsp import lkh_order, read_lkh, reciprocal_counts, scale_mat, similarity_to_distance, write_lkh
 
 __all__ = [
-    # From graphical.py
-    'hc_order',
     'adhoc_order',
     'decompose_graph',
-    'inter_weight_matrix',
     'dfs_weighted',
+    'dijkstra_all_shortest_numpy',
     'edgeiter_to_nodelist',
+    'hc_order',
+    'inter_weight_matrix',
     'inverse_edge_weights',
-
-    # From tsp.py
+    'lkh_order',
+    'read_lkh',
     'reciprocal_counts',
     'scale_mat',
     'similarity_to_distance',
-    'lkh_order',
     'write_lkh',
-    'read_lkh',
 ]

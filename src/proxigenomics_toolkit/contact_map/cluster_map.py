@@ -5,23 +5,37 @@ import re
 import subprocess
 import warnings
 from collections import defaultdict
+from collections.abc import Collection
 from copy import deepcopy
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
+import gfa_io
 import networkx as nx
 import numpy as np
+import numpy.typing as npt
 import pandas
+import pandas as pd
 import pysam
 import scipy.sparse as sp
 import tqdm
+from Bio.SeqRecord import SeqRecord
 from gfa_io import GFA
+from tensorflow.python.ops.linalg.sparse.sparse_csr_matrix_ops import SparseMatrix
 
-from ..exceptions import *
+from ..exceptions import (
+    ApplicationException,
+    InvalidCoverageFormatError,
+    NoRemainingClustersException,
+    NotFoundException,
+    ReportFormatException,
+    UnknownOrientationStateException,
+)
 from ..linalg import kr_bistochastic
 from ..misc_utils import make_dir, package_path
 from ..seq_utils import IndexedFasta
-from .contact_map import SeqOrder
+from .contact_map import ContactMap, SeqOrder
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +44,16 @@ MEGAHIT_PATTERN = re.compile(r'.*?multi=(\d+\.\d*).*?')
 FLYE_PATTERN = re.compile(r'.*dp:(\d+).*')
 
 
-def coverage_data_extractor(cov_data):
+def coverage_data_extractor(cov_data: pd.DataFrame) -> Callable:
     """
-    For supplied coverage data, return values from the DataFrame object
-    :param cov_data: pandas DataFrame indexed on seq_id
-    :return: extractor instance
+    For supplied coverage data, return values from the DataFrame object.
+    :param cov_data: Pandas DataFrame indexed on seq_id.
+    :return: Extractor instance.
     """
-    def _extractor(seq_record):
+    def _extractor(seq_record: SeqRecord) -> float:
         """
-        :param seq_record: Bio.SeqRecord instance
-        :return: float coverage
+        :param seq_record: Bio.SeqRecord instance.
+        :return: float coverage.
         """
         try:
             return cov_data.loc[seq_record.id].values[0]
@@ -48,11 +62,11 @@ def coverage_data_extractor(cov_data):
     return _extractor
 
 
-def spades_extractor(seq_record):
+def spades_extractor(seq_record: SeqRecord) -> float:
     """
     For SPAdes assemblies, we can extract the coverage statistic contained in the contig name.
-    :param seq_record: Bio.SeqRecord instance
-    :return: float coverage
+    :param seq_record: Bio.SeqRecord instance.
+    :return: Float coverage.
     """
     m = SPADES_PATTERN.match(seq_record.name)
     if m is None:
@@ -60,11 +74,11 @@ def spades_extractor(seq_record):
     return float(m.group(1))
 
 
-def megahit_extractor(seq_record):
+def megahit_extractor(seq_record: SeqRecord) -> float:
     """
     For Megahit assemblies, we can extract the coverage statistic contained in the contig description.
-    :param seq_record: Bio.SeqRecord instance
-    :return: float coverage
+    :param seq_record: Bio.SeqRecord instance.
+    :return: Float coverage.
     """
     m = MEGAHIT_PATTERN.match(seq_record.description)
     if m is None:
@@ -72,12 +86,12 @@ def megahit_extractor(seq_record):
     return float(m.group(1))
 
 
-def flye_extractor(seq_record):
+def flye_extractor(seq_record: SeqRecord) -> float:
     """
     For Flye assemblies, we can extract the coverage statistic contained in the contig description.
     Note: older versions of Flye did not include this information in the contig description.
-    :param seq_record: Bio.SeqRecord instance
-    :return: float coverage
+    :param seq_record: Bio.SeqRecord instance.
+    :return: Float coverage.
     """
     m = FLYE_PATTERN.match(seq_record.description)
     if m is None:
@@ -85,7 +99,7 @@ def flye_extractor(seq_record):
     return float(m.group(1))
 
 
-def add_cluster_names(clustering, prefix='CL'):
+def add_cluster_names(clustering: dict, prefix: str='CL') -> None:
     """
     Add sequential names beginning from 1 to a clustering in-place.
 
@@ -93,8 +107,8 @@ def add_cluster_names(clustering, prefix='CL'):
     largest cluster number is performed, so names will sort conveniently
     in alphanumeric order and align to the eye in output information.
 
-    :param clustering: clustering solution returned from ContactMap.cluster_map
-    :param prefix: static prefix of cluster names.
+    :param clustering: Clustering solution returned from ContactMap.cluster_map.
+    :param prefix: Static prefix of cluster names.
     """
     try:
         num_width = max(1, int(np.ceil(np.log10(max(clustering)+1))))
@@ -102,17 +116,17 @@ def add_cluster_names(clustering, prefix='CL'):
         num_width = 1
 
     for cl_id in clustering:
-        # names will 1-based
+        # names will be 1-based
         clustering[cl_id]['name'] = '{0}{1:0{2}d}'.format(prefix, cl_id+1, num_width)
 
 
-def bistochastic_graph(g_in):
+def bistochastic_graph(g_in: nx.Graph) -> nx.Graph:
     """
     Make a graph bistochastic by normalizing its adjacency matrix. Returns a normalized copy
     of the original graph.
 
-    :param g_in: input graph
-    :return: normalized group
+    :param g_in: Input graph.
+    :return: Normalized group.
     """
     _adj_mat = sp.csr_matrix(nx.adjacency_matrix(g_in))
     _adj_mat, _ = kr_bistochastic(_adj_mat)
@@ -125,39 +139,50 @@ def bistochastic_graph(g_in):
     return g_out
 
 
-def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
-                exclude_names=None, norm_method='sites', append_singletons=True,
-                from_extent=False, fdr_alpha=0.05, use_entropy=False, gfa_file=None,
-                markov_scale=None, vary_markov=False, regularize=None, exclude_degen=True):
+def cluster_map(contact_map: ContactMap,
+                seed: int,
+                work_dir: str='.',
+                n_iter: Optional[int]=None,
+                exclude_names: Optional[List[str]]=None,
+                norm_method: str='sites',
+                append_singletons: bool=True,
+                from_extent: bool=False,
+                fdr_alpha: float=0.05,
+                use_entropy: bool=False,
+                gfa_file: Optional[str]=None,
+                markov_scale: Optional[float]=None,
+                vary_markov: bool=False,
+                regularize: Optional[float]=None,
+                exclude_degen: bool=True) -> dict:
     """
     Cluster a contact map into groups, as an approximate proxy for "species" bins.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param seed: a random seed
-    :param work_dir: working directory to which files are written during clustering
-    :param n_iter: for method supporting iterations, specify a non-default number
-    :param exclude_names: a collection of sequence identifiers to exclude when clustering
-    :param norm_method: noramlisation method to apply to contact map
-    :param append_singletons: append additional clusters for isolated sequences not subjected
+    :param contact_map: An instance of ContactMap to cluster.
+    :param seed: A random seed.
+    :param work_dir: Working directory to which files are written during clustering.
+    :param n_iter: For method supporting iterations, specify a non-default number.
+    :param exclude_names: A collection of sequence identifiers to exclude when clustering.
+    :param norm_method: Normalization method to apply to contact map.
+    :param append_singletons: Append additional clusters for isolated sequences not subjected
     to clustering.
-    :param from_extent: use the extent of the contact map to determine the number of clusters
-    :param fdr_alpha: FDR alpha used in gothic normalisation
-    :param use_entropy: enable entropy correction within infomap clustering
-    :param gfa_file: path to a GFA file, if supplied, multilayered clustering will be performed
-    :param markov_scale: adjust scale of markov time in Infomap clustering (default: 1.0)
-    :param vary_markov: enable variable markov time in Infomap clustering (not compatible with markov_scale)
-    :param regularize: enable regularization and set strength of prior in Infomap clustering
-    (fully connected Bayesian prior network)
-    :param exclude_degen: exclude degenerate segments from clustering
-    :return: a dictionary detailing the full clustering of the contact map
+    :param from_extent: Use the extent of the contact map to determine the number of clusters.
+    :param fdr_alpha: FDR alpha used in gothic normalization.
+    :param use_entropy: Enable entropy correction within infomap clustering.
+    :param gfa_file: Path to a GFA file, if supplied, multilayered clustering will be performed.
+    :param markov_scale: Adjust the scale of markov time in Infomap clustering (default: 1.0).
+    :param vary_markov: Enable variable markov time in Infomap clustering (not compatible with markov_scale).
+    :param regularize: Enable regularization and set strength of prior in Infomap clustering
+    (fully connected Bayesian prior network).
+    :param exclude_degen: Exclude degenerate segments from clustering.
+    :return: A dictionary detailing the full clustering of the contact map.
     """
 
-    def _read_tree(pathname):
+    def _read_tree(pathname: str) -> Dict[int, npt.NDArray]:
         """
         Read a tree clustering file as output by Infomap.
 
-        :param pathname: the path to the tree file
-        :return: dict of cluster_id to array of seq_ids
+        :param pathname: The path to the tree file.
+        :return: Dict mapping cluster_ids to the respective array of seq_ids.
         """
         with open(pathname, 'r') as in_h:
             cl_map = defaultdict(list)
@@ -226,7 +251,7 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
             options.extend(['-N', str(n_iter)])
 
             exe_path = package_path('external', 'Infomap')
-            subprocess.check_call([exe_path] + options + [graph_file, work_dir],
+            subprocess.check_call([exe_path, *options, graph_file, work_dir],
                                   stdout=stdout, stderr=subprocess.STDOUT)
 
             cl_to_ids = _read_tree(os.path.join(work_dir, f'{base_name}.tree'))
@@ -298,21 +323,24 @@ def cluster_map(contact_map, seed, work_dir='.', n_iter=None,
     return clustering
 
 
-def cluster_report(contact_map, clustering, source_fasta=None, assembler='generic', coverage_file=None):
+def cluster_report(contact_map: ContactMap,
+                   clustering: dict,
+                   source_fasta: Optional[str]=None,
+                   assembler: str='generic',
+                   coverage_file: Optional[str]=None) -> None:
     """
     For each cluster, analyze the member sequences and build a report.
     Update the clustering dictionary with this result by adding a "report" for each.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param clustering: clustering solution dictionary
-    :param source_fasta: source assembly fasta (other than defined at instantiation)
-    :param assembler: name of assembly software used in creating contigs
-    :param coverage_file: csv file containing coverage information: seq_id,cov
+    :param contact_map: An instance of ContactMap to cluster.
+    :param clustering: Clustering solution dictionary.
+    :param source_fasta: Source assembly fasta (other than defined at instantiation).
+    :param assembler: Name of assembly software used in creating contigs.
+    :param coverage_file: Csv file containing coverage information: seq_id,cov.
     """
 
     logger.info('Analyzing the contents of each cluster')
 
-    cov_data = None
     depth_extractor = None
     if coverage_file is not None:
         cov_data = pandas.read_csv(coverage_file, sep=',', index_col=0, skip_blank_lines=True,
@@ -400,9 +428,18 @@ def cluster_report(contact_map, clustering, source_fasta=None, assembler='generi
             clustering[cl_id]['report'] = report
 
 
-def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='greedy_modularity',
-                    from_extent=False, norm=True, bisto=True, scale=True, norm_method='sites',
-                    fdr_alpha=0.05, only_new=False, alg_args=None):
+def revise_clusters(target_clusters: npt.ArrayLike,
+                    contact_map: ContactMap,
+                    clustering: dict,
+                    algorithm_name: str='greedy_modularity',
+                    from_extent: bool=False,
+                    norm: bool=True,
+                    bisto: bool=True,
+                    scale: bool=True,
+                    norm_method: str='sites',
+                    fdr_alpha: float=0.05,
+                    only_new: bool=False,
+                    alg_args: Optional[dict]=None) -> dict:
     """
     Subject a list of target clusters to a new round of community detection. Each cluster is
     extracted as a subgraph and then clustered. Expected methods return type is a list of
@@ -414,19 +451,19 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
         'greedy_modularity'
         'louvain'
 
-    :param target_clusters: 0-based cluster ids
-    :param contact_map: the relevant contact map
-    :param clustering: the relevant clustering solution
-    :param algorithm_name: partitioning algorithm Eg. parts = func(graph). Networkx.community
-    :param from_extent: use the extent map to define the subgraph
-    :param norm: use normalized rather than raw counts as edge weights
-    :param bisto: additionally make adjacency matrix bistochastic
-    :param scale: scale weights (max_w = 1)
-    :param norm_method: normalisation method to apply to contact map
-    :param fdr_alpha: false discovery rate
-    :param only_new: only return clusters that were newly created
-    :param alg_args: a dict of additional arguments to pass to the partitioning algorithm
-    :return: revised clustering object
+    :param target_clusters: 0-based cluster ids.
+    :param contact_map: The relevant contact map.
+    :param clustering: The relevant clustering solution.
+    :param algorithm_name: Partitioning algorithm e.g., Parts = func(graph). Networkx.community.
+    :param from_extent: Use the extent map to define the subgraph.
+    :param norm: Use normalized rather than raw counts as edge weights.
+    :param bisto: Additionally, make adjacency matrix bistochastic.
+    :param scale: Scale weights (max_w = 1).
+    :param norm_method: Normalization method to apply to contact map.
+    :param fdr_alpha: False discovery rate.
+    :param only_new: Only return clusters that were newly created.
+    :param alg_args: A dict of additional arguments to pass to the partitioning algorithm.
+    :return: Revised clustering object.
     """
 
     algorithm_repository = {
@@ -448,7 +485,7 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
                                    f'Choices are: {",".join(algorithm_repository.keys())}')
 
     # prepare the contact map's complete graph
-    # this will always be a single-layer graph, therefore just dereference the first element
+    # this will always be a single-layer graph, therefore, just dereference the first element
     g_complete = to_graph(contact_map, node_id_type='external', norm=norm,
                           bisto=bisto, scale=scale, norm_method=norm_method,
                           from_extent=from_extent, fdr_alpha=fdr_alpha)[0]
@@ -456,7 +493,7 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
     # begin with the current cluster solution
     revised = clustering.copy()
 
-    # prepare a lookup table of existing sequence details, these will be transfered after revision
+    # prepare a lookup table of existing sequence details, these will be transferred after revision
     seq2report = {}
     for cl_id in revised:
         assert 'report' in revised[cl_id], f'The clustering solution did not contain a report for {cl_id}'
@@ -519,14 +556,25 @@ def revise_clusters(target_clusters, contact_map, clustering, algorithm_name='gr
     return revised
 
 
-def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, node_id_type='internal',
-             clustering=None, cl_list=None, exclude_names=None, norm_method='sites',
-             filter_weak_edges=False, from_extent=False, fdr_alpha=0.05, disconnect_degen=True):
+def to_graph(contact_map: ContactMap,
+             gfa_file: Optional[str]=None,
+             norm: bool=True,
+             bisto: bool=False,
+             scale: bool=False,
+             node_id_type: str='internal',
+             clustering: Optional[dict]=None,
+             cl_list: Optional[List[int]]=None,
+             exclude_names: Optional[List[str]]=None,
+             norm_method: str='sites',
+             filter_weak_edges: bool=False,
+             from_extent: bool=False,
+             fdr_alpha: float=0.05,
+             disconnect_degen: bool=True) -> List[nx.Graph]:
     """
     Convert the seq_map to an undirected Networkx Graph.
 
     The contact map is used as an adjacency matrix, where sequences/contigs are the nodes and Hi-C interactions
-    become weighted edges. Edge weigths are dictated by normalisation choices (bisto, norm, scale).
+    become weighted edges. Edge weight is dictated by normalization choices (bisto, norm, scale).
 
     Explaining node id type:
 
@@ -544,35 +592,35 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     cluster membership, length, gc, etc. Data structures which store these additional features are indexed in the same
     way as the full contact map.
 
-    Lastly there may be "external" uses of the graph representation of the contact map, where the original sequence ids
-    are the most usedful.
+    Lastly, there may be "external" uses of the contact map graph representation, where the original sequence ids
+    are the most useful.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param gfa_file: path to a GFA file, if supplied, multilayered clustering will be performed
-    :param norm: use normalized rather than raw counts as edge weights
-    :param bisto: additionally make adjacency matrix bistochastic
-    :param scale: scale weights (max_w = 1)
-    :param node_id_type: select the node id type (internal, external)
-    :param clustering: bin3C clustering solution, required for subsets of the total map
-    :param cl_list: list of clusters to include in the graph (0-based internal ids)
-    :param exclude_names: a collection of sequences (by external name) to exclude when clustering
-    :param norm_method: normalisation method to apply to contact map
-    :param filter_weak_edges: remove edges with weight in the bottom 5% of the distribution
-    :param from_extent: normalized extent map acts as the basis for sequence map.
-    :param fdr_alpha: FDR alpha used in gothic normalisation
-    :param disconnect_degen: prune all edges of degenerate segments
-    :return: list of graphs (1 or 2) depending on inputs
+    :param contact_map: An instance of ContactMap to cluster.
+    :param gfa_file: Path to a GFA file, if supplied, multilayered clustering will be performed.
+    :param norm: Use normalized rather than raw counts as edge weights.
+    :param bisto: Additionally, make adjacency matrix bistochastic.
+    :param scale: Scale weights (max_w = 1).
+    :param node_id_type: Select the node id type (internal, external).
+    :param clustering: bin3C clustering solution, required for subsets of the total map.
+    :param cl_list: List of clusters to include in the graph (0-based internal ids).
+    :param exclude_names: A collection of sequences (by external name) to exclude when clustering.
+    :param norm_method: Normalization method to apply to contact map.
+    :param filter_weak_edges: Remove edges with weight in the bottom 5% of the distribution.
+    :param from_extent: Normalized extent map acts as the basis for sequence map.
+    :param fdr_alpha: FDR alpha used in gothic normalization.
+    :param disconnect_degen: Prune all edges of degenerate segments.
+    :return: List of graphs (1 or 2) depending on inputs.
     """
 
-    def make_gapless_lookup(iterable):
+    def make_gapless_lookup(iterable: Iterable) -> dict:
         """ create a lookup of gapless index to some corresponding set of values """
         return dict(zip(contact_map.order.gapless_positions(), iterable))
 
-    def _ix_to_seqid(ix_sub):
+    def _ix_to_seqid(ix_sub: int) -> str:
         """ return external sequence name/id """
         return contact_map.seq_info[_to_seqid[ix_sub]].name
 
-    def _ix_to_self(ix_sub):
+    def _ix_to_self(ix_sub: int) -> int:
         """ return the same value """
         return ix_sub
 
@@ -583,16 +631,16 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     except KeyError:
         raise ApplicationException('unknown node_id_type {}'.format(node_id_type))
 
-    def _attr_basic(ix):
+    def _attr_basic(ix: int) -> dict:
         return {'length': contact_map.seq_info[_to_seqid[ix]].length}
 
-    def _attr_with_cov(ix):
+    def _attr_with_cov(ix: int) -> dict:
         return {'cluster': _to_clid[ix],
                 'length': int(_to_report[ix]['length']),
                 'gc': float(_to_report[ix]['gc']),
                 'cov': float(_to_report[ix]['cov'])}
 
-    def _attr_without_cov(ix):
+    def _attr_without_cov(ix: int) -> dict:
         return {'cluster': _to_clid[ix],
                 'length': int(_to_report[ix]['length']),
                 'gc': float(_to_report[ix]['gc'])}
@@ -600,13 +648,13 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     report_map = {True: _attr_with_cov,
                   False: _attr_without_cov}
 
-    def create_graph(_map):
+    def create_graph(_map: SparseMatrix) -> nx.Graph:
         """
         Build the graph, either rapidly or more slowly with additional attributes.
-        ** Note:  ** this function makes use of local scope rather than pass parameters.
+        ** Note: ** this function makes use of local scope rather than pass parameters.
 
-        :param _map: the contact map to convert to a graph
-        :return: a Networkx Graph based on the supplied map
+        :param _map: The contact map to convert to a graph.
+        :return: A Networkx Graph based on the supplied map.
         """
         g = nx.Graph(name='contact_graph')
         # being a symmetric matrix, only upper/lower triangle is needed
@@ -618,12 +666,11 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
 
         return g
 
-    def prune_edges(graph, exclude_names):
+    def prune_edges(graph: nx.Graph) -> None:
         """
         Prune in-place the edges of a graph based on a list of sequence names to exclude.
-        :param graph: the graph to prune
-        :param exclude_names: internal or external sequence ids
-        :return: pruned graph
+        :param graph: The graph to prune.
+        :return: Pruned graph.
         """
         logger.info(f'{graph.name}: Before exclusion: {graph.order():,} nodes, {graph.size():,} edges')
 
@@ -647,20 +694,18 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
                     logger.debug(f'{graph.name}: disconnecting {_name} failed as no corresponding node in graph')
                     n_failed += 1
                     continue
-                to_remove = [(u, v) for v in g.neighbors(u)]
+                to_remove = [(u, v) for v in graph.neighbors(u)]
                 n_removed_edges += len(to_remove)
-                g.remove_edges_from(to_remove)
+                graph.remove_edges_from(to_remove)
 
         elif node_id_type == 'external':
             for u in exclude_names:
                 if not graph.has_node(u):
                     n_failed += 1
-                elif graph.degree(u) > 0:
-                    to_remove = [(u, v) for v in g.neighbors(u)]
+                elif graph.degree[u] > 0:
+                    to_remove = [(u, v) for v in graph.neighbors(u)]
                     n_removed_edges += len(to_remove)
                     graph.remove_edges_from(to_remove)
-        else:
-            raise ApplicationException(f'{graph.name}: unknown node_id_type {node_id_type}')
 
         if n_missing > 0:
             logger.warning(f'{graph.name}: {n_missing:,} sequences mentioned for clustering exclusion were not found')
@@ -672,6 +717,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
             logger.info(f'{graph.name}: excluded sequences resulted in the deletion of {n_removed_edges:,} edges')
 
         # prune_edges - no return value
+        return None
 
     if cl_list is not None:
         if not clustering:
@@ -699,7 +745,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     if not sp.isspmatrix_coo(_map):
         _map = _map.tocoo()
 
-    # if requested prepare a scale factor for maximum edge weight = 1
+    # if requested, prepare a scale factor so that the maximum edge-weight is 1
     scl = 1.0 / _map.max() if scale else 1
 
     logger.debug('Building graph from edges')
@@ -740,7 +786,7 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
         logger.info('GFA file supplied, preparing for multilayered clustering')
         g_gfa, degen_segments = read_gfa(gfa_file, paths_to_edges=True, read_progress=False)
         g_gfa = bistochastic_graph(g_gfa)
-        # extend the list of excluded sequences to include degenerate segments within assembly graph
+        # extend the list of excluded sequences to include degenerate segments within the assembly graph
         if disconnect_degen:
             logger.info(f'Edges linking {len(degen_segments)} degenerate segments within the assembly will be pruned')
             if exclude_names is None:
@@ -749,10 +795,10 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
                 exclude_names += degen_segments
         graph_layers.append(g_gfa)
 
-    # disconnect any node mentioned in exclusion list
+    # disconnect any node mentioned in the exclusion list
     if exclude_names:
         for g in graph_layers:
-            prune_edges(g, exclude_names)
+            prune_edges(g)
 
     _order = sum(g.order() for g in graph_layers)
     _size = sum(g.size() for g in graph_layers)
@@ -761,19 +807,23 @@ def to_graph(contact_map, gfa_file=None, norm=True, bisto=False, scale=False, no
     return graph_layers
 
 
-def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, min_extent=None,
-                    white_list=('primary', 'rescued', 'revised')):
+def enable_clusters(contact_map: ContactMap,
+                    clustering: dict,
+                    cl_list: Optional[npt.ArrayLike]=None,
+                    ordered_only: bool=True,
+                    min_extent: Optional[int]=None,
+                    white_list: Optional[npt.ArrayLike]=('primary', 'rescued', 'revised')) -> npt.ArrayLike:
     """
     Given a clustering and list of cluster ids (or none), enable (unmask) the related sequences in
     the contact map. If a requested cluster has not been ordered, it will be dropped.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param clustering: a clustering solution to the contact map
-    :param cl_list: a list of cluster ids to enable or None (all ordered clusters)
-    :param ordered_only: include only clusters which have been ordered
-    :param min_extent: include only clusters whose total extent is greater
-    :param white_list: a list of cluster status values to include
-    :return: the filtered list of cluster ids in ascending numerical order
+    :param contact_map: An instance of ContactMap to cluster.
+    :param clustering: A clustering solution to the contact map.
+    :param cl_list: A list of cluster ids to enable or None (all ordered clusters).
+    :param ordered_only: Include only clusters which have been ordered.
+    :param min_extent: Include only clusters whose total extent is greater.
+    :param white_list: A list of cluster status values to include.
+    :return: The filtered list of cluster ids in ascending numerical order.
     """
 
     # start with all clusters if unspecified
@@ -794,7 +844,7 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
     if len(cl_list) == 0:
         raise NoRemainingClustersException('There were no primary clusters')
 
-    # use instance criterion if not explicitly set
+    # use instance's value of the criterion if not explicitly set
     if min_extent is None:
         min_extent = contact_map.min_extent
 
@@ -820,7 +870,7 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
     cl_list = sorted(cl_list)
 
     # only pass sequences which were accepted.
-    # primarily this handles the situation where clustering solutions reference
+    # primarily, this handles the situation where clustering solutions reference
     # sequences with weak/no Hi-C observations (low signal).
     _accepted = contact_map.get_primary_acceptance_mask()
     if ordered_only:
@@ -850,29 +900,40 @@ def enable_clusters(contact_map, clustering, cl_list=None, ordered_only=True, mi
     return cl_list
 
 
-def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, permute=False, max_image_size=None,
-                  ordered_only=False, min_extent=None, use_taxo=False, flatten=False, norm_method=None,
-                  show_sequences=False, **kwargs):
+def plot_clusters(contact_map: ContactMap,
+                  fname: str,
+                  clustering: dict,
+                  cl_list: Optional[npt.ArrayLike]=None,
+                  simple: bool=True,
+                  permute: bool=False,
+                  max_image_size: Optional[int]=None,
+                  ordered_only: bool=False,
+                  min_extent: Optional[int]=None,
+                  use_taxo: bool=False,
+                  flatten: bool=False,
+                  norm_method: Optional[str]=None,
+                  show_sequences: bool=False,
+                  **kwargs: Optional[dict]) -> None:
     """
     Plot the contact map, annotating the map with cluster names and boundaries.
 
     For large contact maps, block reduction can be employed to reduce the size for plotting purposes. Using
     block_reduction=2 will reduce the map dimensions by a factor of 2. Must be integer.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param fname: output file name
-    :param clustering: the cluster solution
-    :param cl_list: the list of cluster ids to include in plot. If none, include all ordered clusters
-    :param simple: True plot seq map, False plot the extent map
-    :param permute: permute the map with the present order
-    :param max_image_size:  maximum allowable image size before rescale occurs
-    :param ordered_only: include only clusters which have been ordered
-    :param min_extent: include only clusters whose total extent is greater
-    :param use_taxo: use taxonomic information within clustering, assuming it exists
-    :param flatten: for tip-based, flatten matrix rather than marginalise
-    :param norm_method: normalisation method to apply to contact map
-    :param show_sequences: true = grid lines and labels mark individual sequences rather than whole clusters
-    :param kwargs: additional options passed to plot()
+    :param contact_map: An instance of ContactMap to cluster.
+    :param fname: Output file name.
+    :param clustering: The cluster solution.
+    :param cl_list: The list of cluster ids to include in plot. If none, include all ordered clusters.
+    :param simple: True plot seq map, False plot the extent map.
+    :param permute: Permute the map with the present order.
+    :param max_image_size:  Maximum allowable image size before the rescaling occurs.
+    :param ordered_only: Include only clusters which have been ordered.
+    :param min_extent: Include only clusters whose total extent is greater.
+    :param use_taxo: Use taxonomic information within clustering, assuming it exists.
+    :param flatten: For tip-based, flatten matrix rather than marginalize.
+    :param norm_method: Normalization method to apply to contact map.
+    :param show_sequences: True = grid lines and labels mark individual sequences rather than whole clusters.
+    :param kwargs: Additional options passed to plot().
     """
 
     if cl_list is None:
@@ -889,7 +950,7 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
             contact_map.prepare_seq_map(norm=True, bisto=True, norm_method=norm_method)
     else:
         if norm_method is None:
-            # default normalisation for extent maps
+            # default normalization for extent maps
             # TODO change this to sites, if it proves better
             norm_method = 'sites'
 
@@ -954,12 +1015,17 @@ def plot_clusters(contact_map, fname, clustering, cl_list=None, simple=True, per
                      max_image_size=max_image_size, flatten=flatten, norm_method=norm_method, **kwargs)
 
 
-def write_report(fname, clustering, format_columns=True, sep=','):
+def write_report(fname: str,
+                 clustering: dict,
+                 format_columns: bool=True,
+                 sep: str=',') -> None:
     """
     Create a tabular report of each cluster from a clustering report. Write the table to CSV.
 
-    :param fname: the CSV output file name
-    :param clustering: the input clustering, which contains a report
+    :param fname: The CSV output file name.
+    :param clustering: The input clustering, which contains a report.
+    :param format_columns: When true, apply the column-specific formatting (limiting precision of floats primarily).
+    :param sep: Separator between column names.
     """
     COLUMN_FORMATS = {
         'id': "{:d}",
@@ -978,26 +1044,25 @@ def write_report(fname, clustering, format_columns=True, sep=','):
         'cov_std': "{:.4e}"
     }
 
-    def _expect(w, x):
+    def _expect(w: npt.NDArray, x: npt.NDArray) -> npt.NDArray:
         """
         Weighted expectation of x with weights w. Weights do not need to be
-        normalised
+        normalized.
 
-        :param w: weights
-        :param x: variable
-        :return: expectation value of x
+        :param w: Weights.
+        :param x: Variable.
+        :return: Expectation value of x.
         """
-        wsum = float(w.sum())
-        return np.sum(w * x) / wsum
+        return np.sum(w * x) / w.sum()
 
-    def _n50(x):
+    def _n50(x: npt.NDArray[int]) -> int:
         """
         Calculate N50 for the given list of sequence lengths.
-        :param x: a list of sequence lengths
-        :return: the N50 value
+        :param x: A list of sequence lengths.
+        :return: The N50 value.
         """
         x = np.sort(x)[::-1]
-        return x[x.cumsum() > x.sum() / 2][0]
+        return x[x.cumsum() > x.sum() / 2].item(0)
 
     df = []
     has_cov = False
@@ -1047,15 +1112,16 @@ def write_report(fname, clustering, format_columns=True, sep=','):
     df.to_csv(fname, sep=sep)
 
 
-def find_lost_singletons(contact_map, clustering):
+def find_lost_singletons(contact_map: ContactMap,
+                         clustering: dict) -> npt.NDArray:
     """
-    Return the seq_ids of all sequences which were excluded from clustering. These sequences
+    Return the seq_ids of all sequences that were excluded from clustering. These sequences
     will have been excluded for being too short (in clustering) or with too few Hi-C observations.
     Sequences excluded for length during initial map creation will not be found.
 
-    :param contact_map: the contact map in question
-    :param clustering: a clustering solution for this contact map.
-    :return: the sequence ids for each excluded sequence.
+    :param contact_map: The contact map in question.
+    :param clustering: A clustering solution for this contact map.
+    :return: The sequence ids for each excluded sequence.
     """
     _lost = contact_map.order.new_mask(True)
     for v in clustering.values():
@@ -1064,14 +1130,16 @@ def find_lost_singletons(contact_map, clustering):
     return np.where(_lost)[0]
 
 
-def write_mcl(contact_map, fname, clustering):
+def write_mcl(contact_map: ContactMap,
+              fname: str,
+              clustering: dict) -> None:
     """
     Write out the clustering solution in the format used by MCL. Each line represents a cluster
     with all members on the line show as a space-delimited list.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param fname: output file name
-    :param clustering: our clustering solution
+    :param contact_map: An instance of ContactMap to cluster.
+    :param fname: Output file name.
+    :param clustering: Our clustering solution.
     """
     with open(fname, 'w') as outh:
         seq_info = contact_map.seq_info
@@ -1085,23 +1153,29 @@ def write_mcl(contact_map, fname, clustering):
             outh.write('\n')
 
 
-def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=None, clobber=False, only_large=False):
+def write_fasta(contact_map: ContactMap,
+                output_dir: str,
+                clustering: dict,
+                cl_list: Optional[npt.ArrayLike]=None,
+                source_fasta: Optional[str]=None,
+                clobber: bool=False,
+                only_large: bool=False) -> None:
     """
     Write out multi-fasta for all determined clusters in clustering.
 
-    For each cluster, sequence order and orientation is as follows.
-    1. for unordered clusters, sequences will be in descending nucleotide length and
+    For each cluster, sequence order and orientation are as follows.
+    1. For unordered clusters, sequences will be in descending nucleotide length and
        in original input orientation.
-    2. for ordered clusters, sequences will appear in the prescribed order and
+    2. For ordered clusters, sequences will appear in the prescribed order and
        orientation.
 
-    :param contact_map: an instance of ContactMap to cluster
-    :param output_dir: parent output path
-    :param clustering: the clustering result, possibly also ordered
-    :param cl_list: the list of cluster ids to include in plot. If none, include all ordered clusters
-    :param source_fasta: specify a source fasta file, otherwise assume the same path as was used in parsing
-    :param clobber: True overwrite files in the output path. Does not remove directories
-    :param only_large: Limit output to only clusters whose extent exceedds min_extent setting
+    :param contact_map: An instance of ContactMap to cluster.
+    :param output_dir: Parent output path.
+    :param clustering: The clustering result, possibly also ordered.
+    :param cl_list: The list of cluster ids to include in plot. If none, include all ordered clusters.
+    :param source_fasta: Specify a source fasta file, otherwise assume the same path as was used in parsing.
+    :param clobber: True overwrite files in the output path. Does not remove directories.
+    :param only_large: Limit output to only clusters whose extent exceeds min_extent setting.
     """
 
     make_dir(output_dir, exist_ok=True)
@@ -1193,25 +1267,32 @@ def write_fasta(contact_map, output_dir, clustering, cl_list=None, source_fasta=
                         SeqIO.write(_seq, output_h, 'fasta')
 
 
-def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clobber=False, bam_file=None,
-                version=None, cmdline=None):
+def extract_bam(contact_map: ContactMap,
+                clustering: dict,
+                output_dir: str,
+                cluster_ids: npt.ArrayLike,
+                threads: int=4,
+                clobber: bool=False,
+                bam_file: Optional[str]=None,
+                version: Optional[str]=None,
+                cmdline: Optional[str]=None) -> Tuple[str, int, int]:
     """
     Extract a BAM file from the full source BAM file used in creating the contact map.
     Only read-pairs whose ends are both contained with the cluster are retained.
 
-    :param contact_map: the contact_map from which to extract a cluster
-    :param clustering: the clustering solution for this contact map
-    :param output_dir: the output directory to write the extracted bam
-    :param cluster_ids: the 0-based cluster identifier
-    :param threads: the number of threads to use when parsing the bam file
-    :param clobber: overwrite output if True
-    :param bam_file: alternative location for BAM file
-    :param version: version stamp string for BAM file
-    :param cmdline: commandline options used for BAM file
-    :return: tuple (output file name, number of pairs)
+    :param contact_map: The contact_map from which to extract a cluster.
+    :param clustering: The clustering solution for this contact map.
+    :param output_dir: The output directory to write the extracted bam.
+    :param cluster_ids: The 0-based cluster identifier.
+    :param threads: The number of threads to use when parsing the bam file.
+    :param clobber: Overwrite output if True.
+    :param bam_file: Alternative location for the BAM file.
+    :param version: Version stamp string for the BAM file.
+    :param cmdline: Commandline options used for the BAM file.
+    :return: Tuple (output file name, number of pairs).
     """
 
-    def _next_informative(_bam_iter, _pbar):
+    def _next_informative(_bam_iter: pysam.IteratorRow, _pbar: tqdm.tqdm) -> pysam.AlignedSegment:
         while True:
             r = next(_bam_iter)
             _pbar.update()
@@ -1291,14 +1372,17 @@ def extract_bam(contact_map, clustering, output_dir, cluster_ids, threads=4, clo
         return output_file, n_refs, n_pairs
 
 
-def write_multilayer_pajek(output_filename, layers, add_inter=True, inter_scale=0.1):
+def write_multilayer_pajek(output_filename: str,
+                           layers: Collection[nx.Graph],
+                           add_inter: bool=True,
+                           inter_scale: float=0.1) -> None:
     """
     Write a Pajek format graph multi-layer graph.
 
-    :param output_filename:
-    :param layers: an iterable collection of graphs, each of which will be a layer
-    :param add_inter: add inter-layer links between coincident nodes
-    :param inter_scale: inter-layer edge weight
+    :param output_filename: The output filename.
+    :param layers: An iterable collection of graphs, each of which will be a layer.
+    :param add_inter: Add interlayer links between coincident nodes.
+    :param inter_scale: The interlayer edge-weight.
     """
     assert len(layers) > 1, 'more than one layer is required'
 
@@ -1339,22 +1423,24 @@ def write_multilayer_pajek(output_filename, layers, add_inter=True, inter_scale=
                     output_h.write(f'1 {node_registry[_id]} 2 {inter_scale}\n')
 
 
-def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
+def read_gfa(gfa_filename: str,
+             paths_to_edges: bool=False,
+             read_progress: bool=False) -> Tuple[nx.Graph, List]:
     """
     Convert a GFA file into a Networkx graph. At present, it is assumed that the GFA file contains
     optional depth attributes generated by the Flye assembler.
 
-    :param gfa_filename: path to the input GFA file
-    :param paths_to_edges: only include edges that are mentioned as paths, rather than all link records
-    :param read_progress: show a tqdm progress bar while reading GFA file
-    :return: undirected Networkx graph, list of degenerate segments
+    :param gfa_filename: Path to the input GFA file.
+    :param paths_to_edges: Only include edges that are mentioned as paths, rather than all link records.
+    :param read_progress: Show a tqdm progress bar while reading the GFA file.
+    :return: Undirected Networkx graph, list of degenerate segments.
     """
 
-    def find_degenerate_segments(gfa):
+    def find_degenerate_segments(gfa: gfa_io.GFA) -> List:
         """
-        find all segments which were placed more than once within paths.
-        :param gfa:
-        :return:
+        Find all segments that were placed more than once within paths.
+        :param gfa: An instance of a GFA file.
+        :return: The list of degenerately placed segments.
         """
         segment_frequency = defaultdict(int)
         for _, _path in gfa.paths.items():
@@ -1364,7 +1450,7 @@ def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
 
     gfa = GFA(gfa_filename, skip_sequence_data=True, progress=read_progress)
 
-    # segment which have been incorporated into multiple paths can lead
+    # a segment that has been incorporated into multiple paths can lead
     # to bridges in the graph structure and cluster multiplicity
     degen_segments = find_degenerate_segments(gfa)
 
@@ -1384,12 +1470,16 @@ def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
         assert 'RC' in _link.optionals, f'Link ({u},{v}) is missing the RC field. Was this gfa created by Flye?'
         cov = _link.optionals['RC'].get()
         if link_registry.has_edge(u, v):
-            link_registry[u][v]['udir'].append(_link.src_orient)
-            link_registry[u][v]['vdir'].append(_link.dest_orient)
-            link_registry[u][v]['rc'].append(cov)
+            # type warnings for the following three lines cannot be resolved.
+            link_registry[u][v]['udir'].append(_link.src_orient) # type: ignore
+            link_registry[u][v]['vdir'].append(_link.dest_orient) # type: ignore
+            link_registry[u][v]['rc'].append(cov) # type: ignore
         else:
             cov = _link.optionals['RC'].get()
-            link_registry.add_edge(u, v, udir=[_link.src_orient], vdir=[_link.dest_orient], rc=[cov])
+            link_registry.add_edge(u, v,
+                                   udir=[_link.src_orient],
+                                   vdir=[_link.dest_orient],
+                                   rc=[cov])
 
     # Assemblers will likely treat links as directed and report more than one record per segment pair.
     # We therefore take the mean depth as edge weights.
@@ -1411,19 +1501,19 @@ def read_gfa(gfa_filename, paths_to_edges=False, read_progress=False):
     return g_out, degen_segments
 
 
-def harden_clustering(clustering, contact_map):
+def harden_clustering(clustering: dict, contact_map: ContactMap) -> dict:
     """
     Reduce a potentially soft-clustering solution to a hard-clustering solution by removing
     repeated assignments for any given sequence. Only the assignment to the largest cluster
     is retained -- measured by extent.
 
-    TODO ironically, the present codebase does not handle the notion of a soft-clustering solution
-       and will have to be implemented if these solutions prove superior.
-
-    :param clustering: the clustering solution
-    :param contact_map: the contact map
-    :return the deduplicated clustering
+    :param clustering: The clustering solution.
+    :param contact_map: The contact map.
+    :return: The deduplicated clustering.
     """
+    # TODO ironically, the present codebase does not handle the notion of a soft-clustering solution
+    #   and will have to be implemented if these solutions prove superior.
+
     # potential one-to-many lookup seq->cluster
     seq2cl = defaultdict(set)
     for cl_id, cl_info in clustering.items():
@@ -1469,11 +1559,12 @@ def harden_clustering(clustering, contact_map):
     return hard_clustering
 
 
-def remove_empty_clusters(clustering):
+def remove_empty_clusters(clustering: dict) -> int:
     """
     In-place removal of any clusters which are empty, with the implication that ids within the
     clustering will no longer be consecutive integers.
-    :param clustering:
+    :param clustering: The clustering to act on.
+    :return: The number of clusters removed.
     """
     n_depleted = 0
     for k in list(clustering):

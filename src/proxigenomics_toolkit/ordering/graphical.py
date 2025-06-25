@@ -1,29 +1,66 @@
 import logging
+from typing import Generator, Iterator, List, Optional, cast
 
 import community
 import lap
 import networkx as nx
 import numpy as np
 from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.spatial.distance import pdist
+
+from ..types import EdgeData
 
 logger = logging.getLogger(__name__)
 
 
-def hc_order(g, metric='cityblock', method='ward', use_olo=True):
+def dijkstra_all_shortest_numpy(g: nx.Graph) -> np.ndarray:
     """
-    Basic hierarchical clustering to determine an order of contigs, using optimal leaf ordering (poor time complexity)
-    to adjust tips.
-    :param g: the graph to order
-    :param metric: any
-    :param method: ward or complete
-    :param use_olo: use optimal leaf ordering
-    :return: an ordering
+    Computes all-pairs shortest paths for a given graph using Dijkstra's algorithm
+    and returns the distance matrix as a NumPy array.
+
+    This function leverages NetworkX's `all_pairs_dijkstra_path_length` to compute
+    the shortest path lengths between all nodes in the input graph. The results are
+    stored in a distance matrix where each cell (u, v) contains the shortest distance
+    from node `u` to node `v`. Nodes are indexed by their numeric order in the graph.
+
+    :param g: The input graph on which to compute all-pairs shortest paths. The graph
+              should be a NetworkX graph object.
+    :type g: nx.Graph
+    :return: A distance matrix as a NumPy 2D array, where cell (u, v) represents
+             the shortest distance from node `u` to node `v` in the graph. If no
+             path exists, the value will be 0.
+    :rtype: np.ndarray
     """
-    z = linkage(nx.adjacency_matrix(g).todense(), method=method, metric=metric, optimal_ordering=use_olo)
+    dist_mat = np.zeros((g.order(), g.order()), dtype=np.float64)
+    for u, d in nx.all_pairs_dijkstra_path_length(g):
+        for v, w in d.items():
+            dist_mat[u, v] = w
+    return dist_mat
+
+
+def hc_order(g: nx.Graph,
+             metric: str='cityblock',
+             method: str='ward',
+             use_olo: bool=True) -> np.ndarray:
+    """
+    Basic hierarchical clustering to determine an ordering of contigs, using
+    optimal leaf ordering (poor time complexity) to adjust tips.
+    :param g: the graph to order, where larger edge weight implies higher connectivity.
+    :param metric: any metric supported by scipy.spatial.distance.pdist, e.g. cityblock, euclidean, cosine, etc..
+    :param method: ward or complete.
+    :param use_olo: use optimal leaf ordering.
+    :return: an ordering.
+    """
+    # assuming larger weights implies higher connectivity, we invert them
+    # and subsequently compute all shortest paths.
+    dist_mat = dijkstra_all_shortest_numpy(inverse_edge_weights(g.copy()))
+    # push this through pdist to eliminate complaints by the linkage method
+    dist_mat = pdist(dist_mat, metric=metric)
+    z = linkage(dist_mat, method=method, metric=metric, optimal_ordering=use_olo)
     return np.array(dendrogram(z, no_plot=True)['leaves'])
 
 
-def adhoc_order(g, alpha=1.0):
+def adhoc_order(g: nx.Graph, alpha: float=1.0) -> np.ndarray:
     """
     Attempt to determine an ordering based only upon cross-terms
     between contigs using graphical techniques.
@@ -37,9 +74,9 @@ def adhoc_order(g, alpha=1.0):
     5. TODO add optimal leaf ordering is possible.
     6. Unconnected contigs are included by order of appearance.
 
-    :param g: graph to order
+    :param g: graph to order.
     :param alpha: additive constant used in inverse weighting.
-    :return: an ordering
+    :return: an ordering.
     """
     sg_list = decompose_graph(g)
 
@@ -68,7 +105,7 @@ def adhoc_order(g, alpha=1.0):
     return np.array(new_order + isolates)
 
 
-def decompose_graph(g, reso=1.0):
+def decompose_graph(g: nx.Graph, reso: float=1.0) -> list[nx.Graph]:
     """
     Using the Louvain algorithm for community detection, as
     implemented in the community module, determine the partitioning
@@ -89,14 +126,14 @@ def decompose_graph(g, reso=1.0):
         # start with a complete copy of the graph
         gi = g.copy()
         # build the list of nodes not in this partition and remove them
-        to_remove = [n for n in g.nodes_iter() if part[n] != pi]
+        to_remove = [n for n in g.nodes() if part[n] != pi]
         gi.remove_nodes_from(to_remove)
         decomposed.append(gi)
 
     return decomposed
 
 
-def inter_weight_matrix(g, sg, norm=True):
+def inter_weight_matrix(g: nx.Graph, sg: List[nx.Graph], norm: bool=True) -> np.ndarray:
     """
     Calculate the weight of interconnecting edges between subgraphs identified from
     Louvain decomposition.
@@ -109,20 +146,19 @@ def inter_weight_matrix(g, sg, norm=True):
 
     nsub = len(sg)
     w = np.zeros((nsub, nsub))
-    if norm:
-        n = np.zeros_like(w, dtype=np.int64)
+    n = None if not norm else np.zeros_like(w, dtype=np.int64)
 
     # for each subgraph i
     for i in range(nsub):
 
         # for every node in subgraph i
-        for u in sg[i].nodes_iter():
+        for u in sg[i].nodes():
 
             # for every other subgraph j
             for j in range(i+1, nsub):
 
                 # for every node in subgraph j
-                for v in sg[j].nodes_iter():
+                for v in sg[j].nodes():
 
                     # sum weight of edges connecting subgraphs i and j
                     if g.has_edge(u, v):
@@ -138,12 +174,12 @@ def inter_weight_matrix(g, sg, norm=True):
     return w
 
 
-def dfs_weighted(g, source=None):
+def dfs_weighted(g: nx.Graph, source: Optional[int]=None) -> Generator:
     """
-    Depth first search, guided by edge weights
+    Depth-first search, guided by edge weights
     :param g: the graph to traverse
     :param source: the starting node used during recursion
-    :return: list of nodes
+    :return: yields nodes
     """
     # either produce edges for all components or only those in list
     if source is None:
@@ -157,7 +193,9 @@ def dfs_weighted(g, source=None):
             continue
         visited.add(start)
         # for node 'start' visit neighbours by edge weight
-        stack = [(start, iter(sorted(g[start], key=lambda x: -g[start][x]['weight'])))]
+        stack = [(start,
+                  iter(sorted(g[start],
+                              key=lambda x: cast(EdgeData, g[start][x])['weight'], reverse=True)))]
         while stack:
             parent, children = stack[-1]
             try:
@@ -165,12 +203,14 @@ def dfs_weighted(g, source=None):
                 if child not in visited:
                     yield parent, child
                     visited.add(child)
-                    stack.append((child, iter(sorted(g[child], key=lambda x: -g[child][x]['weight']))))
+                    stack.append((child,
+                                  iter(sorted(g[child],
+                                              key=lambda x: cast(EdgeData, g[child][x])['weight'], reverse=True))))
             except StopIteration:
                 stack.pop()
 
 
-def edgeiter_to_nodelist(edge_iter):
+def edgeiter_to_nodelist(edge_iter: Iterator) -> list:
     """
     Create a list of nodes from an edge iterator
     :param edge_iter: edge iterator
@@ -184,11 +224,13 @@ def edgeiter_to_nodelist(edge_iter):
     return nlist
 
 
-def inverse_edge_weights(g, alpha=1.0):
+def inverse_edge_weights(g: nx.Graph, alpha: float=1.0) -> nx.Graph:
     """
     Invert the weights on a graph's edges
     :param g: the graph
     :param alpha: additive constant in denominator to avoid DBZ
     """
     for u, v in g.edges():
-        g.edge[u][v]['weight'] = 1.0 / (g[u][v]['weight'] + alpha)
+        edge_data = cast(EdgeData, g[u][v])
+        edge_data['weight'] = 1.0 / (edge_data['weight'] + alpha)
+    return g

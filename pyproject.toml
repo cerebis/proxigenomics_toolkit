@@ -84,6 +84,8 @@ namespaces = false
 addopts = [
     "--import-mode=importlib",
 ]
+log_cli = false
+log_cli_level = "DEBUG"
 
 [tool.mypy]
 python_version = "3.11"

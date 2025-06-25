@@ -1,14 +1,8 @@
-from .louvain import (
-    decompose_graph,
-    cluster,
-    print_info,
-    write_mcl,
-    write_output
-)
+from .louvain import cluster, decompose_graph, print_info, write_mcl, write_output
 
 __all__ = [
-    'decompose_graph',
     'cluster',
+    'decompose_graph',
     'print_info',
     'write_mcl',
     'write_output',

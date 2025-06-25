@@ -1,11 +1,11 @@
 # tests/test_seq_utils.py
 
 import os
+
 import pytest
 
-from src.proxigenomics_toolkit.exceptions import NoRecordsException
-from src.proxigenomics_toolkit.seq_utils.seq_utils import revcomp, count_fasta_sequences, count_bam_reads, IndexedFasta
-
+from proxigenomics_toolkit.exceptions import NoRecordsException
+from proxigenomics_toolkit.seq_utils import IndexedFasta, count_bam_reads, count_fasta_sequences, revcomp
 
 # from pytest_mock import mocker
 

@@ -1,32 +1,35 @@
 import logging
 import os
-
-# TODO suppressing FutureWarnings from seaborn until a release (>12.2) addresses (added 2023-09-18)
 import warnings
 from collections import Counter, OrderedDict, defaultdict, namedtuple
+from typing import Any, ClassVar, Dict, Generator, Hashable, List, Optional, Tuple, cast
 
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas
-
-#import rpy2.robjects as robjects
+import pandas as pd
 import scipy.sparse as sp
 import scipy.stats as st
 import seaborn as sb
 import tqdm
 from astropy.stats import sigma_clip
-
-#from rpy2.robjects import pandas2ri
-#from rpy2.robjects.conversion import localconverter
 from sklearn.mixture import BayesianGaussianMixture
 from statsmodels.stats.multitest import multipletests
 
-from ..contact_map import to_graph
+from ..contact_map import ContactMap, to_graph
 from ..exceptions import RejectedSequenceException
 from ..io_utils import load_object, open_input
 from ..linalg import is_hermitian, make_symmetric
+from ..types import EdgeData
 
+# Presently excluded to eliminate dependency, while the related code is not used.
+#import rpy2.robjects as robjects
+#from rpy2.robjects import pandas2ri
+#from rpy2.robjects.conversion import localconverter
+
+
+# TODO suppressing FutureWarnings from seaborn until a release (>12.2) addresses (added 2023-09-18)
 warnings.filterwarnings('ignore', category=FutureWarning, module='seaborn')
 
 logger = logging.getLogger(__name__)
@@ -39,22 +42,25 @@ logger = logging.getLogger(__name__)
 # does nothing to attract itself more to a singleton cluster with more observed
 # inTRA-sequence pairs. Additionally, many singletons have zero contacts due to very low
 # mappability. This large negative value is used as a marker (rather than np.NaN), as this
-# avoids the contacts column becoming typed as float.
+# avoids the column named contacts becoming typed as float.
 SYMBOLIC_SELF_CONTACTS = -999999
 
 
-def sequence_details(contact_map, coverage_info, mappability_info, clustering):
+def sequence_details(contact_map: ContactMap,
+                     coverage_info: pd.DataFrame,
+                     mappability_info: pd.DataFrame,
+                     clustering: dict) -> tuple[pd.DataFrame, dict, dict]:
     """
     Prepare a table of sequence information to annotate the seq2cluster graph.
 
-    :param contact_map: a bin3C contact map
-    :param coverage_info: coverage data for every sequence
-    :param mappability_info: mappability index for every sequence
-    :param clustering: a bin3C clustering solution for contact_map
-    :return: pandas dataframe of per sequence annotation details
+    :param contact_map: The bin3C contact map.
+    :param coverage_info: Coverage data for every sequence.
+    :param mappability_info: Mappability index for every sequence.
+    :param clustering: A bin3C clustering solution for contact_map.
+    :return: Pandas dataframe of per sequence annotation details.
     """
     # prepare a dataframe of sequence details
-    # 1. start with seq_info from contact map
+    # 1. start with seq_info from the contact map
     seq_info = np.array(contact_map.seq_info, dtype=np.dtype(
         [('offset', np.int64), ('refid', np.int64), ('name', np.object_),
          ('length', np.int64), ('sites', np.int64), ('gc', np.float64)]))
@@ -94,23 +100,25 @@ def sequence_details(contact_map, coverage_info, mappability_info, clustering):
     # for sequences with no cluster membership, assign a cluster id of -1.
     seq_info['cluster'] = pandas.to_numeric(seq_info.cluster.fillna(-1), downcast='integer')
     logger.info('{:,} of {:,} sequences were assigned to no cluster'.format(
-        (seq_info['cluster'] == -1).sum(), len(seq_info)))
+        np.sum(seq_info['cluster'] == -1), len(seq_info)))
 
     _id2cl = seq_info.set_index('seq_id')['cluster'].to_dict()
 
     return seq_info, _ix2info, _id2cl
 
 
-def get_map(_m, full=False, no_diagonal=False):
+def get_map(_m: sp.spmatrix,
+            full: bool=False,
+            no_diagonal: bool=False) -> np.ndarray:
     """
     Return a map (matrix) in the requested form. Either the full matrix or
     upper triangle (half) and optionally excluding the diagonal. The matrix is
     checked for symmetry and made symmetric if necessary (fulL). There is an
     assumption here that the upper half contains the values.
-    :param _m: the matrix (map) in question
-    :param full: True - the full matrix, False - upper triangle
-    :param no_diagonal: drop diagonal elements (True)
-    :return: a copy of the matrix
+    :param _m: The matrix (map) in question.
+    :param full: True - the full matrix, False - upper triangle of matrix.
+    :param no_diagonal: Drop diagonal elements (True).
+    :return: A copy of the matrix.
     """
     if full:
         if not is_hermitian(_m):
@@ -125,7 +133,12 @@ def get_map(_m, full=False, no_diagonal=False):
     return _m
 
 
-def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability_info, min_seq_length, tidy=True):
+def create_seq2cluster_graph(contact_map: ContactMap,
+                             clustering: dict,
+                             coverage_info: pd.DataFrame,
+                             mappability_info: pd.DataFrame,
+                             min_seq_length: int,
+                             tidy: bool=True) -> nx.Graph:
     """
     Create bipartite graph
 
@@ -138,25 +151,26 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     :return:
     """
 
-    def sum_min1(x):
+    def sum_min1(x: np.ndarray) -> float:
         """
         Sum values of x, where any element less than 1 becomes 1.
-        :param x: array to sum
-        :return: sum of x
+        :param x: Array to sum.
+        :return: The sum of x.
         """
         return np.sum(np.maximum(1, x))
 
-    def validate_sequence(ix, seq_name, track_removed=False):
+    def validate_sequence(ix: int,
+                          seq_name: str,
+                          track_removed: bool=False) -> Tuple[str, int]:
         """
         Check that a sequence belongs to a cluster and is sufficiently long. In addition, the
         method keeps track of accepted/rejected sequences and their attributes for each cluster.
         This is later used to calculate updated cluster attributes. As a consequence, this method
         modifies nodes within the graph.
-        :ix: sequence index
-        :seq_name: sequence name
-        :track_removed: when true, attributes of removed sequences are stored with each cluster node
-        :return: cluster_id
-        :raise: RejectedSequenceException for rejected sequences
+        :param ix: Sequence index.
+        :param seq_name: Sequence name.
+        :param track_removed: When true, attributes of removed sequences are stored with each cluster node.
+        :return: Cluster_id.
         """
         cl = _ix2cl[ix]
         if cl == -1:
@@ -188,7 +202,7 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     # prepare some reference objects used during bipartite graph construction
     seq_info, _ix2info, _ix2cl = sequence_details(contact_map, coverage_info, mappability_info, clustering)
 
-    # calculation using weighted means (by length of sequence)
+    # calculation using weighted means (by length of the sequence)
     seq_grp = seq_info.assign(wcv=lambda x: x.length * x.coverage,
                               wgc=lambda x: x.length * x.gc,
                               wuf=lambda x: x.length * x.uniq_frac)
@@ -220,19 +234,19 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     _map = get_map(contact_map.seq_map, full=True, no_diagonal=True)
 
     #
-    # Steps in building the graph
+    # Steps in building the graph.
     #
-    # 1. add cluster nodes
-    # 2. add sequence nodes
-    #   a. for all sequences u:
-    #   b.   for all sequences ui which interact with (are neighbors of) the source node u
-    #   c.     find the owning cluster for neighbour sequence ui, which becomes the destination node v
-    #   d.     for the edge (u, v) add interaction count (edge weight: w(u, ui)) between sequences u and ui.
+    # 1. Add cluster nodes.
+    # 2. Add sequence nodes.
+    #   A. For all sequences u:
+    #   b.   for all the sequences ui which interact with (are neighbors of) the source node u.
+    #   c.     Find the owning cluster for neighbor sequence ui, which becomes the destination node v.
+    #   d.     For the edge (u, v) add interaction count (edge weight: w(u, ui)) between sequences u and ui.
 
     g = nx.Graph()
 
-    # first create all the "cluster" nodes
-    # where their ids follow the syntax "('c', int)"
+    # First, create all the "cluster" nodes
+    # where their ids follow the syntax "('c', int)".
     for _cl, _cl_dat in clustering.items():
         node_attr = cl_agg.loc[_cl].to_dict(dict)
         assert len(_cl_dat['seq_ids']) == int(node_attr['size']), 'problem with pandas calculated cluster size'
@@ -338,12 +352,10 @@ def create_seq2cluster_graph(contact_map, clustering, coverage_info, mappability
     return g
 
 
-def simple_spurious_estimation(seq2cl_graph):
+def simple_spurious_estimation(seq2cl_graph: nx.Graph) -> None:
     """
-    Rough estimate of spurious fraction
-
+    A rough estimate of the spurious fraction.
     :param seq2cl_graph:
-    :return:
     """
 
     inter_list = []
@@ -400,16 +412,18 @@ def simple_spurious_estimation(seq2cl_graph):
         sum(in_out['R'] * in_out['ulen'] / in_out['ulen'].sum())))
 
 
-def calculate_rejection_thresholds(seq2cl_graph, prob_outlier=0.98):
+def calculate_rejection_thresholds(seq2cl_graph: nx.Graph,
+                                   prob_outlier: float=0.98) -> Tuple[float, float]:
     """
     Calculate the rejection threshold for observed interacting sequences, whose characteristics would
     suggest that they are likely to be significant (true) interactions. Here, we consider the ratio of
     contacts to number of sites (cps) and length to number of sites (lps). High values of either
-    quantity indicates sequences which statistically we would expect to interact strongly. These sequences
+    quantity indicate sequences which statistically we would expect to interact strongly. These sequences
     are often long, abundant and with high density of sites.
 
-    :param seq2cl_graph: the bipartite sequence to cluster graph
-    :param prob_outlier: the quantile to use in establishing rejection thresholds
+    :param seq2cl_graph: The bipartite sequence to cluster graph.
+    :param prob_outlier: The quantile to use in establishing rejection thresholds.
+    :return: (cps_max, lps_max)
     """
 
     Info = namedtuple('info', ['node_id', 'length', 'sites', 'contacts'])
@@ -443,15 +457,15 @@ def calculate_rejection_thresholds(seq2cl_graph, prob_outlier=0.98):
     lps_max = df_inter.lps.quantile(q=prob_outlier)
     logger.info('Max CPS {} LPS {}'.format(cps_max, lps_max))
 
-    # indices of observations with less than these value are rejected
+    # indices of observations less than this value are rejected
     ix_cps = df_inter.cps > cps_max
     ix_lps = df_inter.lps > lps_max
-    logger.info('CPS rejects: {:,}'.format(ix_cps.sum()))
-    logger.info('LPS rejects: {:,}'.format(ix_lps.sum()))
+    logger.info('CPS rejects: {:,}'.format(np.sum(ix_cps)))
+    logger.info('LPS rejects: {:,}'.format(np.sum(ix_lps)))
 
     # we will reject the union of these criteria
     ix = ix_cps | ix_lps
-    logger.info('Quantile filtering will exclude {:,} outliers'.format(ix.sum()))
+    logger.info('Quantile filtering will exclude {:,} outliers'.format(np.sum(ix)))
 
     # plot a sample of the total observations
     f = plt.figure()
@@ -464,46 +478,50 @@ def calculate_rejection_thresholds(seq2cl_graph, prob_outlier=0.98):
     return cps_max, lps_max
 
 
-def fill_zeros(df, columns, value):
+def fill_zeros(df: pd.DataFrame,
+               columns: List[str],
+               value: float) -> None:
     for cn in columns:
         zix = df[cn] == 0
-        logger.info('For {} replacing {} zeros with {}'.format(cn, zix.sum(), value))
+        logger.info('For {} replacing {} zeros with {}'.format(cn, np.sum(zix), value))
         df.loc[zix, cn] = value
 
 
-def rmatrix2pandas(_rmat):
-    """
-    Convert an R matrix object into a pandas dataframe
-    :param _rmat: R matrix object from rpy2
-    :return: pandas dataframe
-    """
-    _it = _rmat.items()
-    _out = defaultdict(dict)
-    for j in range(_rmat.dim[1]):
-        for i in range(_rmat.dim[0]):
-            _out[_rmat.rownames[i]][_rmat.colnames[j]] = next(_it)[1]
-    _out = pandas.DataFrame(_out).T
-    return _out
+# def rmatrix2pandas(_rmat):
+#     """
+#     Convert an R matrix object into a pandas dataframe
+#     :param _rmat: R matrix object from rpy2
+#     :return: pandas dataframe
+#     """
+#     _it = _rmat.items()
+#     _out = defaultdict(dict)
+#     for j in range(_rmat.dim[1]):
+#         for i in range(_rmat.dim[0]):
+#             _out[_rmat.rownames[i]][_rmat.colnames[j]] = next(_it)[1]
+#     _out = pandas.DataFrame(_out).T
+#     return _out
 
 
-def rvector2dict(_rvec):
-    """
-    Convert an R vector object into a dictionary
-    :param _rvec: R vector object from rpy2
-    :return: dictionary
-    """
-    return dict(_rvec.items())
+# def rvector2dict(_rvec):
+#     """
+#     Convert an R vector object into a dictionary
+#     :param _rvec: R vector object from rpy2
+#     :return: dictionary
+#     """
+#     return dict(_rvec.items())
 
 
-def robust_read_csv(csv_name, column_def, sep=','):
+def robust_read_csv(csv_name: str,
+                    column_def: Dict[str, Any],
+                    sep: str=',') -> pd.DataFrame:
     """
-    Read CSV file whether or not it has a header. If a non-numeric row-0 is
+    Read the CSV file, handling whether it has a header or not. If a non-numeric row-0 is
     found, drop it from the table.
 
-    :param csv_name: csv file name
-    :param column_def: dictionary of column names and types
-    :param sep: separator used
-    :return: pandas.DataFrame
+    :param csv_name: Csv file name.
+    :param column_def: Dictionary of column names and types.
+    :param sep: Separator used.
+    :return: Pandas.DataFrame.
     """
     try:
         df = pandas.read_csv(csv_name, header=None, sep=sep, names=list(column_def), dtype=column_def)
@@ -513,24 +531,25 @@ def robust_read_csv(csv_name, column_def, sep=','):
     return df
 
 
-def mappability_report(filename, kmer_size):
+def mappability_report(filename: str,
+                       kmer_size: int) -> pd.DataFrame:
     """
     Prepare a report on per-sequence mappability from a genmap text output.
     The estimate of the unique fraction ignores the last k-1 positions since GenMap always reports zero.
 
-    :param filename: genmap text file
-    :param kmer_size: k-mer size used in genmap 'map' analysis
-    :return: pandas.DataFrame
+    :param filename: Genmap text file.
+    :param kmer_size: K-mer size used in genmap 'map' analysis.
+    :return: Pandas.DataFrame.
     """
 
-    def read_genmap(_filename):
+    def read_genmap(_filename: str) -> Generator[Tuple[str, np.ndarray], None]:
         """
         Generator for reading records from the fasta-format genmap text output.
         The first line of each record is the standard FASTA header, while the next contains space-delimited
         floats represent relative uniqueness of the k-mer that begins at that position.
 
-        :param _filename: genmap text file
-        :return: tuple(seq_id, numpy array of mappability values)
+        :param _filename: Genmap text file.
+        :return: Tuple(seq_id, numpy array of mappability values).
         """
         with open_input(_filename, 'rt') as input_h:
             try:
@@ -553,7 +572,9 @@ def mappability_report(filename, kmer_size):
 
     logger.debug(f'Found mappability results for {len(map_data):,} sequences')
 
-    map_data = pandas.DataFrame.from_dict(map_data, orient='index', columns=['length', 'mean', 'median', 'uniq_frac'])
+    map_data = pandas.DataFrame.from_dict(map_data,
+                                          orient='index',
+                                          columns=['length', 'mean', 'median', 'uniq_frac'])
     map_data.index.name = 'name'
     return map_data
 
@@ -579,27 +600,27 @@ class SequencePromiscuity(object):
     interactions with PS alone.
     """
 
-    ITEM_CHOICES = {'internal': 'seq_ids', 'external': 'seq_names'}
+    ITEM_CHOICES: ClassVar[Dict[str, str]] = {'internal': 'seq_ids', 'external': 'seq_names'}
 
     def __init__(self,
-                 contact_map,
-                 clustering,
-                 cluster_cover=0.5,
-                 min_degree_fraction=0.01,
-                 min_bin_length=1_000_000,
-                 min_bin_size=3,
-                 max_seq_length=500_000,
-                 node_id_type='external'):
+                 contact_map: ContactMap,
+                 clustering: dict,
+                 cluster_cover: float=0.5,
+                 min_degree_fraction: float=0.01,
+                 min_bin_length: int=1_000_000,
+                 min_bin_size: int=3,
+                 max_seq_length: int=500_000,
+                 node_id_type: str='external') -> None:
         """
-        :param contact_map: a contact map
-        :param clustering: a clustering solution for the given map
-        :param cluster_cover: the threshold interaction cover between a sequence and the members of a cluster
-        :param min_degree_fraction: the minimum fractional weight of an edge to be considered significant. Fractional
-        weight is normalised against the total weighted degree of the node u.
-        :param min_bin_length: the minimum extent of a cluster to be considered for promiscuity
-        :param min_bin_size: the minimum size (number of members) for a cluster to be considered
-        :param max_seq_length: the maximum length of a sequence to be considered
-        :param node_id_type: graph uses internal or external ids.
+        :param contact_map: a contact map.
+        :param clustering: a clustering solution for the given map.
+        :param cluster_cover: The threshold "interaction cover" between a sequence and the members of a cluster.
+        :param min_degree_fraction: The minimum fractional weight of an edge to be considered significant. Fractional.
+        Weight is normalized against the total weighted degree of the node u.
+        :param min_bin_length: the minimum extent of a cluster to be considered for promiscuity.
+        :param min_bin_size: The minimum size (number of members) for a cluster to be considered.
+        :param max_seq_length: The maximum length of a sequence to be considered.
+        :param node_id_type: Graph uses internal or external ids.
         """
         self.clustering = clustering
         self.cluster_cover = cluster_cover
@@ -613,28 +634,31 @@ class SequencePromiscuity(object):
         self.mates = self._sequence_promiscuity(hic_graph)
 
     @staticmethod
-    def _weighted_degree(g, u):
+    def _weighted_degree(g: nx.Graph, u: Hashable) -> float:
         """
         Calculate the weighted degree of a node in a graph, this excludes
-        self-loops/
-        :param g: the graph
-        :param u: the node
-        :return: weighted degree
+        self-loops.
+        :param g: The graph.
+        :param u: The node.
+        :return: Weighted degree.
         """
         return sum(g[u][v]['weight'] for v in g[u] if u != v)
 
-    def _relative_connectedness(self, g, u, v_list):
+    def _relative_connectedness(self,
+                                g: nx.Graph,
+                                u: Hashable,
+                                v_list: List[Hashable]) -> float:
         u_degree = SequencePromiscuity._weighted_degree(g, u)
         if u_degree == 0:
             return 0
-
         n = 0
         for v in v_list:
-            if g.has_edge(u, v) and g[u][v]['weight'] / u_degree > self.min_degree_fraction:
+            edge_data = cast(EdgeData, g[u][v])
+            if g.has_edge(u, v) and  edge_data['weight'] / u_degree > self.min_degree_fraction:
                 n += 1
         return n / len(v_list)
 
-    def _sequence_promiscuity(self, g):
+    def _sequence_promiscuity(self, g: nx.Graph) -> Dict[Hashable, List[Hashable]]:
         _mates_registry = defaultdict(list)
         for u in g.nodes():
 
@@ -644,12 +668,15 @@ class SequencePromiscuity(object):
             for cl_id, cl_info in self.clustering.items():
 
                 if cl_info['extent'] <= self.min_bin_length or len(cl_info[self.cl_item]) <= self.min_bin_size:
-                    # clusters of small extent or size are exempt
+                    # clusters possessing small extent or small size are exempt
                     continue
 
                 r = self._relative_connectedness(g, u, cl_info[self.cl_item])
                 if r > self.cluster_cover:
-                    _mates_registry[u].append({'cl_id': cl_id, 'cl_name': cl_info['name'], 'relcon': r, 'extent': cl_info['extent']})
+                    _mates_registry[u].append({'cl_id': cl_id,
+                                               'cl_name': cl_info['name'],
+                                               'relcon': r,
+                                               'extent': cl_info['extent']})
 
         for _id, _mates in _mates_registry.items():
             # reorder by descending cluster extent
@@ -657,15 +684,15 @@ class SequencePromiscuity(object):
 
         return _mates_registry
 
-    def get_promiscuous(self):
+    def get_promiscuous(self) -> dict:
         return {_id: _mates for _id, _mates in self.mates.items() if len(_mates) > 1}
 
-    def get_mates(self, seq_id):
+    def get_mates(self, seq_id: Hashable) -> Optional[List[Hashable]]:
         if seq_id not in self.mates:
             return None
         return self.mates[seq_id]
 
-    def body_count(self, seq_id):
+    def body_count(self, seq_id: Hashable) -> int:
         return len(self.mates[seq_id])
 
 
@@ -679,7 +706,7 @@ class SignificantLinks(object):
     FDR_ALPHA = 0.01
     FDR_METHOD = 'fdr_bh'
 
-    OUTPUT_TABLES = {
+    OUTPUT_TABLES: ClassVar[Dict[str, str]] = {
         'raw': 'raw.csv',
         'spurious_final': 'spurious_final.csv',
         'spurious_raw': 'spurious_raw.csv',
@@ -688,12 +715,17 @@ class SignificantLinks(object):
     }
 
     @staticmethod
-    def get_output_path(parent_dir, table_name):
+    def get_output_path(parent_dir: str, table_name: str) -> str:
         return os.path.join(parent_dir, SignificantLinks.OUTPUT_TABLES[table_name])
 
-    def __init__(self, contact_map_file, clustering_file, coverage_file,
-                 mappability_file, mappability_k,
-                 output_dir, seed):
+    def __init__(self,
+                 contact_map_file: str,
+                 clustering_file: str,
+                 coverage_file: str,
+                 mappability_file: str,
+                 mappability_k: int,
+                 output_dir: str,
+                 seed: int) -> None:
 
         self.contact_map_file = contact_map_file
         self.clustering_file = clustering_file
@@ -724,28 +756,31 @@ class SignificantLinks(object):
     #         robjects.r.source(os.path.join(os.path.dirname(os.path.abspath(__file__)), r_script))
     #         return robjects.globalenv[func_name]
 
-    def write_table(self, df, table_name, description):
+    def write_table(self,
+                    df: pd.DataFrame,
+                    table_name: str,
+                    description: str) -> None:
         """
-        Standardised writing of a table to a file
-        :param df: the pandas table
-        :param table_name: name of the table to write (obtains filename)
-        :param description: a description of logging
+        Standardised writing of a table to a file.
+        :param df: A pandas dataframe table.
+        :param table_name: Name of the table to write (obtains filename).
+        :param description: A description of logging.
         """
         file_path = SignificantLinks.get_output_path(self.output_dir, table_name)
         logger.info(f'Writing {description} to {file_path}')
         df.to_csv(file_path)
 
-    def create_seq2cluster_graph(self, sep=',', min_seq_length=5000):
+    def create_seq2cluster_graph(self, sep: str=',', min_seq_length: int=5000) -> None:
         """
         Create the bipartite graph between sequences and genome_bins (clusters).
 
-        :param sep: variable separator for csv file
-        :param min_seq_length: minimum length for a sequence to be considered
+        :param sep: Variable separator for csv file.
+        :param min_seq_length: Minimum length for a sequence to be considered.
         :return:
         """
         # load bin3C objects
-        contact_map = load_object(self.contact_map_file)
-        clustering = load_object(self.clustering_file)
+        contact_map: ContactMap = load_object(self.contact_map_file)
+        clustering: dict = load_object(self.clustering_file)
 
         logger.info('Extracting coverage data')
         coverage_info = robust_read_csv(self.coverage_file,
@@ -777,7 +812,7 @@ class SignificantLinks(object):
 
         self.seq2cl_graph = seq2cl_graph
 
-    def graph_to_table(self):
+    def graph_to_table(self) -> None:
         """
         Create the inter-genome_bin observation table for model fitting.
         :return: complete unfiltered data frame
@@ -840,11 +875,16 @@ class SignificantLinks(object):
         node_to_cluster = pandas.DataFrame(node_to_cluster)
         logger.info(f'Sequence to cluster table contains {len(node_to_cluster):,} observations')
 
-        # write table of all observations
+        # write the table of all observations
         self.write_table(node_to_cluster, 'raw', 'raw observations')
         self.all_contacts = node_to_cluster
 
-    def outlier_removal(self, initial_sigma=3, min_prob=0.001, n_samples=10000, plot=True):
+    def outlier_removal(self,
+                        initial_sigma: float = 3,
+                        min_prob: float = 0.001,
+                        n_samples: int = 10000,
+                        plot: bool = True) -> None:
+
         """
         Outlier removal aimed at decreasing the FPR within the spurious data table. FPR in this
         case are interactions that are actually non-spurious. These are cases where a sequence
@@ -852,20 +892,21 @@ class SignificantLinks(object):
         include: genome_bin splitting, mobile elements, and conserved regions too confounding to be
         clustered.
 
-        :param initial_sigma: stage 1 - sigma-clipping threshold
-        :param min_prob: stage 2 - minimum probability below which a point is rejected
-        :param n_samples: number of samples to use in stage 2 model fitting.
-        :param plot: create diagnostic plots
-        :return: filtered table
+        :param initial_sigma: Stage 1 - sigma-clipping threshold.
+        :param min_prob: Stage 2 - minimum probability below which a point is rejected.
+        :param n_samples: Number of samples to use in stage 2 model fitting.
+        :param plot: Create diagnostic plots.
+        :return: Filtered table.
         """
         _MAX_POINTS = 2000
         _COLS = ['cpcc', 'cpss']
 
-        def plot_stage(_df, _stage, _format='png'):
-            """ Basic plotting method.
-            :param _df: dataframe to plot
-            :param _stage: stage of plot (int)
-            :param _format: format of plot (png or pdf)
+        def plot_stage(_df: pd.DataFrame, _stage: int, _format: str='png') -> None:
+            """
+            Basic plotting method.
+            :param _df: Dataframe to plot.
+            :param _stage: Stage of plot (int).
+            :param _format: Format of plot (png or pdf).
             """
             if len(_df) > _MAX_POINTS:
                 _df = _df.sample(_MAX_POINTS, random_state=self.seed)
@@ -875,13 +916,15 @@ class SignificantLinks(object):
             g.map_diag(sb.kdeplot, lw=2)
             g.savefig(os.path.join(self.output_dir, f'contact_outliers_stage{_stage}.{_format}'))
 
-        def zscore(_df, _mu=None, _std=None):
+        def zscore(_df: pd.DataFrame,
+                   _mu: Optional[float]=None,
+                   _std: Optional[float]=None) -> pd.DataFrame:
             """
-            Standarize all columns in a dataframe
-            :param _df: dataframe to standardize
-            :param _mu: use these means if supplied, otherwise calculate
-            :param _std: use these SDs if supplied, otherwise calculate
-            :return: standardized dataframe
+            Standardize all columns in a dataframe.
+            :param _df: Dataframe to standardize.
+            :param _mu: Use these means if supplied, otherwise calculate.
+            :param _std: Use these SDs if supplied, otherwise calculate.
+            :return: Standardized dataframe.
             """
             assert len(_df) > 10, 'Dataframe contains too few rows to be reliably standardized'
             if _mu is None:
@@ -923,7 +966,7 @@ class SignificantLinks(object):
         # stage 2: fit a single-component gaussian model to the pre-filtered space
         normal_model = BayesianGaussianMixture(n_components=1, covariance_type='diag', tol=1e-5,
                                                random_state=self.seed, max_iter=1000)
-        normal_model = normal_model.fit(df_smpl)
+        normal_model.fit(df_smpl)
         assert normal_model.converged_, 'Outlier rejection: Gaussian mixture model did not converge'
 
         logger.debug(f'Outlier rejection: converged in {normal_model.n_iter_} iterations')
@@ -933,7 +976,7 @@ class SignificantLinks(object):
         #  transform equivalent to sample and assign probabilities
         df_all['pr_norm'] = np.exp(normal_model.score_samples(zscore(np.log(df_all[_COLS]).copy(), smpl_mu, smpl_sd)))
         df_all['pr_norm'] = multipletests(df_all['pr_norm'], method=self.FDR_METHOD)[1]
-        # lastly redo standardization using the entire table
+        # Lastly, redo standardization using the entire table
         df_all[_COLS] = zscore(np.log(df_all[_COLS]))
         logger.debug('Removing observations with Pr < {:.3g}'.format(min_prob))
         df_all = df_all.query('pr_norm > @min_prob or cpcc < -1 or cpss < -1')
@@ -945,15 +988,20 @@ class SignificantLinks(object):
         logger.info('After outlier filtering, {:,} observations passed'.format(len(self.spurious)))
         self.write_table(self.spurious, 'spurious_final', 'outlier filtered contacts')
 
-    def create_spurious_table(self, excluded_clusters=None, excluded_sequences=None,
-                              min_bin_size=5, min_bin_length=100000,
-                              min_single_length=1000000, big_threshold=0.8, small_value=1):
+    def create_spurious_table(self,
+                              excluded_clusters: Optional[List]=None,
+                              excluded_sequences: Optional[List]=None,
+                              min_bin_size: int=5,
+                              min_bin_length: int=100000,
+                              min_single_length: int=1000000,
+                              big_threshold: float=0.8,
+                              small_value: float=1) -> None:
         """
         Create a table of inter-genome_bin interactions which are likely to be spurious. Excluded
-        objects (clusters/sequences) are those which are likely to introduce false positives.
+        objects (clusters/sequences) are those that are likely to introduce false positives.
 
-        :param excluded_clusters: problematic clusters to exclude
-        :param excluded_sequences: problematic sequences to exclude
+        :param excluded_clusters: Problematic clusters to exclude.
+        :param excluded_sequences: Problematic sequences to exclude.
         :param min_bin_size:
         :param min_bin_length:
         :param min_single_length:
@@ -1016,7 +1064,7 @@ class SignificantLinks(object):
         ix_accepted &= ~spurious['intra']
 
         ix_singletons = spurious['contacts'] == SYMBOLIC_SELF_CONTACTS
-        logger.info('{:,} observations are symbolic singleton cluster self-contacts'.format(ix_singletons.sum()))
+        logger.info('{:,} observations are symbolic singleton cluster self-contacts'.format(np.sum(ix_singletons)))
         ix_accepted &= ~ix_singletons
 
         spurious = spurious[ix_accepted]
@@ -1025,7 +1073,7 @@ class SignificantLinks(object):
 
         self.spurious = spurious
 
-    def separate_real_and_symbolic_tables(self):
+    def separate_real_and_symbolic_tables(self) -> None:
         """
         Separate symbolic records -- representing interactions otherwise excluded from the analysis -- from
         real interactions which will be compared to the statistical model.
@@ -1058,22 +1106,22 @@ class SignificantLinks(object):
     #
     #     Exogenous variables are the product value pairs for the variables: length, sites, coverage,
     #     and gc. Here, each pair is made up of one contig (u) and one genome_bin (v). These products
-    #     are log transformed and standardised. e.g. scale(log(length_u * length_v))
+    #     are log transformed and standardised. e.g., `scale(log(length_u * length_v))`
     #
     #     Exogenous variables: length_z, sites_z, coverage_z, gc_z
     #     Endogenous variable is: contacts - 1
     #
-    #     After fitting the model to selected "non-local/spurious" observations, the model is then used to
+    #     After fitting the model to the selected "non-local/spurious" observations, the model is then used to
     #     predict responses for all observed interactions. Comparison of model predictions to actual values
     #     is then used to assign p-values that the observed interaction is non-local/spurious.
     #
-    #     The modelling is current carried out in R using the glmmTMB package, but could potentially
+    #     The modelling is currently carried out in R using the glmmTMB package, but could potentially
     #     be done using statsmodels.
     #
     #     Distribution family choices include: nbinom1 or nbinom2 (negative binomial p=1|2),
     #     genpois (Generalised), compois (Conway-Maxwell). In experimenting, we have found the most
     #     applicable distributions are nbinom2 and compois. Although consistenly producing superior
-    #     AIC, BIC and AICc, the Conway-Maxwell distribution is expensive to calculate. Therefore
+    #     AIC, BIC and AICc, the Conway-Maxwell distribution is expensive to calculate. Therefore,
     #     users should be prepared to wait significantly longer for modelling to complete or
     #     reduce the number of points supplied. For the simple model of 3 conditional parameters,
     #     10k points appears to be more than sufficient.
@@ -1157,15 +1205,17 @@ class SignificantLinks(object):
     #         self.all_contacts = robjects.conversion.rpy2py(ret_r.rx2('all_contacts'))
     #         logger.info("Significance testing was computed for {:,} observations".format(len(self.all_contacts)))
 
-    def fdr_correction(self, alpha=FDR_ALPHA, method=FDR_METHOD):
+    def fdr_correction(self,
+                       alpha: float=FDR_ALPHA,
+                       method: str=FDR_METHOD) -> None:
         """
         Apply Benjamini-Hochberge false-discovery rate correction. The adjusted p-values will
         appear as a new column `adj_pvalue` in the all_contacts table.
 
         Currently, two-step BH is used.
 
-        :param alpha: target family-wise error rate
-        :param method: method to use in correction Benjamini-Hochberg (fdr_bh)
+        :param alpha: Target family-wise error rate.
+        :param method: method to use in correction Benjamini-Hochberg (fdr_bh).
         """
         logger.info('Performing FDR correction')
 
@@ -1176,28 +1226,38 @@ class SignificantLinks(object):
         logger.info('Using adjusted p-values there were {:,} significant interactions ({:.2f}%)'.format(
             n_signif, n_signif / len(self.all_contacts) * 100))
 
-    def prepare_data(self, sep=',', excluded_clusters=None, excluded_sequences=None,
-                     min_seq_length=2500, min_bin_size=1, min_bin_length=1_000_000,
-                     min_single_length=1_000_000, big_threshold=None, small_value=1,
-                     outlier_rejection=True, initial_sigma=4, min_prob=0.0004,
-                     outlier_samples=10_000, plot_outliers=False):
+    def prepare_data(self,
+                     sep: str=',',
+                     excluded_clusters: Optional[List]=None,
+                     excluded_sequences: Optional[List]=None,
+                     min_seq_length: int=2500,
+                     min_bin_size: int=1,
+                     min_bin_length: int=1_000_000,
+                     min_single_length: int=1_000_000,
+                     big_threshold: Optional[float]=None,
+                     small_value: int=1,
+                     outlier_rejection: bool=True,
+                     initial_sigma: float=4,
+                     min_prob: float=0.0004,
+                     outlier_samples: int=10_000,
+                     plot_outliers: bool=False) -> None:
         """
-        From the Hi-C dataset, prepare the input data for significance testing
+        From the Hi-C dataset, prepare the input data for significance testing.
 
-        :param sep: variable separator for coverage csv file
-        :param excluded_clusters: list of clusters to exclude from analysis
-        :param excluded_sequences: list of sequences to exclude from analysis
-        :param min_seq_length: minimum sequence length to be considered
-        :param min_bin_size: minimum bin size (number of sequences) to be considered
-        :param min_bin_length: minimum bin length (total sum of seq lengths) to be considered
-        :param min_single_length: minimum length of a single-sequence bin to be considered
-        :param big_threshold: maximum fraction a sequence to represent for a bin to be considered
-        :param small_value: small value for replacing observed zeros
-        :param outlier_rejection: perform outlier rejection to remove strong interactions
-        :param initial_sigma: sigma clipping for outliers
-        :param min_prob: probability minimum for outliers
-        :param outlier_samples: number of samples to use in outlier removal
-        :param plot_outliers: generate diagnostic plots from outlier removal
+        :param sep: Variable separator for the coverage CSV file.
+        :param excluded_clusters: List of clusters to exclude from analysis.
+        :param excluded_sequences: List of sequences to exclude from analysis.
+        :param min_seq_length: Minimum sequence length to be considered.
+        :param min_bin_size: Minimum bin size (number of sequences) to be considered.
+        :param min_bin_length: Minimum bin length (total sum of seq lengths) to be considered.
+        :param min_single_length: Minimum length of a single-sequence bin to be considered.
+        :param big_threshold: Maximum fraction a sequence to represent for a bin to be considered.
+        :param small_value: Small value for replacing observed zeros.
+        :param outlier_rejection: Perform outlier rejection to remove strong interactions.
+        :param initial_sigma: Sigma clipping for outliers.
+        :param min_prob: Probability minimum for outliers.
+        :param outlier_samples: Number of samples to use in outlier removal.
+        :param plot_outliers: Generate diagnostic plots from outlier removal.
         """
         self.create_seq2cluster_graph(sep=sep, min_seq_length=min_seq_length)
         self.graph_to_table()

@@ -4,6 +4,8 @@ import numpy as np
 from numba import float64, int32, jit, vectorize
 from numpy import log, pi
 
+from . import ContactMap
+
 # Likelihood Pareto2 parameters
 MIN_FIELD = 2e-8
 P2ALPHA = 0.122123774414444
@@ -12,7 +14,7 @@ P2MU = 13.973247315647466
 
 
 @vectorize([float64(float64)])
-def piecewise_3c(s):
+def piecewise_3c(s: float64) -> float64:
     pr = MIN_FIELD
     if s < 500e3:
         # Pareto2
@@ -21,13 +23,13 @@ def piecewise_3c(s):
 
 
 @jit(float64(int32[:, :], float64[:, :]), nopython=True)
-def poisson_lpmf2(ob, ex):
+def poisson_lpmf2(ob: np.ndarray, ex: np.ndarray) -> float64:
     """
     Entirely skips terms where no observational counts were recorded.
 
-    :param ob: observed counts
-    :param ex: expected counts
-    :return: log likelihood
+    :param ob: Observed counts.
+    :param ex: Expected counts.
+    :return: The log likelihood.
     """
     s = 0.0
     for i in range(ob.shape[0]):
@@ -41,13 +43,13 @@ def poisson_lpmf2(ob, ex):
 
 
 @jit(float64(int32[:, :], float64[:, :]), nopython=True)
-def poisson_lpmf3(ob, ex):
+def poisson_lpmf3(ob: np.ndarray, ex: np.ndarray) -> float64:
     """
     All terms calculated.
 
-    :param ob: observed counts
-    :param ex: expected counts
-    :return: log likelihood
+    :param ob: Observed counts.
+    :param ex: Expected counts.
+    :return: The log likelihood.
     """
     s = 0.0
     for i in range(ob.shape[0]):
@@ -61,12 +63,12 @@ def poisson_lpmf3(ob, ex):
     return -s
 
 
-def calc_likelihood(cm):
+def calc_likelihood(cm: ContactMap) -> float64:
     """
     For a given order and ContactMap instance, calculate the log likelihood.
 
-    :param cm: instance of ContactMap with matching identifiers
-    :return: log likelihood
+    :param cm: Instance of ContactMap with matching identifiers.
+    :return: The log likelihood.
     """
 
     borders = cm.grouping.borders
@@ -88,7 +90,7 @@ def calc_likelihood(cm):
         li = lengths[i]
         lj = lengths[j]
 
-        # bin centers for each contig, relative to middle of each contig
+        # bin centers for each contig, relative to the middle of each contig
         c_ik = centers[i]
         c_jl = centers[j]
 
@@ -107,7 +109,7 @@ def calc_likelihood(cm):
         j1, j2 = borders[j]
 
         # observed counts
-        # for now this is converted to dense array as we need zeros
+        # for now this is converted to a dense array as we need zeros
         n_ij = extent_map[i1:i2, j1:j2].todense()
 
         # log likelihood

@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import Optional
 
 import Bio.SeqIO as SeqIO
 import numpy as np
@@ -8,7 +9,11 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def simple_splitter(win_size, seq_file, out_file=None, threshold=0.333, fmt='fasta', clobber=False):
+def simple_splitter(win_size: int,
+                    seq_file: str,
+                    out_file: Optional[str]=None,
+                    threshold: float=0.333,
+                    fmt: str='fasta', clobber: bool=False) -> str:
     """
     A simplistic routine which will split a set of sequences into pieces.
 
@@ -18,14 +23,14 @@ def simple_splitter(win_size, seq_file, out_file=None, threshold=0.333, fmt='fas
     The original sequence must be long enough that the resulting fragments
     are close to the requested target length.
 
-    :param win_size: the target size for chunks
-    :param seq_file: the file name for the sequences to split
-    :param out_file: if set, resulting fragmented sequences wrriten to this file name, otherwise
-    the file name will be the same as input with the added suffix ".split"
-    :param threshold: a wiggle factor for "nearly" long enough sequences.
-    :param fmt: the format of input and output sequences.
-    :param clobber: overwrite existing output files
-    :return: the file name of the split sequences
+    :param win_size: The target size for chunks.
+    :param seq_file: The file name for the sequences to split.
+    :param out_file: If set, resulting fragmented sequences written to this filename, otherwise
+    the file name will be the same as input with the added suffix ".split".
+    :param threshold: A wiggle factor for "nearly" long enough sequences.
+    :param fmt: The format of input and output sequences.
+    :param clobber: Overwrite existing output files.
+    :return: The file name of the split sequences.
     """
     if out_file is None:
         out_file = '{}.split'.format(seq_file)
@@ -53,17 +58,17 @@ def simple_splitter(win_size, seq_file, out_file=None, threshold=0.333, fmt='fas
             # across pieces rather than tacking on the excess
             # onto one or two.
 
-            l = len(seq)
-            sum_seqs += l
-            if l > max_seq:
-                max_seq = l
+            seq_length = len(seq)
+            sum_seqs += seq_length
+            if seq_length > max_seq:
+                max_seq = seq_length
 
-            n = int(l // win_size + threshold)
+            n = int(seq_length // win_size + threshold)
             if n == 0:
                 n = 1
 
             # determine uniformly spaced positions
-            x = np.linspace(0, l, n+1, dtype=int)
+            x = np.linspace(0, seq_length, n+1, dtype=int)
 
             out_seqs = []
             for i in range(1, len(x)):

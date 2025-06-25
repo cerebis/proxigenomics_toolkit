@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import logging
+from typing import Dict, List, Optional
 
 import community as com
 import networkx as nx
@@ -8,7 +9,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def decompose_graph(g):
+def decompose_graph(g: nx.Graph) -> List[nx.Graph]:
     """
     Using the Louvain algorithm for community detection, as
     implemented in the community module, determine the partitioning
@@ -27,44 +28,47 @@ def decompose_graph(g):
         # start with a complete copy of the graph
         gi = g.copy()
         # build the list of nodes not in this partition and remove them
-        to_remove = [n for n in g.nodes_iter() if p[n] != pi]
+        to_remove = [n for n in g.nodes() if p[n] != pi]
         gi.remove_nodes_from(to_remove)
         decomposed.append(gi)
 
     return decomposed
 
 
-def cluster(g, no_iso, method=None, ragbag=False, verbose=False):
+def cluster(g: nx.Graph,
+            no_iso: bool,
+            method: Optional[str]=None,
+            ragbag: bool=False,
+            verbose: bool=False) -> Dict[int, Dict[int, float]]:
 
     assert not (no_iso and ragbag), 'options no_iso and ragbag are mutually exclusive'
 
     ragbag_group = None
-    singletons = None
 
     # if we need them, determine singleton nodes, but don't count self-loops (which networkx does)
     if no_iso or ragbag:
         # this is a memory costly approach.
         g_nsl = g.copy()
-        g_nsl.remove_edges_from(g_nsl.selfloop_edges())
-        singletons = nx.isolates(g_nsl)
+        g_nsl.remove_edges_from(nx.selfloop_edges(g_nsl))
+        singletons = [u for u in nx.isolates(g_nsl)]
         g_nsl.clear()
 
-    # remove isolated nodes and forget about em
-    if no_iso:
-        logger.info('Removed {0} isolated nodes from graph'.format(len(singletons)))
-        g.remove_nodes_from(singletons)
-        print_info(g)
-
-    # put them in a ragbag instead
-    elif ragbag:
-        if len(singletons) == 0:
-            logger.info('Ragbag cluster would be empty, so excluded')
-            ragbag_group = {}
-        else:
-            logger.info('Ragbag cluster will contain {0} nodes'.format(len(singletons)))
+        # remove isolated nodes and forget about them
+        if no_iso:
+            logger.info('Removed {0} isolated nodes from graph'.format(len(singletons)))
             g.remove_nodes_from(singletons)
-            ragbag_group = dict((n, 1.0) for n in singletons)
             print_info(g)
+
+        # put them in the ragbag instead
+        elif ragbag:
+            if len(singletons) == 0:
+                logger.info('Ragbag cluster would be empty, so excluded')
+                ragbag_group = {}
+            else:
+                logger.info('Ragbag cluster will contain {0} nodes'.format(len(singletons)))
+                g.remove_nodes_from(singletons)
+                ragbag_group = dict((n, 1.0) for n in singletons)
+                print_info(g)
 
     # determine the best partitioning of g
     logger.info('Determining best partitioning')
@@ -94,12 +98,12 @@ def cluster(g, no_iso, method=None, ragbag=False, verbose=False):
     revpart.clear()
 
     if method == 'maxaff':
-        for u in g.nodes_iter():
-            if g.degree(u) > 0:
-                max_u = max([x[1]['weight'] for x in g[u].items()])
+        for u in g.nodes():
+            if g.degree[u] > 0:
+                max_u = max(d['weight'] for d in g[u].values())
                 for v in nx.all_neighbors(g, u):
                     if partitions[u] != partitions[v]:
-                        max_v = max([x[1]['weight'] for x in g[v].items()])
+                        max_v = max(d['weight'] for d in g[v].values())
                         w_v = g[u][v]['weight']
                         if w_v == max_u:
                             communities[partitions[v]][u] = 0.5
@@ -109,7 +113,7 @@ def cluster(g, no_iso, method=None, ragbag=False, verbose=False):
     elif method == 'simple':
         # iterate over the nodes in the graph, if an edge connects nodes in disjoint
         # partitions, then make both nodes members of both partitions.
-        for n1 in g.nodes_iter():
+        for n1 in g.nodes():
             for n2 in nx.all_neighbors(g, n1):
                 if partitions[n1] != partitions[n2]:
                     # we add them at half weight just for discrimination
@@ -125,7 +129,7 @@ def cluster(g, no_iso, method=None, ragbag=False, verbose=False):
     return communities
 
 
-def print_info(g):
+def print_info(g: nx.Graph) -> None:
     """
     logger.info(order and size of graph g)
     :param g: graph to logger.info(info)
@@ -133,7 +137,7 @@ def print_info(g):
     logger.info('Graph composed of {0} nodes and {1} edges'.format(g.order(), g.size()))
 
 
-def write_mcl(communities, path):
+def write_mcl(communities: dict, path: str) -> None:
     """
     Write communities dictionary to output file.
     :param communities: the dictionary of communities
@@ -147,7 +151,7 @@ def write_mcl(communities, path):
             hout.write('\n')
 
 
-def write_output(communities, filename, ofmt='mcl'):
+def write_output(communities: dict, filename: str, ofmt: str='mcl') -> None:
     if ofmt == 'mcl':
         write_mcl(communities, filename)
     elif ofmt == 'graphml':

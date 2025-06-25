@@ -1,6 +1,7 @@
 import logging
 import os
 import warnings
+from typing import ClassVar, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,9 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-def scaler(arr, mu=None, sig=None):
+def scaler(arr: np.ndarray,
+           mu: Optional[float]=None,
+           sig: Optional[float]=None) -> np.ndarray | Tuple[np.ndarray, float, float]:
     if mu is None:
         mu = np.mean(arr)
         sig = np.std(arr)
@@ -23,14 +26,14 @@ def scaler(arr, mu=None, sig=None):
         return (arr - mu) / sig
 
 
-def transform(df):
+def transform(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(intra_z = lambda x: x.intra.astype(np.uint8),
                      cov_z   = lambda x: scaler(np.log(x.cov_u * x.cov_v))[0],
                      freq_z  = lambda x: scaler(np.log(x.contacts / (x.sites_u*x.sites_v * x.uf_u*x.uf_v)))[0],
                      )
 
 
-def anti_join(target, exclude_from):
+def anti_join(target: pd.DataFrame, exclude_from: pd.DataFrame) -> pd.DataFrame:
     """
     Remove rows from target which are present in exclude_from.
     :param target: the target dataframe
@@ -43,7 +46,10 @@ def anti_join(target, exclude_from):
     return target[~ mask].reset_index()
 
 
-def high_quality_clusters(binning_qc_file, min_completeness, max_contamination, qc_method):
+def high_quality_clusters(binning_qc_file: str,
+                          min_completeness: float,
+                          max_contamination: float,
+                          qc_method: str) -> set:
     """
     Select clusters which meet the minimum quality thresholds for completeness and contamination.
     :param binning_qc_file:
@@ -64,7 +70,8 @@ def high_quality_clusters(binning_qc_file, min_completeness, max_contamination, 
     return hq_set
 
 
-def exclude_clusters(df_target, accepted_clusters):
+def exclude_clusters(df_target: pd.DataFrame,
+                     accepted_clusters: set) -> pd.DataFrame:
     """
     Exclude any contacts not involving the supplised accepted clusters
     :param df_target: target dataframe to filter
@@ -76,8 +83,14 @@ def exclude_clusters(df_target, accepted_clusters):
     return result
 
 
-def identify_suspected_intra(df, accepted_clusters, min_similarity, min_contacts, min_cluster_length,
-                             max_seq_length, min_degree=2, sort_by='similarity'):
+def identify_suspected_intra(df: pd.DataFrame,
+                             accepted_clusters: set,
+                             min_similarity: float,
+                             min_contacts: int,
+                             min_cluster_length: int,
+                             max_seq_length: int,
+                             min_degree: int=2,
+                             sort_by: str='similarity') -> pd.DataFrame:
 
     # number of relevant contacts per sequence
     degree = df.query('contacts>@min_contacts '
@@ -103,7 +116,8 @@ def identify_suspected_intra(df, accepted_clusters, min_similarity, min_contacts
     return suspected_intra.copy()
 
 
-def seq2cluster_similarity(df, embeddings):
+def seq2cluster_similarity(df: pd.DataFrame,
+                           embeddings: MetagenomeEmbeddings) -> np.ndarray:
     ix = df[['seq','cluster']].values
     u = embeddings.seq_embeds.loc[ix[:, 0], range(768)].values
     v = embeddings.cluster_embeds.loc[ix[:, 1], range(768)].values
@@ -111,7 +125,7 @@ def seq2cluster_similarity(df, embeddings):
     return np.fromiter((linear_kernel(u[[i]], v[[i]])[0][0] for i in range(u.shape[0])), dtype='f8')
 
 
-def normalised_out_degree(x):
+def normalised_out_degree(x: pd.Series) -> np.ndarray:
     """
     NOTE: Intended to be performed on a dataframe of associations grouped by sequence name.
 
@@ -137,7 +151,7 @@ def normalised_out_degree(x):
     return edge_weight / edge_weight.sum()
 
 
-def replace_zeros(x, reduction_factor):
+def replace_zeros(x: pd.Series, reduction_factor: float) -> pd.Series:
     """
     Replace zeros in a pandas series with a small value relative to the minimum non-zero value.
     :param x: series
@@ -170,7 +184,7 @@ class DataLabeller(object):
     _SUSP_MIN_NUM_OBS = 10
     _SUSP_MIN_DEGREE = 1
 
-    OUTPUT_TABLES = {
+    OUTPUT_TABLES: ClassVar[Dict[str, str]] = {
         'training': 'training.csv',
         'undecided': 'undecided.csv',
         'combined': 'combined.csv',
@@ -180,22 +194,22 @@ class DataLabeller(object):
     }
 
     @staticmethod
-    def get_output_path(parent_dir, table_name):
+    def get_output_path(parent_dir: str, table_name: str) -> str:
         return os.path.join(parent_dir, DataLabeller.OUTPUT_TABLES[table_name])
 
     def __init__(self,
-                 output_dir,
-                 embeddings_file,
-                 clustering_file,
-                 faidx_file,
-                 spurious_file,
-                 all_contacts_file,
-                 excluded_file,
-                 binning_qc_file,
-                 qc_method='CheckMv1',
-                 use_suspected=False,
-                 plot_projection=False,
-                 max_clusters=10):
+                 output_dir: str,
+                 embeddings_file: str,
+                 clustering_file: str,
+                 faidx_file: str,
+                 spurious_file: str,
+                 all_contacts_file: str,
+                 excluded_file: str,
+                 binning_qc_file: str,
+                 qc_method: str='CheckMv1',
+                 use_suspected: bool=False,
+                 plot_projection: bool=False,
+                 max_clusters: int=10) -> None:
         self.output_dir = output_dir
         self.embeddings_file = embeddings_file
         self.clustering_file = clustering_file
@@ -221,7 +235,11 @@ class DataLabeller(object):
                 os.path.join(output_dir, 'Embedding_UMAP_Manhattan_projection.svg'),
                 max_clusters=max_clusters)
 
-    def write_table(self, df, table_name, description, index):
+    def write_table(self,
+                    df: pd.DataFrame,
+                    table_name: str,
+                    description: str,
+                    index: bool) -> None:
         """
         Standardised writing of a table to a file
         :param df: the pandas table
@@ -233,7 +251,7 @@ class DataLabeller(object):
         logger.info(f'Writing {description} to {file_path}')
         df.to_csv(file_path, index=index)
 
-    def prepare_labelled_training_data(self):
+    def prepare_labelled_training_data(self) -> pd.DataFrame:
         assert self.embeddings is not None, 'The embeddings data must be analysed first'
 
         # Read initial prediction of spurious contacts
@@ -263,7 +281,8 @@ class DataLabeller(object):
         # and any contacts involving sequences intentionally held-out from clustering
         n_before = len(df_spur)
         df_spur = df_spur.query('seq not in @self.excluded_seqs').copy()
-        logger.info(f'Spurious pool: after excluding sequences held-out from clustering: in={n_before}, out={len(df_spur)}')
+        logger.info(f'Spurious pool: after excluding sequences held-out '
+                    f'from clustering: in={n_before}, out={len(df_spur)}')
 
         df_all = anti_join(df_all, df_spur)
         logger.info(f'General pool: after subtracting spurious set: {len(df_all)}')
@@ -372,7 +391,8 @@ class DataLabeller(object):
             logger.info(f'Combining significant and suspects, there are now {len(df_signif)} intra-cluster contacts')
 
         df_train = pd.concat([df_spur, df_signif])
-        logger.info(f'Checking for duplicate records yielded: {len(df_train) - len(df_train.reset_index().drop_duplicates(["seq","cluster"]))}')
+        n_dupes = len(df_train) - len(df_train.reset_index().drop_duplicates(["seq", "cluster"]))
+        logger.info(f'Checking for duplicate records yielded: {n_dupes}')
         logger.info(f'After basic concatenation, training set contains {len(df_train)} contacts')
         logger.info(f'Undecided set: {len(df_undecided)}')
 

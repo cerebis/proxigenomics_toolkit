@@ -1,19 +1,31 @@
 import logging
 import os
+from typing import Any, ClassVar, Dict, List, Optional
 
 import keras
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import seaborn as sb
 import tensorflow as tf
 from imblearn.ensemble import BalancedBaggingClassifier
 from imblearn.under_sampling import RandomUnderSampler
 from matplotlib.backends.backend_pdf import PdfPages
-from plotnine import *
+from plotnine import (
+    aes,
+    facet_wrap,
+    geom_line,
+    ggplot,
+    scale_color_discrete,
+    scale_x_continuous,
+    scale_y_continuous,
+    theme,
+)
+
+# from plotnine import *
 from scikeras.wrappers import KerasClassifier
 from scipy.interpolate import CubicSpline
 from scipy.optimize import brentq
-from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import precision_recall_curve
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.layers import Dense, Dropout, Input
@@ -25,7 +37,6 @@ from tensorflow.keras.regularizers import L2
 
 logger = logging.getLogger(__name__)
 
-
 L2_KERNEL = 0.15
 L2_BIAS = 0.02
 DROPOUT_RATE = 0.3
@@ -36,7 +47,12 @@ class StatefulBinaryFBeta(Metric):
     Custom metric for fbeta maximisation
     """
 
-    def __init__(self, name='fbeta', beta=1.0, threshold=0.5, epsilon=1e-7, **kwargs):
+    def __init__(self,
+                 name: str='fbeta',
+                 beta: float=1.0,
+                 threshold: float=0.5,
+                 epsilon: float=1e-7,
+                 **kwargs: Dict[str, Any]) -> None:
         # initializing an object of the super class
         super(StatefulBinaryFBeta, self).__init__(name=name, **kwargs)
 
@@ -53,7 +69,10 @@ class StatefulBinaryFBeta(Metric):
         self.recall = None
         self.fb = None
 
-    def update_state(self, y_true, y_pred, sample_weight=None):
+    def update_state(self,
+                     y_true: npt.ArrayLike,
+                     y_pred: npt.ArrayLike,
+                     sample_weight: Optional[npt.ArrayLike]=None) -> None:
         # casting y_true and y_pred as float dtype
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.cast(y_pred, tf.float32)
@@ -65,7 +84,7 @@ class StatefulBinaryFBeta(Metric):
         self.predicted_positive.assign_add(tf.reduce_sum(y_pred)) # updating predicted positive attribute
         self.actual_positive.assign_add(tf.reduce_sum(y_true)) # updating actual positive attribute
 
-    def result(self):
+    def result(self) -> float:
         self.precision = self.tp/(self.predicted_positive+self.epsilon) # calculates precision
         self.recall = self.tp/(self.actual_positive+self.epsilon) # calculates recall
         # calculating fbeta
@@ -73,13 +92,13 @@ class StatefulBinaryFBeta(Metric):
                    (self.beta_squared*self.precision + self.recall + self.epsilon)
         return self.fb
 
-    def reset_state(self):
+    def reset_state(self) -> None:
         self.tp.assign(0) # resets true positives to zero
         self.predicted_positive.assign(0) # resets predicted positives to zero
         self.actual_positive.assign(0) # resets actual positives to zero
 
 
-def create_baseline(hidden_layer_sizes, learning_rate, meta):
+def create_baseline(hidden_layer_sizes: List[int], learning_rate: float, meta: dict) -> Sequential:
     model = Sequential()
     model.add(Input(shape=(meta['n_features_in_'],)))
     for n, n_nodes in enumerate(hidden_layer_sizes, 1):
@@ -109,53 +128,55 @@ def create_baseline(hidden_layer_sizes, learning_rate, meta):
 class ContactClassifier(object):
 
     _METRIC_NAME = 'fbeta'
-    _FIT_VARS = ['similarity', 'freq_z', 'cov_z', 'linkage']
+    _FIT_VARS: ClassVar[List[str]]= ['similarity', 'freq_z', 'cov_z', 'linkage']
     _CLASS_VAR = 'intra_z'
     _PATIENCE = 50
 
-    OUTPUT_TABLES = {
+    OUTPUT_TABLES: ClassVar[Dict[str, str]] = {
         'predictions': 'predictions.csv',
     }
 
     @staticmethod
-    def get_output_path(parent_dir, table_name) -> str:
+    def get_output_path(parent_dir: str, table_name: str) -> str:
         return os.path.join(parent_dir, str(ContactClassifier.OUTPUT_TABLES[table_name]))
 
     def __init__(self,
-                 output_dir,
-                 complete_labelled_file,
-                 spurious_cluster_file,
-                 intra_cluster_file,
-                 seed,
-                 n_epochs,
-                 batch_size,
-                 num_nodes=24,
-                 num_layers=5,
-                 learning_rate=1e-4,
-                 num_estimators=10,
-                 test_size=None,
-                 enable_bag=False,
-                 enable_tb=False, enable_es=True, verbose=False):
+                 output_dir: str,
+                 complete_labelled_file: str,
+                 spurious_cluster_file: str,
+                 intra_cluster_file: str,
+                 seed: int,
+                 n_epochs: int,
+                 batch_size: int,
+                 num_nodes: int=24,
+                 num_layers: int=5,
+                 learning_rate: float=1e-4,
+                 num_estimators: int=10,
+                 test_size: Optional[int]=None,
+                 enable_bag: bool=False,
+                 enable_tb: bool=False,
+                 enable_es: bool=True,
+                 verbose: bool=False) -> None:
         """
         An MLP classifier for Hi-C contacts, where classification decides if an accumulated contact
         between a single sequence as a genome_bin is intra- or inter- cellular.
 
-        :param output_dir: parent directory to which results are written
-        :param complete_labelled_file: labelled training data
-        :param spurious_cluster_file: file containing cluster ids accepted for spurious contacts
-        :param intra_cluster_file: file containing cluster ids accepted for intra contacts
-        :param seed: a random seed
-        :param n_epochs: number of epochs for training
-        :param batch_size: batch size for training
-        :param num_nodes: number of nodes in the hidden layers
-        :param num_layers: number of hidden layers
-        :param learning_rate: global learning rate of AdamW optimizer
-        :param num_estimators: number of estimators to use when the balanced bagging classifier is enabled
-        :param test_size: if not None, set aside a portion of the data for testing vals:[0-1]
-        :param enable_bag: enable balanced bagging classifier, rather than balancing data
-        :param enable_tb: enable tensorboard logging
-        :param enable_es: enable early stopping callback when training ceases to improve for 20 iterations
-        :param verbose: verbosity of logging
+        :param output_dir: Parent directory to which results are written.
+        :param complete_labelled_file: Labeled training data.
+        :param spurious_cluster_file: File containing cluster ids accepted for spurious contacts.
+        :param intra_cluster_file: File containing cluster ids accepted for intra contacts.
+        :param seed: A random seed.
+        :param n_epochs: Number of epochs for training.
+        :param batch_size: Batch size for training.
+        :param num_nodes: Number of nodes in the hidden layers.
+        :param num_layers: Number of hidden layers.
+        :param learning_rate: Global learning rate of AdamW optimizer.
+        :param num_estimators: Number of estimators to use when the balanced bagging classifier is enabled.
+        :param test_size: If not None, set aside a portion of the data for testing vals:[0-1].
+        :param enable_bag: Enable balanced bagging classifier, rather than balancing data.
+        :param enable_tb: Enable tensorboard logging.
+        :param enable_es: Enable early stopping callback when training ceases to improve for 20 iterations.
+        :param verbose: Verbosity of logging.
         """
 
         self.output_dir = output_dir
@@ -191,51 +212,51 @@ class ContactClassifier(object):
         self.y_test = None
 
         # set a global seed through Keras, since there are
-        #   many objects within the package which consume a seed.
+        #   many objects within the package that consume a seed.
         keras.utils.set_random_seed(self.seed)
         # prepare the training and possibly test dataset(s)
         self.prepare_training_data()
 
     @staticmethod
-    def _separate_training(df):
+    def _separate_training(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Simply return the table containing only the data marked for training.
-        :param df: a pandas dataframe
-        :return: dataframe containing just training data
+        Return the table containing only the data marked for training.
+        :param df: A pandas dataframe.
+        :return: Dataframe containing just training data.
         """
         return df.query('train==True')
 
     @staticmethod
-    def _extract_x(df):
+    def _extract_x(df: pd.DataFrame) -> np.ndarray:
         """
-        Extract only the columns used in modelling contacts.
-        :param df:
-        :return: numpy array
+        Extract only the columns used in modeling contacts.
+        :param df: The dataframe containing the data.
+        :return: Numpy array.
         """
         return df.loc[:, ContactClassifier._FIT_VARS].values
 
     @staticmethod
-    def _extract_y(df):
+    def _extract_y(df: pd.DataFrame) -> np.ndarray:
         """
-        Extract the class variable used in modelling contacts.
-        :param df:
-        :return: numpy array
+        Extract the class variable used in modeling contacts.
+        :param df: The dataframe containing the data.
+        :return: Numpy array.
         """
         return df.loc[:, ContactClassifier._CLASS_VAR].values
 
     @staticmethod
-    def _make_table(x, y):
+    def _make_table(x: np.ndarray, y: np.ndarray) -> pd.DataFrame:
         """
         Convenience method for making a dataframe from fit and class variables.
-        :param x: fit variables
-        :param y: class variable
-        :return: dataframe
+        :param x: Fit variables.
+        :param y: Class variable.
+        :return: Dataframe.
         """
         df = pd.DataFrame({ContactClassifier._CLASS_VAR: y})
         df[ContactClassifier._FIT_VARS] = x
         return df
 
-    def prepare_training_data(self):
+    def prepare_training_data(self) -> None:
         """
         Prepare the training data for the model.
         This can involve splitting training and test sets, as well
@@ -261,13 +282,13 @@ class ContactClassifier(object):
             self.x_train = self.x_full
             self.y_train = self.y_full
 
-    def balance_data(self, x, y):
+    def balance_data(self, x: np.ndarray, y: np.ndarray) -> (np.ndarray, np.ndarray):
         """
-        Apply data augmentation to equalise the training classes sizes using
+        Apply data augmentation to equalize the training classes sizes using
         a random undersampling procedure.
-        :param x: fit variables
-        :param y: class variable
-        :return: balanced fit and class arrays
+        :param x: Fit variables.
+        :param y: Class variable.
+        :return: Balanced fit and class arrays.
         """
         self.plot_variable_scatter(x, y, 'raw_training_scatter.pdf')
 
@@ -283,21 +304,21 @@ class ContactClassifier(object):
 
         return x_aug, y_aug
 
-    def write_table(self, df, table_name, description, index):
+    def write_table(self, df: pd.DataFrame, table_name: str, description: str, index: bool) -> None:
         """
-        Standardised writing of a table to a file
-        :param df: the pandas table
-        :param table_name: name of the table to write (obtains file name)
-        :param description: a description of logging
-        :param index: whether to include
+        Standardised writing of a table to a file.
+        :param df: The dataframe to write.
+        :param table_name: Name of the table to write, for which the actual file name will be obtained.
+        :param description: A description of logging.
+        :param index: Whether to include.
         """
         file_path = ContactClassifier.get_output_path(self.output_dir, table_name)
         logger.info(f'Writing {description} to {file_path}')
         df.to_csv(file_path, index=index)
 
-    def plot_variable_scatter(self, x, y, base_name, n_points=5000):
+    def plot_variable_scatter(self, x: np.ndarray, y: np.ndarray, base_name: str, n_points: int=5000) -> None:
         """
-        Create scatterplots of the different fit variable combinations and save
+        Create scatter plots of the different fit variable combinations and save
         to PDF.
         :param x:
         :param y:
@@ -316,7 +337,7 @@ class ContactClassifier(object):
             pdf.savefig(sb.jointplot(df, x='freq_z', y='linkage', hue="intra_z").figure)
             pdf.savefig(sb.jointplot(df, x='cov_z', y='linkage', hue="intra_z").figure)
 
-    def tensorboard_callback(self):
+    def tensorboard_callback(self) -> tf.keras.callbacks.Callback:
         return keras.callbacks.TensorBoard(log_dir=os.path.join(self.output_dir, 'logs'),
                                            histogram_freq=1,
                                            embeddings_freq=1,
@@ -325,7 +346,7 @@ class ContactClassifier(object):
                                            update_freq="epoch")
 
     @staticmethod
-    def earlystopping_callback(metric, verbose=False):
+    def earlystopping_callback(metric: str, verbose: bool=False) -> tf.keras.callbacks.Callback:
         return tf.keras.callbacks.EarlyStopping(monitor=metric,
                                                 patience=ContactClassifier._PATIENCE,
                                                 mode='max',
@@ -335,7 +356,7 @@ class ContactClassifier(object):
                                                 verbose=verbose)
 
     @staticmethod
-    def checkpoint_callback(best_model_file, verbose=False):
+    def checkpoint_callback(best_model_file: str, verbose: bool=False) -> tf.keras.callbacks.Callback:
         return tf.keras.callbacks.ModelCheckpoint(best_model_file,
                                                   monitor=ContactClassifier._METRIC_NAME,
                                                   verbose=verbose,
@@ -404,7 +425,7 @@ class ContactClassifier(object):
     #             experiment('logs/hparam_tuning/' + experiment_name, hparams)
     #             experiment_no += 1
 
-    def train_full_model(self):
+    def train_full_model(self) -> None:
         """
         Train the model on the full dataset.
         Depending on options at instantiation-time, this model is either fit using data-augmentation
@@ -415,7 +436,7 @@ class ContactClassifier(object):
         The model can employ callbacks to record "best model", tensorboard and early-stopping. If
         early-stopping occurs, the best model is automatically reloaded.
 
-        The history of the optimisation process is also saved to file.
+        The history of the optimization process is also saved to file.
         """
         tf.keras.backend.clear_session()
 
@@ -427,27 +448,26 @@ class ContactClassifier(object):
         if self.enable_es:
             callbacks.append(self.earlystopping_callback('fbeta', verbose=self.verbose))
 
-        estimator = KerasClassifier(model=create_baseline,
-                                    epochs=self.n_epochs,
-                                    batch_size=self.batch_size,
-                                    random_state=self.seed,
-                                    verbose=self.verbose,
-                                    callbacks=callbacks,
-                                    hidden_layer_sizes=[self.num_nodes] * self.num_layers,
-                                    learning_rate=self.learning_rate)
+        model = KerasClassifier(model=create_baseline,
+                                epochs=self.n_epochs,
+                                batch_size=self.batch_size,
+                                random_state=self.seed,
+                                verbose=self.verbose,
+                                callbacks=callbacks,
+                                hidden_layer_sizes=[self.num_nodes] * self.num_layers,
+                                learning_rate=self.learning_rate)
         if self.enable_bag:
             logging.info('Classifier training will use balanced bagging')
             # wrap the base classifier in a balanced bagging classifier
-            estimator = BalancedBaggingClassifier(estimator,
-                                                  oob_score=True,
-                                                  n_estimators=self.num_estimators,
-                                                  replacement=False,
-                                                  random_state=self.seed,
-                                                  verbose=self.verbose)
+            model = BalancedBaggingClassifier(model,
+                                              oob_score=True,
+                                              n_estimators=self.num_estimators,
+                                              replacement=False,
+                                              random_state=self.seed,
+                                              verbose=self.verbose)
 
         logging.info('Beginning model training')
-        model = estimator.fit(self.x_train, self.y_train)
-        self.model = model
+        self.model = model.fit(self.x_train, self.y_train)
 
         if self.enable_bag:
             # plot history of all estimators used in bagging
@@ -480,7 +500,7 @@ class ContactClassifier(object):
                  + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
             p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
 
-        # plot combined F1,P,R curves for training and test data if used.
+        # plot combined F1, P, R curves for training and test data if used.
         pr_train = model.predict_proba(self.x_train)[:, 1]
         self.assess_predictions('training', self.y_train, pr_train)
 
@@ -488,11 +508,16 @@ class ContactClassifier(object):
             pr_test = model.predict_proba(self.x_test)[:, 1]
             self.assess_predictions('test', self.y_test, pr_test)
 
-    def plot_precision_recall_curve(self, file_name: str, precision, recall, f1_scores, thres):
+    def plot_precision_recall_curve(self,
+                                    file_name: str,
+                                    precision: np.ndarray,
+                                    recall: np.ndarray,
+                                    f1_scores: np.ndarray,
+                                    pr_threshold: np.ndarray) -> None:
         df_plot = pd.DataFrame({'Precision': precision[1:],
                                 'Recall': recall[1:],
                                 'F1-score': f1_scores[1:],
-                                'Pr_threshold': thres})
+                                'Pr_threshold': pr_threshold})
         p = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
              + geom_line()
              + scale_x_continuous(breaks=np.arange(0, 1.01, 0.1))
@@ -501,7 +526,7 @@ class ContactClassifier(object):
         p.save(filename=os.path.join(self.output_dir, file_name), verbose=False)
 
     @staticmethod
-    def compute_f1_curve(y_true, y_prob):
+    def compute_f1_curve(y_true: np.ndarray, y_prob: np.ndarray) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray):
         precision, recall, thres = precision_recall_curve(y_true, y_prob)
         # avoid zeros in the denominator
         denominator = recall+precision
@@ -510,25 +535,25 @@ class ContactClassifier(object):
         return f1_scores, precision, recall, thres
 
     @staticmethod
-    def find_simple_maximum(x, y):
+    def find_simple_maximum(x: np.ndarray, y: np.ndarray) -> (float, float):
         """
-        Find the maximum value of y and the corresponding x value, using simple means without interpolation
-        :param x: independent variable
-        :param y: dependent variable
-        :return: "x at maximum y", "y max"
+        Find the maximum value of y and the corresponding x value, using simple means without interpolation.
+        :param x: Independent variable.
+        :param y: Dependent variable.
+        :return: "X at maximum y", "y max".
         """
         assert x.ndim == 1 and y.ndim == 1, 'The variables x, and y must be a 1D arrays'
         ix_max = np.argmax(y)
         return x[ix_max], y[ix_max]
 
-    def assess_predictions(self, name, y_true, y_prob):
+    def assess_predictions(self, name: str, y_true: np.ndarray, y_prob: np.ndarray) -> (float, float):
         """
         Compute and report statistics and plot the models predictive performance.
 
-        :param name: name of the dataset
-        :param y_true: true class variable
-        :param y_prob: predicted probabilities
-        :return: best f1_score and threshold
+        :param name: Name of the dataset.
+        :param y_true: True class variable.
+        :param y_prob: Predicted probabilities.
+        :return: Best f1_score and threshold.
         """
         f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
 
@@ -543,33 +568,39 @@ class ContactClassifier(object):
         return max_f1, max_thres
 
     @staticmethod
-    def compute_decision_boundary(name, y_true, y_prob, precision_threshold):
+    def compute_decision_boundary(name: str,
+                                  y_true: np.ndarray,
+                                  y_prob: np.ndarray,
+                                  precision_threshold: float) ->  tuple[float, Any]:
         """
         Using predictions and true values, compute the decision boundary (in terms of assigned model probability)
         at which overall dataset precision exceeds the requested threshold.
-        :param name: data set name
-        :param y_true: true values
-        :param y_prob: model probabilities for the same dataset
-        :param precision_threshold: requested threshold precision
-        :return: probability boundary to achieve requested precision
+        :param name: Data set name.
+        :param y_true: True values.
+        :param y_prob: Model probabilities for the same dataset.
+        :param precision_threshold: Requested threshold precision.
+        :return: Probability boundary to achieve requested precision.
         """
         f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
         assert precision.max() >= precision_threshold, \
             (f'The maximum precision score {precision.max()} is less than the requested '
              f'decision boundary threshold {precision_threshold}')
-        spl_func = CubicSpline(thres, precision[:-1] - precision_threshold)
-        decision_boundary = brentq(spl_func, thres[0], thres[-1])
+        # wrapping CubicSpline in a lambda to overcome type warning
+        # when supplying the instance to brentq.
+        decision_boundary = brentq(lambda x: CubicSpline(thres, precision[:-1] - precision_threshold),
+                                   thres[0],
+                                   thres[-1])
         logger.info(f'{name}: requested precision of {precision_threshold:} '
                     f'achieved for probability threshold of {decision_boundary:.5f} ')
         return decision_boundary
 
-    def classify(self, precision_thres=None, df=None):
+    def classify(self, precision_thres: float, df: pd.DataFrame=None) -> pd.DataFrame:
         """
         Apply the trained model to the data and write the predictions to a file.
 
-        :param precision_thres: estimated precision at which to classify intra-cellular contacts
-        :param df: optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
-        :return: updated dataframe with probabilities column
+        :param precision_thres: Estimated precision at which to classify intra-cellular contacts.
+        :param df: Optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
+        :return: Updated dataframe with the column of probabilities.
         """
         assert self.model is not None, 'Model has not been trained.'
         if df is None:
