@@ -2,7 +2,20 @@ import logging
 import os
 from collections import OrderedDict, defaultdict, namedtuple
 from functools import partial
-from typing import Any, Callable, Dict, Hashable, Iterator, List, Optional, Self, Tuple
+from typing import (
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    Hashable,
+    Iterator,
+    List,
+    Optional,
+    Self,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
@@ -1965,15 +1978,15 @@ class ContactMap(object):
         return sp.coo_matrix((_data, (_row, _col)), shape=np.array(_map.shape) - _shift[-1])
 
     def plot_seqnames(self,
-                      fname: str,
+                      output_name: str,
                       simple: bool=True,
-                      permute: bool=False,
-                      **kwargs: Dict[str, Any]) -> None:
+                      permute: bool=True,
+                      **kwargs: Union[str, float, int, Collection]) -> None:
         """
         Plot the contact map, annotating the map with sequence names. WARNING: This can often be too dense
         to be legible when there are hundreds to thousands of sequences.
 
-        :param fname: Output file name.
+        :param output_name: Output file name.
         :param simple: True plot seq map, False plot the extent map.
         :param permute: Permute the map with the present order.
         :param kwargs: Additional options passed to plot().
@@ -2000,10 +2013,24 @@ class ContactMap(object):
                 _cbins = np.cumsum(self.grouping.bins[self.order.accepted()])
             tick_locs = _cbins - 0.5
 
-        self.plot(fname, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=tick_labs, **kwargs)
+        self.plot(output_name, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=tick_labs, **kwargs)
+
+    class PlotOptions(TypedDict):
+        """
+        For **kwargs appearing in other function definitions that then
+        pass arguments to ContactMap.plot
+        """
+        alpha: float
+        bisto: bool
+        dpi: int
+        height: int
+        max_image_size: int
+        norm: bool
+        width: int
+        zero_diag: bool
 
     def plot(self,
-             fname: str,
+             output_name: str,
              simple: bool=False,
              tick_locs: Optional[npt.NDArray[np.int_]]=None,
              tick_labs: Optional[List[str]]=None,
@@ -2023,7 +2050,7 @@ class ContactMap(object):
         Plot the contact map. This can either be as a sparse pattern (requiring much less memory but without visual
         cues about intensity), simple sequence or full binned map and normalized or permuted.
 
-        :param fname: Output file name.
+        :param output_name: Output file name.
         :param tick_locs: Major tick locations (minors take the midpoints).
         :param tick_labs: Minor tick labels.
         :param simple: If true, sequence only map plotted.
@@ -2118,5 +2145,5 @@ class ContactMap(object):
 
         logger.debug('Saving plot')
         fig.tight_layout()
-        plt.savefig(fname, dpi=dpi)
+        plt.savefig(output_name, dpi=dpi)
         plt.close(fig)

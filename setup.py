@@ -1,9 +1,10 @@
-from setuptools import setup, Extension, find_packages
-from setuptools.command.build_ext import build_ext as build_ext_orig
-import shutil
-import subprocess
 import os
 import re
+import shutil
+import subprocess
+
+from setuptools import Extension, find_packages, setup
+from setuptools.command.build_ext import build_ext as build_ext_orig
 
 pkg_name = 'proxigenomics_toolkit'
 
@@ -27,7 +28,7 @@ class TarballExtension(Extension, object):
     """
     Simple class for use by build_tarball
     """
-    def __init__(self, name, url, exe_path, triton=False):
+    def __init__(self, name: str, url: str, exe_path: str, triton: bool=False) -> None:
         """
         :param name: a name for the extension. This is used for naming the tarball and extracted parent path
         :param url: the remote location of the tarball (github)
@@ -46,21 +47,21 @@ class TarballExtension(Extension, object):
             raise IOError('GNU tar was not found and installation requires special features')
 
     @property
-    def tarball(self):
+    def tarball(self) -> str:
         """
         :return: a name for the tarball based on the extension name
         """
         return f'{self.name}_tarball.tar.gz'
 
     @property
-    def exe_name(self):
+    def exe_name(self) -> str:
         """
         :return: the executable file name without path
         """
         return os.path.basename(self.exe_path)
 
 
-def curl_exists():
+def curl_exists() -> bool:
     try:
         subprocess.check_call(['curl', '--version'])
         return True
@@ -68,7 +69,7 @@ def curl_exists():
         return False
 
 
-def wget_exists():
+def wget_exists() -> bool:
     try:
         subprocess.check_call(['wget', '--version'])
         return True
@@ -83,11 +84,11 @@ class build_tarball(build_ext_orig, object):
     Build at install-time allows easier support of runtime architectures which vary widely in age, making
     supplying a universal static binaries for external helpers difficult.
     """
-    def run(self):
+    def run(self) -> None:
         for ext in self.extensions:
             self.build_tarball(ext)
                                    
-    def build_tarball(self, ext):
+    def build_tarball(self, ext: Extension) -> None:
 
         # fetch the relevant commit from github
         if curl_exists():

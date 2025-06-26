@@ -7,7 +7,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Collection
 from copy import deepcopy
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Unpack
 
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
@@ -901,7 +901,7 @@ def enable_clusters(contact_map: ContactMap,
 
 
 def plot_clusters(contact_map: ContactMap,
-                  fname: str,
+                  output_name: str,
                   clustering: dict,
                   cl_list: Optional[npt.ArrayLike]=None,
                   simple: bool=True,
@@ -913,7 +913,7 @@ def plot_clusters(contact_map: ContactMap,
                   flatten: bool=False,
                   norm_method: Optional[str]=None,
                   show_sequences: bool=False,
-                  **kwargs: Optional[dict]) -> None:
+                  **kwargs: Unpack[ContactMap.PlotOptions]) -> None:
     """
     Plot the contact map, annotating the map with cluster names and boundaries.
 
@@ -921,7 +921,7 @@ def plot_clusters(contact_map: ContactMap,
     block_reduction=2 will reduce the map dimensions by a factor of 2. Must be integer.
 
     :param contact_map: An instance of ContactMap to cluster.
-    :param fname: Output file name.
+    :param output_name: Output file name.
     :param clustering: The cluster solution.
     :param cl_list: The list of cluster ids to include in plot. If none, include all ordered clusters.
     :param simple: True plot seq map, False plot the extent map.
@@ -1011,7 +1011,7 @@ def plot_clusters(contact_map: ContactMap,
         else:
             _labels = [clustering[cl_id]['name'] for cl_id in cl_list if visible_clusters[cl_id]]
 
-    contact_map.plot(fname, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=_labels,
+    contact_map.plot(output_name, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=_labels,
                      max_image_size=max_image_size, flatten=flatten, norm_method=norm_method, **kwargs)
 
 
