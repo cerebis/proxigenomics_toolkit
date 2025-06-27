@@ -35,6 +35,7 @@ from ..exceptions import (
 from ..linalg import kr_bistochastic
 from ..misc_utils import make_dir, package_path
 from ..seq_utils import IndexedFasta
+from ..types import FULL_REPORT_NPTYPE, MINIMAL_REPORT_NPTYPE, ClusterType
 from .contact_map import ContactMap, SeqOrder
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ def flye_extractor(seq_record: SeqRecord) -> float:
     return float(m.group(1))
 
 
-def add_cluster_names(clustering: dict, prefix: str='CL') -> None:
+def add_cluster_names(clustering: Dict[int, ClusterType], prefix: str='CL') -> None:
     """
     Add sequential names beginning from 1 to a clustering in-place.
 
@@ -281,11 +282,12 @@ def cluster_map(contact_map: ContactMap,
         #   too ad-hoc and error prone.
         clustering[cl_id] = {
             'seq_names': np.array(_seq_names),
-            'seq_ids': np.array(_seq_ids),
+            'seq_ids': np.array(_seq_ids, dtype=np.int64),
             'extent': contact_map.order.lengths()[_seq_ids].sum(),
             'status': 'primary',
-            'unreferenced': unknown,
-            'deduplicated': []
+            'unreferenced': np.array(unknown),
+            'deduplicated': None,
+            'report': None,
         }
 
     # append singletons
@@ -298,11 +300,12 @@ def cluster_map(contact_map: ContactMap,
             assert cl_id not in clustering, f'Tried to overwrite existing cluster id: {cl_id}'
             clustering[cl_id] = {
                 'seq_names': np.array([_seq_info[_seq].name]),
-                'seq_ids': np.array([_seq]),
+                'seq_ids': np.array([_seq], dtype=np.int64),
                 'extent': contact_map.seq_info[_seq].length,
                 'status': 'rescued',
-                'unreferenced': [],
-                'deduplicated': []
+                'unreferenced': None,
+                'deduplicated': None,
+                'report': None,
             }
 
         # sanity check
@@ -324,7 +327,7 @@ def cluster_map(contact_map: ContactMap,
 
 
 def cluster_report(contact_map: ContactMap,
-                   clustering: dict,
+                   clustering: Dict[int, ClusterType],
                    source_fasta: Optional[str]=None,
                    assembler: str='generic',
                    coverage_file: Optional[str]=None) -> None:
@@ -416,14 +419,9 @@ def cluster_report(contact_map: ContactMap,
                     'Did you declare the correct assembler?'
 
             if len(_cov) > 0:
-                report = np.fromiter(zip(_len, _gc, _cov),
-                                     dtype=[('length', np.int64),
-                                            ('gc', np.float64),
-                                            ('cov', np.float64)])
+                report = np.fromiter(zip(_len, _gc, _cov), dtype=FULL_REPORT_NPTYPE)
             else:
-                report = np.fromiter(zip(_len, _gc),
-                                     dtype=[('length', np.int64),
-                                            ('gc', np.float64)])
+                report = np.fromiter(zip(_len, _gc), dtype=MINIMAL_REPORT_NPTYPE)
 
             clustering[cl_id]['report'] = report
 
@@ -1501,7 +1499,7 @@ def read_gfa(gfa_filename: str,
     return g_out, degen_segments
 
 
-def harden_clustering(clustering: dict, contact_map: ContactMap) -> dict:
+def harden_clustering(clustering: Dict[int, ClusterType], contact_map: ContactMap) -> dict:
     """
     Reduce a potentially soft-clustering solution to a hard-clustering solution by removing
     repeated assignments for any given sequence. Only the assignment to the largest cluster
@@ -1538,13 +1536,23 @@ def harden_clustering(clustering: dict, contact_map: ContactMap) -> dict:
         # keep only the assignment to the largest cluster
         # TODO this a simplistic approach for now.
         cl_targets = sorted(memberships, key=lambda x: -x[1])[1:]
+        # all remaining clusters, remove the sequence
         for cl_id, extent in cl_targets:
             _ix = np.where(hard_clustering[cl_id]['seq_ids'] == seq_id)[0]
             assert len(_ix) != 0, f'failed to find sequence {seq_id} in expected cluster {cl_id}'
+            # remove the sequence ids from the cluster
             hard_clustering[cl_id]['seq_ids'] = np.delete(hard_clustering[cl_id]['seq_ids'], _ix)
+            # update the cluster's extent'
             hard_clustering[cl_id]['extent'] -= seq_info[seq_id]['length']
-            hard_clustering[cl_id]['deduplicated'].append(seq_id)
+            # remember which sequences were removed
+            hard_clustering[cl_id].setdefault('deduplicated',[]).append(seq_id)
+        # track removed extent
         dupe_extent += seq_info[seq_id]['length']
+
+    # minimise datatype usage by ensuring all non-empty lists become numpy arrays
+    for cl_info in clustering.values():
+        if cl_info['deduplicated']:
+            cl_info['deduplicated'] = np.array(cl_info['deduplicated'])
 
     logger.info(f'Clustering involves {len(seq2cl):,} sequences, '
                 f'of which {n_duped:,} were assigned to more than one cluster')
@@ -1559,7 +1567,7 @@ def harden_clustering(clustering: dict, contact_map: ContactMap) -> dict:
     return hard_clustering
 
 
-def remove_empty_clusters(clustering: dict) -> int:
+def remove_empty_clusters(clustering: Dict[int, ClusterType]) -> int:
     """
     In-place removal of any clusters which are empty, with the implication that ids within the
     clustering will no longer be consecutive integers.

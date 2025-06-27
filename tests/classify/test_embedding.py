@@ -1,7 +1,8 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from proxigenomics_toolkit.classify.embedding import center_of_mass
+
 
 # Test functions are now standalone, no class needed for basic tests
 def test_center_of_mass_single_embedding_correctness():

@@ -77,7 +77,7 @@ def similarity_to_distance(m: MatrixType,
 
     There are three transformation functions from which to choose:
 
-    "Inverse": y = (1/x)^beta
+    "inverse": y = (1/x)^beta
      "neglog": y = -(log x/xmax)^beta
      "linear": y = (1 - x/xmax)^beta
 
@@ -143,7 +143,7 @@ def lkh_order(m: MatrixType,
               lkh_exe: Optional[str]=None,
               runs: Optional[int]=None,
               seed: Optional[int]=None,
-              dist_func: Callable[[MatrixType, Optional[float]], MatrixType]=reciprocal_counts,
+              dist_func: Callable[[MatrixType], MatrixType]=reciprocal_counts,
               fixed_edges: Optional[List]=None,
               special: bool=True,
               pop_size: Optional[int]=None,

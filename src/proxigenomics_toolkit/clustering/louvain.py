@@ -193,6 +193,9 @@ if __name__ == '__main__':
     if args.ifmt == 'graphml':
         g = nx.read_graphml(args.input)
     else:
+        # The data paremeter is being used correctly. Networkx as not
+        # completely specified the expected types for data.
+        # noinspection PyTypeChecker
         g = nx.read_edgelist(args.input, data=(('weight', float), ))
 
     print('Initial statistics')

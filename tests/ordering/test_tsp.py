@@ -86,7 +86,7 @@ def test_write_lkh_files(tmp_path, distance_matrix):
     assert par_file.exists()
     par_content = par_file.read_text()
     assert "SPECIAL" in par_content
-    assert f"POPULATION_SIZE = 20" in par_content
+    assert "POPULATION_SIZE = 20" in par_content
     assert f"PROBLEM_FILE = {dat_file}" in par_content
     assert "MAX_TRIALS = 100" in par_content
     assert "RUNS = 10" in par_content

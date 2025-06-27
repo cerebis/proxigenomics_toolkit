@@ -1,6 +1,6 @@
 import logging
 import os
-from collections import OrderedDict, defaultdict, namedtuple
+from collections import OrderedDict, defaultdict
 from functools import partial
 from typing import (
     Any,
@@ -37,7 +37,7 @@ from ..io_utils import io_utils
 from ..linalg import sparse_utils
 from ..misc_utils import package_path
 from ..seq_utils import SiteCounter, count_bam_reads, count_fasta_sequences, revcomp
-from ..types import SparseMatrix
+from ..types import INDEX_NPTYPE, STRUCT_NPTYPE, SeqInfo, SparseMatrix
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -48,8 +48,6 @@ import seaborn
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.INFO)
 logging.getLogger("matplotlib").setLevel(logging.INFO)
-
-SeqInfo = namedtuple('SeqInfo', ['offset', 'refid', 'name', 'length', 'sites', 'gc'])
 
 
 """
@@ -407,12 +405,6 @@ class SeqOrder(object):
     :ivar EXCLUDED: Signifies that a sequence is excluded from operations.
     :type EXCLUDED: bool
 
-    :ivar STRUCT_TYPE: Data type for storing sequence positional and state information.
-    :type STRUCT_TYPE: np.dtype
-
-    :ivar INDEX_TYPE: Data type for representing indices with orientation.
-    :type INDEX_TYPE: np.dtype
-
     :ivar _positions: Cached sorted positional representation of sequences. Updated when masking or positional
         states change.
     :type _positions: None | npt.NDArray[int]
@@ -426,9 +418,6 @@ class SeqOrder(object):
 
     ACCEPTED = True
     EXCLUDED = False
-
-    STRUCT_TYPE = np.dtype([('pos', np.int32), ('ori', np.int8), ('mask', bool), ('length', np.int32)])
-    INDEX_TYPE = np.dtype([('index', np.int32), ('ori', np.int8)])
 
     def __init__(self, seq_info: list) -> None:
         """
@@ -445,22 +434,22 @@ class SeqOrder(object):
         :param seq_info: Sequence information dictionary.
         """
         _ord = np.arange(len(seq_info), dtype=np.int32)
-        self.order: npt.NDArray[SeqOrder.STRUCT_TYPE] = np.array(
+        self.order: npt.NDArray[STRUCT_NPTYPE] = np.array(
             [(_ord[i], SeqOrder.FORWARD, SeqOrder.ACCEPTED, seq_info[i].length) for i in range(len(_ord))],
-            dtype=SeqOrder.STRUCT_TYPE)
+            dtype=STRUCT_NPTYPE)
 
         self._update_positions()
 
     @staticmethod
     def asindex(_ord: npt.NDArray | list) -> npt.NDArray:
         """
-        Convert a simple list or ndarray of indices, to an INDEX_TYPE array with default forward orientation.
+        Convert a simple list or ndarray of indices, to an INDEX_NPTYPE array with default forward orientation.
 
         :param _ord: list/ndarray of indices.
-        :return: INDEX_TYPE array.
+        :return: INDEX_NPTYPE array.
         """
         assert isinstance(_ord, (list, np.ndarray)), 'input must be a list or ndarray'
-        return np.fromiter(zip(_ord, np.ones_like(_ord, dtype=bool)), dtype=SeqOrder.INDEX_TYPE)
+        return np.fromiter(zip(_ord, np.ones_like(_ord, dtype=bool)), dtype=INDEX_NPTYPE)
 
     def _update_positions(self) -> None:
         """
@@ -481,9 +470,9 @@ class SeqOrder(object):
         often expect and return dense indices. When submitting changes to the current order
         state, it is important to first apply this method and reintroduce any gaps.
 
-        Both a list/array of indices or an INDEX_TYPE array can be passed.
+        Both a list/array of indices or an INDEX_NPTYPE array can be passed.
 
-        :param gapless_indices: Dense list of indices or a ndarray of type INDEX_TYPE.
+        :param gapless_indices: Dense list of indices or a ndarray of type INDEX_NPTYPE.
         :return: Remapped indices with gaps (of a similar type to input).
         """
         # Not as yet verified, but this method is being replaced by the 50x faster numpy
@@ -500,10 +489,10 @@ class SeqOrder(object):
 
         remapped = []
         # handle our local type
-        if isinstance(gapless_indices, np.ndarray) and gapless_indices.dtype == SeqOrder.INDEX_TYPE:
+        if isinstance(gapless_indices, np.ndarray) and gapless_indices.dtype == INDEX_NPTYPE:
             for oi in gapless_indices:
                 remapped.append((oi['index'] + shift[oi['index']], oi['ori']))
-            remapped = np.array(remapped, dtype=SeqOrder.INDEX_TYPE)
+            remapped = np.array(remapped, dtype=INDEX_NPTYPE)
         # handle a plain collection
         else:
             for oi in gapless_indices:
@@ -602,7 +591,7 @@ class SeqOrder(object):
     def set_order_and_orientation(self, _ord: npt.NDArray, implicit_excl: bool=False) -> None:
         """
         Set only the order, while ignoring orientation. An ordering is defined
-        as a 1D array of the structured type INDEX_TYPE, where elements are the
+        as a 1D array of the structured type INDEX_NPTYPE, where elements are the
         position and orientation of each indexed sequence.
 
         NOTE: This definition can be the opposite of what is returned by some
@@ -615,7 +604,7 @@ class SeqOrder(object):
         :param _ord: 1d ordering.
         :param implicit_excl: Implicitly extend the order to include unmentioned excluded sequences.
         """
-        assert _ord.dtype == SeqOrder.INDEX_TYPE, 'Wrong type supplied, _ord should be of INDEX_TYPE'
+        assert _ord.dtype == INDEX_NPTYPE, 'Wrong type supplied, _ord should be of INDEX_NPTYPE'
 
         if len(_ord) < len(self.order):
             # some sanity checks
@@ -649,11 +638,11 @@ class SeqOrder(object):
 
     def accepted_order(self) -> npt.NDArray:
         """
-        :return: an INDEX_TYPE array of the order and orientation of the currently accepted sequences.
+        :return: an INDEX_NPTYPE array of the order and orientation of the currently accepted sequences.
         """
         idx = np.where(self.order['mask'])
         ori = np.ones(self.count_accepted(), dtype=np.int64)
-        return np.fromiter(zip(idx, ori), dtype=SeqOrder.INDEX_TYPE)
+        return np.fromiter(zip(idx, ori), dtype=INDEX_NPTYPE)
 
     def mask_vector(self) -> npt.NDArray:
         """
@@ -1364,7 +1353,7 @@ class ContactMap(object):
                 lkh_o = lkh_o.reshape(lkh_o.shape[0] // 2, 2)
                 # 2. convert to surrogate ids and infer orientation from paths taken through doublets.
                 #   0->1 forward (+1): 1->0 reverse (-1).
-                lkh_o = np.fromiter(((oi[0] // 2, oi[1]-oi[0]) for oi in lkh_o), dtype=SeqOrder.INDEX_TYPE)
+                lkh_o = np.fromiter(((oi[0] // 2, oi[1]-oi[0]) for oi in lkh_o), dtype=INDEX_NPTYPE)
 
             else:
 
@@ -1373,7 +1362,7 @@ class ContactMap(object):
                                            special=False, stdout=stdout)
 
                 # for singlet tours, no orientation can be inferred.
-                lkh_o = np.fromiter(((oi, 1) for oi in lkh_o), dtype=SeqOrder.INDEX_TYPE)
+                lkh_o = np.fromiter(((oi, 1) for oi in lkh_o), dtype=INDEX_NPTYPE)
 
         # lkh ordering references the supplied matrix indices, not the surrogate ids.
         # we must map this consecutive set to the contact map indices.

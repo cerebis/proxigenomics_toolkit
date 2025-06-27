@@ -25,6 +25,8 @@ def save_object(file_name: str, obj: object) -> None:
     :param obj: object to serialize
     """
     with open_output(file_name, compress='gzip', mode='wb') as out_h:
+        # this produces a spurious warning in PyCharm
+        # noinspection PyTypeChecker
         pickle.dump(obj, out_h)
 
 
@@ -176,6 +178,8 @@ def write_to_stream(stream: IO, data: object, fmt: str= 'plain') -> None:
     if fmt == 'yaml':
         yaml.dump(data, stream, default_flow_style=False)
     elif fmt == 'json':
+        # this produces a spurious warning in PyCharm
+        # noinspection PyTypeChecker
         json.dump(data, stream, indent=1)
     elif fmt == 'plain':
         stream.write('{0}\n'.format(data))
