@@ -13,7 +13,6 @@ from typing import (
     Optional,
     Self,
     Tuple,
-    TypedDict,
     Union,
 )
 
@@ -2003,20 +2002,6 @@ class ContactMap(object):
             tick_locs = _cbins - 0.5
 
         self.plot(output_name, permute=permute, simple=simple, tick_locs=tick_locs, tick_labs=tick_labs, **kwargs)
-
-    class PlotOptions(TypedDict):
-        """
-        For **kwargs appearing in other function definitions that then
-        pass arguments to ContactMap.plot
-        """
-        alpha: float
-        bisto: bool
-        dpi: int
-        height: int
-        max_image_size: int
-        norm: bool
-        width: int
-        zero_diag: bool
 
     def plot(self,
              output_name: str,

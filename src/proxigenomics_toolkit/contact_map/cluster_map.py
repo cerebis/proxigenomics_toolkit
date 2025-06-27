@@ -7,7 +7,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Collection
 from copy import deepcopy
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Unpack
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import Bio.SeqIO as SeqIO
 import Bio.SeqUtils as SeqUtils
@@ -911,7 +911,7 @@ def plot_clusters(contact_map: ContactMap,
                   flatten: bool=False,
                   norm_method: Optional[str]=None,
                   show_sequences: bool=False,
-                  **kwargs: Unpack[ContactMap.PlotOptions]) -> None:
+                  **kwargs: Union[str, float, int, Collection]) -> None:
     """
     Plot the contact map, annotating the map with cluster names and boundaries.
 
