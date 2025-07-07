@@ -283,7 +283,7 @@ class Sparse2DAccumulator(object):
             return self.mat[index]
         return 0
 
-    def get_coo(self, make_symm: bool=True) -> SparseMatrix:
+    def get_coo(self, make_symm: bool=True) -> scisp.coo_matrix:
         """
         Create a COO format sparse representation of the accumulated values.
 
@@ -472,7 +472,7 @@ class Sparse4DAccumulator(object):
     def _make_elem(self) -> np.ndarray:
         return np.zeros((2, 2), dtype=self.dtype)
 
-    def get_coo(self, make_symm: bool=True) -> SparseMatrix:
+    def get_coo(self, make_symm: bool=True) -> sparse.COO:
         """
         Create a COO format sparse representation of the accumulated values. NOTE: As scipy
         does not support multidimensional arrays, this object is from the "sparse" module.

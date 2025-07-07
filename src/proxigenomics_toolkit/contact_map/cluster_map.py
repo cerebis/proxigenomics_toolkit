@@ -111,6 +111,9 @@ def add_cluster_names(clustering: Dict[int, ClusterType], prefix: str='CL') -> N
     :param clustering: Clustering solution returned from ContactMap.cluster_map.
     :param prefix: Static prefix of cluster names.
     """
+    if not clustering:
+        raise ValueError('Cannot assign cluster names to empty clustering solution')
+
     try:
         num_width = max(1, int(np.ceil(np.log10(max(clustering)+1))))
     except OverflowError:
@@ -138,6 +141,37 @@ def bistochastic_graph(g_in: nx.Graph) -> nx.Graph:
     for i, j, d in zip(_adj_mat.row, _adj_mat.col, _adj_mat.data):
         g_out.add_edge(name_lookup[i], name_lookup[j], weight=d)
     return g_out
+
+
+def read_infomap_tree(pathname: str) -> Dict[int, npt.NDArray[str]]:
+    """
+    Read a tree clustering file as output by Infomap.
+
+    :param pathname: The path to the tree file.
+    :return: Dict mapping cluster_ids to the respective array of seq_ids.
+    """
+    with open(pathname, 'rt') as in_h:
+        cl_map = defaultdict(list)
+        for line in in_h:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('#'):
+                continue
+            fields = line.split()
+            # the cluster is identified by the first N-1 terms in the label (: delimited)
+            _cl_id = fields[0][:fields[0].rindex(':')]
+            # this takes the name
+            cl_map[_cl_id].append(fields[2].strip('"'))
+
+    if not cl_map:
+        raise ValueError('The supplied tree file contained no results')
+
+    # order clusters by descending size, then create a basic map on ascending integers
+    cl_map = sorted([(len(cl_map[_id]), np.array(cl_map[_id])) for _id in cl_map],
+                    key=lambda x: x[0],
+                    reverse=True)
+    return {n: _seqs for n, (_size, _seqs) in enumerate(cl_map)}
 
 
 def cluster_map(contact_map: ContactMap,
@@ -177,33 +211,6 @@ def cluster_map(contact_map: ContactMap,
     :param exclude_degen: Exclude degenerate segments from clustering.
     :return: A dictionary detailing the full clustering of the contact map.
     """
-
-    def _read_tree(pathname: str) -> Dict[int, npt.NDArray]:
-        """
-        Read a tree clustering file as output by Infomap.
-
-        :param pathname: The path to the tree file.
-        :return: Dict mapping cluster_ids to the respective array of seq_ids.
-        """
-        with open(pathname, 'r') as in_h:
-            cl_map = defaultdict(list)
-            for line in in_h:
-                line = line.strip()
-                if not line:
-                    break
-                if line.startswith('#'):
-                    continue
-                fields = line.split()
-                # the cluster is identified by the first N-1 terms in the label (: delimited)
-                _cl_id = fields[0][:fields[0].rindex(':')]
-                # this takes the name
-                cl_map[_cl_id].append(fields[2].strip('"'))
-
-        # order clusters by descending size, then create a basic map on ascending integers
-        cl_map = sorted([(len(cl_map[_id]), np.array(cl_map[_id])) for _id in cl_map],
-                        key=lambda x: x[0],
-                        reverse=True)
-        return {n: _seqs for n, (_size, _seqs) in enumerate(cl_map)}
 
     assert os.path.exists(work_dir), 'supplied output path [{}] does not exist'.format(work_dir)
 
@@ -255,7 +262,7 @@ def cluster_map(contact_map: ContactMap,
             subprocess.check_call([exe_path, *options, graph_file, work_dir],
                                   stdout=stdout, stderr=subprocess.STDOUT)
 
-            cl_to_ids = _read_tree(os.path.join(work_dir, f'{base_name}.tree'))
+            cl_to_ids = read_infomap_tree(os.path.join(work_dir, f'{base_name}.tree'))
 
     except OSError as e:
         logger.error(f'An error occurred starting the child process. Helper path was: {exe_path}')

@@ -3,8 +3,7 @@ from typing import List
 
 class ApplicationException(Exception):
     def __init__(self, message: str) -> None:
-        super(ApplicationException, self).__init__()
-        self.message = message
+        super(ApplicationException, self).__init__(message)
 
 
 class UnknownEnzymeException(ApplicationException):

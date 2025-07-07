@@ -220,10 +220,10 @@ def fast_norm_gothic(rows: np.ndarray,
         data[:] = np.where(pr < tiny, tiny, pr)
 
     else:
-        raise ApplicationException('unsupported mode [{}]'.format(mode))
+        raise ApplicationException(f'unsupported mode [{mode}]')
 
 
-@nb.jit(nopython=True)
+@nb.jit('int64[:](int64[:],int64[:,:])', nopython=True)
 def count_bin_sites(coords: np.ndarray, bins: np.ndarray) -> np.ndarray:
     """
     For a set of genomic coordinates, representing cut-site locations, and a set of borders
@@ -233,6 +233,8 @@ def count_bin_sites(coords: np.ndarray, bins: np.ndarray) -> np.ndarray:
     :param bins: Borders of the bins for a sequence.
     :return: 1d-array of counts for each bin.
     """
+    if coords.size == 0 or bins.size == 0:
+        raise ValueError('neither coords nor bins parameters can be empty')
     return np.array([((coords >= bi[0]) & (coords < bi[1])).sum() for bi in bins], dtype='int')
 
 
@@ -440,7 +442,7 @@ class SeqOrder(object):
         self._update_positions()
 
     @staticmethod
-    def asindex(_ord: npt.NDArray | list) -> npt.NDArray:
+    def asindex(_ord: npt.ArrayLike) -> npt.NDArray:
         """
         Convert a simple list or ndarray of indices, to an INDEX_NPTYPE array with default forward orientation.
 
@@ -571,7 +573,7 @@ class SeqOrder(object):
         self.order['mask'] = _mask
         self._update_positions()
 
-    def set_order_only(self, _ord: npt.NDArray, implicit_excl: bool=False) -> None:
+    def set_order_only(self, _ord: npt.ArrayLike, implicit_excl: bool=False) -> None:
         """
         Convenience method to set the order using a list or 1D ndarray. Orientations will
         be assumed as all forward (+1).
@@ -639,7 +641,7 @@ class SeqOrder(object):
         """
         :return: an INDEX_NPTYPE array of the order and orientation of the currently accepted sequences.
         """
-        idx = np.where(self.order['mask'])
+        idx = self.accepted()
         ori = np.ones(self.count_accepted(), dtype=np.int64)
         return np.fromiter(zip(idx, ori), dtype=INDEX_NPTYPE)
 
@@ -655,7 +657,18 @@ class SeqOrder(object):
 
         :param _id: The surrogate id of a sequence.
         """
+        assert isinstance(_id, int), 'Wrong type supplied, surrogate id must be an integer'
         self.order[_id]['mask'] = False
+        self._update_positions()
+
+    def unmask(self, _id: int) -> None:
+        """
+        Mask an individual sequence by its surrogate id.
+
+        :param _id: The surrogate id of a sequence.
+        """
+        assert isinstance(_id, int), 'Wrong type supplied, surrogate id must be an integer'
+        self.order[_id]['mask'] = True
         self._update_positions()
 
     def new_mask(self, default: bool=True) -> npt.NDArray:
@@ -697,6 +710,7 @@ class SeqOrder(object):
 
         :param _id: The surrogate id of a sequence.
         """
+        assert isinstance(_id, int), 'Wrong type supplied, surrogate id must be an integer'
         self.order[_id]['ori'] *= -1
 
     def lengths(self, exclude_masked: bool=False) -> npt.NDArray:
@@ -854,7 +868,8 @@ class ContactMap(object):
         with pysam.AlignmentFile(bam_file, 'rb', threads=threads) as bam:
 
             # test that BAM file is the correct sort order
-            header = bam.header.to_dict() # pedantically obtain the dictionary form to make typing happy.
+            header = bam.header.to_dict()
+            # pedantically obtain the dictionary form to make typing happy.
             if 'SO' not in header['HD'] or header['HD']['SO'] != 'queryname':
                 raise IOError('BAM file must be sorted by read name')
 
@@ -1115,7 +1130,7 @@ class ContactMap(object):
             _grouping_map = None
             _extent_map = None
 
-        with tqdm.tqdm(total=self.total_reads) as progress_bar:
+        with tqdm.tqdm(total=self.total_reads, desc="Parsing BAM") as progress_bar:
 
             # locals for read filtering
             _min_sep = self.min_separation
@@ -1248,11 +1263,17 @@ class ContactMap(object):
         # a truncated histogram covering observed duplicates between 0 and 10+ times
         if self.no_duplicates:
             map_count = np.bincount(list(pair_store.values()), minlength=11)
-            dupe_rate = map_count[2:].sum() / map_count.sum(dtype=np.float64)
+            duplicated_pairs = map_count[2:].sum()
+            total_pairs = map_count.sum(dtype=np.float64)
+            # dupe_rate = map_count[2:].sum() / map_count.sum(dtype=np.float64)
             map_count[10] = map_count[10:].sum()
             del pair_store
             logger.debug('Duplication histogram: {}'.format([(n, ci) for n, ci in enumerate(map_count[:11])]))
-            logger.info('Duplication rate: {:.2f}%'.format(dupe_rate * 100))
+            if duplicated_pairs == 0:
+                logger.info('No duplicate pair mappings found')
+            else:
+                logger.info('Duplication rate: {}/{} or ({:.2f}%)'.format(
+                    duplicated_pairs, total_pairs, 100 * duplicated_pairs / total_pairs))
         else:
             logger.warning('Duplicate removal was disabled by user')
 
@@ -1660,7 +1681,7 @@ class ContactMap(object):
         _seq_map = sp.coo_matrix(([summary_func(v) for v in _seq_map.values()],
                                   ([row[0] for row in _seq_map], [col[1] for col in _seq_map])),
                                  shape=(_map_dim, _map_dim),
-                                 dtype=np.float64)
+                                 dtype=_ext_map.dtype)
 
         if make_symmetric:
             _seq_map = sparse_utils.make_symmetric(_seq_map)
@@ -1674,7 +1695,7 @@ class ContactMap(object):
         # represented in an edge-list format graph
         _mask = self.get_primary_acceptance_mask()
         reject_mask = _seq_map.sum(axis=0).A.squeeze() > 0
-        logger.debug('Extent-to-seq: there were {} non-interacting sequences'.format((~reject_mask).sum()))
+        logger.debug('Extent-to-seq: there were {} non-interacting sequences'.format(np.sum(~reject_mask)))
         # _mask &= reject_mask
         # self.order.set_mask_only(_mask)
         # self.primary_acceptance_mask = _mask
@@ -1910,6 +1931,8 @@ class ContactMap(object):
 
         :return: Sparse CSR format permutation of the given map.
         """
+        assert sp.isspmatrix(_map), 'Extent matrix is not a scipy sparse matrix type'
+
         _order = self.order.gapless_positions()
         _bins = self.grouping.bins[self.order.mask_vector()]
         _ori = self.order.order['ori'][np.argsort(self.order.order['pos'])]
