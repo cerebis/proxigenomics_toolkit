@@ -189,6 +189,17 @@ class SiteCounter(object):
                    key=lambda x: (-len(x), x))).replace('N', '[ACGT]')))
         self.end_vestigial = re.compile('{}$'.format(self.any_vestigial.pattern))
 
+    @property
+    def recognition_sites(self) -> List[str]:
+        """
+        Return the basic enzyme recognition sites.
+        :return: List[str]
+        """
+        _sites = [self.enzyme_a.site]
+        if self.enzyme_b is not None:
+            _sites.append(self.enzyme_b.site)
+        return _sites
+
     def get_vestigial_end_searcher(self) -> Callable[[str], Match[str]]:
         return self.end_vestigial.search
 
