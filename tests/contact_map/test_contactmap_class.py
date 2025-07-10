@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, List
 from unittest.mock import MagicMock
 
 import Bio.SeqIO
@@ -12,6 +12,7 @@ import sparse
 import proxigenomics_toolkit.types
 from proxigenomics_toolkit.contact_map.contact_map import ContactMap, SeqOrder
 from proxigenomics_toolkit.exceptions import NoneAcceptedException
+from proxigenomics_toolkit.seq_utils import SiteCounter
 
 
 @pytest.fixture
@@ -20,8 +21,8 @@ def create_mock_fasta(tmp_path):
     def _factory(seed: int,
                  num_seqs: int,
                  seq_len: int,
-                 site_seq: Optional[str] = None,
-                 num_sites: int = 0,
+                 enzyme_site_seqs: List[str],
+                 num_sites,
                  prob_n: float = 1e-2) -> str:
         """
         Generates a mock multi-FASTA file with random DNA sequences.
@@ -34,10 +35,10 @@ def create_mock_fasta(tmp_path):
             seed (int): The seed for the random number generator.
             num_seqs (int): The number of sequences to generate.
             seq_len (int): The length of each DNA sequence.
-            site_seq (str, optional): The DNA sequence of the recognition site
-                                               to embed (e.g., 'GATC'). Defaults to None.
-            num_sites (int, optional): The number of times to embed the site in each
-                                       sequence. Defaults to 0.
+            enzyme_site_seqs (List[str]): The DNA sequence of the recognition sites to
+                                   embed (e.g., 'GATC').
+            num_sites (int): The number of times of each enzyme to embed in each
+                             sequence.
             prob_n (float, optional): The probability of a degenerate site (N)
         """
         # Define the DNA alphabet and their corresponding weights.
@@ -61,8 +62,8 @@ def create_mock_fasta(tmp_path):
                     sequence = "".join(random_state.choice(bases, size=seq_len, p=weights))
 
                     # If a recognition site is provided, embed it
-                    if site_seq and num_sites > 0:
-                        site_len = len(site_seq)
+                    for site in enzyme_site_seqs:
+                        site_len = len(site)
                         if num_sites * site_len > seq_len:
                             raise ValueError("Total length of recognition sites exceeds sequence length.")
 
@@ -85,7 +86,7 @@ def create_mock_fasta(tmp_path):
 
                             # Overwrite the sequence with the recognition site
                             for j in range(site_len):
-                                sequence_list[start_pos + j] = site_seq[j]
+                                sequence_list[start_pos + j] = site[j]
 
                             # Remove all indices from the available list that would now cause an overlap.
                             # An overlap occurs if a new site starts anywhere from
@@ -180,6 +181,7 @@ def binned_contact_map(mocker, tmp_path, create_mock_fasta):
 
         random_state = np.random.RandomState(seed=seed)
 
+
         # 2. Mock pysam.AlignmentFile
         mock_bamfile = mocker.MagicMock(spec=pysam.AlignmentFile)
         mock_bamfile.__enter__.return_value = mock_bamfile
@@ -188,10 +190,13 @@ def binned_contact_map(mocker, tmp_path, create_mock_fasta):
 
         # make actual fake sequences on the filesystem
         if simulated_fasta:
+            # get the recogniition site(s) from the supplied enzyme(s)
+            enzyme_site_seqs = SiteCounter(*enzymes, tip_size=tip_size).recognition_sites
+
             fasta_path = create_mock_fasta(seed=seed,
                                            num_seqs=num_seqs,
                                            seq_len=ref_len,
-                                           site_seq='GATC',
+                                           enzyme_site_seqs=enzyme_site_seqs,
                                            num_sites=10)
             seqs = OrderedDict({s.id: len(s.seq) for s in Bio.SeqIO.parse(fasta_path, format='fasta')})
             mock_bamfile.references = list(seqs.keys())
@@ -254,7 +259,7 @@ class TestBinnedContactMap:
     """Tests using the binned_contact_map fixture."""
 
     @pytest.fixture
-    def sample_contact_map(self, mocker, binned_contact_map):
+    def sample_contact_map(self, binned_contact_map):
         # Create ContactMap instance
         return binned_contact_map(
             seed=12345,
