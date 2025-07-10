@@ -4,8 +4,9 @@ import os
 
 import pytest
 
-from proxigenomics_toolkit.exceptions import NoRecordsException
-from proxigenomics_toolkit.seq_utils import IndexedFasta, count_bam_reads, count_fasta_sequences, revcomp
+from proxigenomics_toolkit.exceptions import NoRecordsException, UnknownEnzymeException
+from proxigenomics_toolkit.seq_utils import IndexedFasta, SiteCounter, count_fasta_sequences, revcomp
+from proxigenomics_toolkit.exceptions import BluntEnzymeException
 
 # from pytest_mock import mocker
 
@@ -157,3 +158,82 @@ def test_count_bam_reads_in_docker():
         assert int(n_reads) == 169, f"Expected 169 reads, got {n_reads}"
     finally:
         container.remove(force=True)
+
+class TestSiteCounter:
+
+    @pytest.fixture
+    def single_digest(self):
+        """Fixture for a single enzyme (HindIII) digest."""
+        return SiteCounter(enzyme_a='DpnII')
+
+    @pytest.fixture
+    def double_digest(self):
+        """Fixture for a double enzyme (HindIII, EcoRI) digest."""
+        return SiteCounter(enzyme_a='DpnII', enzyme_b='MluCI')
+
+    def test_init_ok(self, single_digest, double_digest):
+        assert single_digest.enzyme_a.site == 'GATC'
+        assert single_digest.enzyme_b is None
+        assert double_digest.enzyme_a.site == 'GATC'
+        assert double_digest.enzyme_b.site == 'AATT'
+
+    def test_init_unknown_enzyme(self):
+        with pytest.raises(UnknownEnzymeException, match="UnknownEnzyme does not correspond to a known enzyme"):
+            SiteCounter(enzyme_a='UnknownEnzyme')
+        # Check for suggestions
+        with pytest.raises(UnknownEnzymeException, match=r"HndIII is undefined, but its similar to.*"):
+            SiteCounter(enzyme_a='HndIII')
+
+    def test_recognition_sites_property(self, single_digest, double_digest):
+        assert single_digest.recognition_sites == ['GATC']
+        assert double_digest.recognition_sites == ['GATC', 'AATT']
+
+    def test_find_sites(self, single_digest, double_digest):
+        seq = "TTTGATCTTCCCGACTTAATTTT"
+        # HindIII at pos 3, EcoRI at pos 12 (0-based)
+        assert single_digest.find_sites(seq) == [4]
+        assert double_digest.find_sites(seq) == [4, 18]
+        # Test no sites
+        assert single_digest.find_sites("ACGTACGT") == []
+
+    def test_find_sites_circular(self):
+        # Site wraps around the end: CTT...AAG
+        seq = "TCTTTTTAAGA"
+        sc_linear = SiteCounter('DpnII', is_linear=True)
+        sc_circular = SiteCounter('DpnII', is_linear=False)
+        assert sc_linear.find_sites(seq) == []
+        # Biopython finds wrapped sites and returns the 5' end position
+        assert sc_circular.find_sites(seq) == [10] # AAG starts at index 6
+
+    def test_count_sites_no_tip(self, single_digest, double_digest):
+        seq = "TTTGATCAGCTTCCCGAAGATCTTCTTTAATTGCTT"
+        assert single_digest.count_sites(seq) == 2
+        assert double_digest.count_sites(seq) == 3
+
+    def test_count_sites_with_tip(self):
+        seq = "AAGCTT" + ("G" * 50) + "GAATTC" + ("C" * 50) + "AAGCTT"
+        # seq len = 6 + 50 + 6 + 50 + 6 = 118
+        # tip_size = 30
+        # left tip: AAGCTT... (1 site)
+        # right tip: ...AAGCTT (1 site)
+        sc = SiteCounter('HindIII', 'EcoRI', tip_size=30)
+        assert sc.count_sites(seq) == [1, 1]
+
+    def test_count_sites_small_contig_tip(self):
+        # seq_len (20) < 2 * tip_size (30)
+        seq = "AAGCTT" + ("G" * 8) + "GAATTC"
+        sc = SiteCounter('HindIII', 'EcoRI', tip_size=15)
+        # half_len = 10. l_tip = AAGCTTGGGG (1 site), r_tip = GGGGAATTC (1 site)
+        assert sc.count_sites(seq) == [1, 1]
+
+    def test_get_vestigial_end_searcher(self, single_digest):
+        # HindIII junction is AAGCTT, vestigial is AAGCTT
+        searcher = single_digest.get_vestigial_end_searcher()
+        assert searcher("ATATAT") is None
+        match = searcher("GGGNAAGCTTGATC")
+        assert match is not None
+        assert match.group(1) == "GATC"
+
+    def test_blunt_enzyme(self):
+        with pytest.raises(BluntEnzymeException):
+            SiteCounter('DpnI')

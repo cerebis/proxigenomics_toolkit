@@ -10,7 +10,14 @@ class UnknownEnzymeException(ApplicationException):
     """All sequences were excluded during filtering"""
     def __init__(self, target: str, similar: List[str]) -> None:
         super(UnknownEnzymeException, self).__init__(
-            '{} is undefined, but its similar to: {}'.format(target, ', '.join(similar)))
+            f'{target} does not correspond to a known enzyme' if not similar else
+            f'{target} is undefined, but its similar to: {", ".join(similar)}')
+
+
+class BluntEnzymeException(ApplicationException):
+    """All sequences were excluded during filtering"""
+    def __init__(self, target: str) -> None:
+        super(BluntEnzymeException, self).__init__(f'{target} is a blunt enzyme')
 
 
 class UnknownOrientationStateException(ApplicationException):

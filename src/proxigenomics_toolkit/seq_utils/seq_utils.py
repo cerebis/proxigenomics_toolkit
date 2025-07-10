@@ -18,10 +18,11 @@ import numpy as np
 import numpy.typing as npt
 import yaml
 from Bio.Restriction import Restriction
+from Bio.Seq import MutableSeq, Seq
 from scipy.stats import mstats
 
 # from ..contact_map import SeqInfo
-from ..exceptions import NoRecordsException, UnknownEnzymeException
+from ..exceptions import BluntEnzymeException, NoRecordsException, UnknownEnzymeException
 from ..misc_utils import exe_exists
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,10 @@ class SiteCounter(object):
         """
         self.enzyme_a = SiteCounter._get_enzyme_instance(enzyme_a)
         self.enzyme_b = None if enzyme_b is None else SiteCounter._get_enzyme_instance(enzyme_b)
+        for enz in [self.enzyme_a, self.enzyme_b]:
+            if enz is not None and enz.is_blunt():
+                raise BluntEnzymeException(enz)
+
         self.is_linear = is_linear
         self.tip_size = tip_size
         self.junctions = self.junction_duplication()
@@ -223,6 +228,10 @@ class SiteCounter(object):
                     similar.append(a)
             raise UnknownEnzymeException(enz_name, similar)
 
+    @staticmethod
+    def to_seq(seq: str | Seq | MutableSeq) -> Seq | MutableSeq:
+        return seq if isinstance(seq, Seq) or isinstance(seq, MutableSeq) else Seq(seq)
+
     def find_sites(self, seq: str) -> List[int]:
         """
         Find the cut-sites along the given sequence.
@@ -233,11 +242,12 @@ class SiteCounter(object):
         for en in [self.enzyme_a, self.enzyme_b]:
             if en is None:
                 continue
-            sites.extend(en.search(seq, self.is_linear))
+            sites.extend(en.search(SiteCounter.to_seq(seq), self.is_linear))
         return sorted(sites)
 
     def _count(self, seq: str) -> int:
-        return sum(len(en.search(seq, self.is_linear)) for en in [self.enzyme_a, self.enzyme_b] if en is not None)
+        return sum(len(en.search(SiteCounter.to_seq(seq), self.is_linear))
+                   for en in [self.enzyme_a, self.enzyme_b] if en is not None)
 
     def count_sites(self, seq: str) -> List[int] | int:
         """
@@ -251,8 +261,8 @@ class SiteCounter(object):
             seq_len = len(seq)
             if seq_len < 2*self.tip_size:
                 # small contigs simply divide their extent in half
-                l_tip = seq[:seq_len / 2]
-                r_tip = seq[-seq_len / 2:]
+                l_tip = seq[:seq_len // 2]
+                r_tip = seq[-seq_len // 2:]
             else:
                 l_tip = seq[:self.tip_size]
                 r_tip = seq[-self.tip_size:]
