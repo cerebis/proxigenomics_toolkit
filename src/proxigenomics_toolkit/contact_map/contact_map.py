@@ -947,12 +947,11 @@ class ContactMap(object):
             fasta_count = count_fasta_sequences(self.seq_file)
             for n_seq, seqrec in tqdm.tqdm(enumerate(SeqIO.parse(multi_fasta, 'fasta')),
                                            total=fasta_count, desc='Analyzing reference sequences'):
-                cs_coords = np.array(self.site_counter.find_sites(seqrec.seq))
-                fasta_info[seqrec.id] = {'sites': len(cs_coords),
+                fasta_info[seqrec.id] = {'sites': np.array(self.site_counter.count_sites(seqrec.seq)),
                                          'length': len(seqrec),
                                          # TODO, biopython has made an interface change for GC
                                          'gc': SeqUtils.GC(seqrec.seq),
-                                         'coords': cs_coords}
+                                         'coords': np.array(self.site_counter.find_sites(seqrec.seq))}
 
             logger.info(f'From FASTA, {n_seq} of {len(fasta_info)} sequences were accepted')
 
@@ -1721,7 +1720,7 @@ class ContactMap(object):
         for i in range(len(_order)):
             p[i, _order[i]] = 1.
         p = p.tocsr()
-        return p.dot(_map.tocsr()).dot(p.T)
+        return p.dot(_map.tocsr()).dot(p.T).tocoo()
 
     def _bisto_seq(self, _map: SparseMatrix) -> Tuple[SparseMatrix, npt.NDArray]:
         """
@@ -1768,6 +1767,7 @@ class ContactMap(object):
             _sites = self._get_sites()
             _map = _map.astype(np.float64)
             if tip_based:
+                assert isinstance(_map, sparse.COO), 'tip based normalisation expects type sparse.COO'
                 fast_norm_tipbased_bysite(_map.coords, _map.data, _sites)
             else:
                 if not sp.isspmatrix_coo(_map):
@@ -1778,6 +1778,7 @@ class ContactMap(object):
 
             logger.debug('Doing length based normalisation')
             if tip_based:
+                assert isinstance(_map, sparse.COO), 'tip based normalisation expects type sparse.COO'
                 _tip_lengths = np.minimum(self.tip_size, self.order.lengths()).astype(np.float64)
                 fast_norm_tipbased_bylength(_map.coords, _map.data, _tip_lengths, self.tip_size)
             else:
@@ -1789,7 +1790,7 @@ class ContactMap(object):
                 for i in range(_map.shape[0]):
                     _map[i, :] /= np.fromiter((1e-3 * _mean_func(_len[i],  _len[j])
                                                for j in range(_map.shape[0])), dtype=np.float64)
-                _map = _map.tocsr()
+                _map = _map.tocoo()
 
         elif method == 'gothic':
             if tip_based:

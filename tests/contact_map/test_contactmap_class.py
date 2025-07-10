@@ -1,39 +1,113 @@
+from collections import OrderedDict
+from typing import Optional
 from unittest.mock import MagicMock
 
+import Bio.SeqIO
 import numpy as np
 import pysam
 import pytest
 import scipy.sparse as sp
-from Bio.SeqUtils import GC
+import sparse
 
 import proxigenomics_toolkit.types
 from proxigenomics_toolkit.contact_map.contact_map import ContactMap, SeqOrder
 from proxigenomics_toolkit.exceptions import NoneAcceptedException
 
 
-# def make_random_sequence(chunk_size, n_sites, site_seq, seed):
-#     rs = np.random.RandomState(seed=seed)
-#     chunks = (rs.choice(np.array(['A','C','G','T']),
-#                        size=(n_sites+1, chunk_size - len(site_seq)))
-#               .astype('U1')
-#               .view(f'U{chunk_size - len(site_seq)}')
-#               .ravel())
-#     return site_seq.join(chunks)
-#
-#
-# @pytest.fixture
-# def create_mock_references(n_refs):
-#     seed = 1234
-#     ref_seqs = []
-#     for n in range(n_refs, start=1):
-#         seq = make_random_sequence(500, 10, 'GATC', seed + n)
-#         ref_seqs.append({
-#             'name': f'ref{n}',
-#             'length': len(seq),
-#             'seq':  seq,
-#             'gc': GC(seq),
-#         })
-#     return ref_seqs
+@pytest.fixture
+def create_mock_fasta(tmp_path):
+
+    def _factory(seed: int,
+                 num_seqs: int,
+                 seq_len: int,
+                 site_seq: Optional[str] = None,
+                 num_sites: int = 0,
+                 prob_n: float = 1e-2) -> str:
+        """
+        Generates a mock multi-FASTA file with random DNA sequences.
+
+        Can optionally embed a specified number of non-overlapping recognition sites
+        into each sequence.
+
+        Args:
+            file_path (str): The full path where the FASTA file will be saved.
+            seed (int): The seed for the random number generator.
+            num_seqs (int): The number of sequences to generate.
+            seq_len (int): The length of each DNA sequence.
+            site_seq (str, optional): The DNA sequence of the recognition site
+                                               to embed (e.g., 'GATC'). Defaults to None.
+            num_sites (int, optional): The number of times to embed the site in each
+                                       sequence. Defaults to 0.
+            prob_n (float, optional): The probability of a degenerate site (N)
+        """
+        # Define the DNA alphabet and their corresponding weights.
+        # 'N' has a much lower probability (2%) compared to A, C, G, T (24.5% each).
+        bases = ["A", "C", "G", "T", "N"]
+        base_weight = (1 - prob_n) / 4
+        weights = [base_weight] * 4 + [prob_n]
+
+        random_state = np.random.RandomState(seed)
+
+        file_path = tmp_path / "test_data.fasta"
+
+        try:
+            with open(file_path, "w") as f:
+                for i in range(num_seqs):
+                    # Create a unique header for each sequence
+                    header = f">sequence_{i + 1}_mock_dna\n"
+                    f.write(header)
+
+                    # Generate the initial random sequence
+                    sequence = "".join(random_state.choice(bases, size=seq_len, p=weights))
+
+                    # If a recognition site is provided, embed it
+                    if site_seq and num_sites > 0:
+                        site_len = len(site_seq)
+                        if num_sites * site_len > seq_len:
+                            raise ValueError("Total length of recognition sites exceeds sequence length.")
+
+                        # Convert to list for mutable operations
+                        sequence_list = list(sequence)
+
+                        # Get all possible start indices for the site
+                        available_indices = list(range(seq_len - site_len + 1))
+
+                        for _ in range(num_sites):
+                            if not available_indices:
+                                # This can happen if seq_length is small and num_sites is large
+                                raise ValueError(
+                                    f"Could not place {num_sites} non-overlapping sites of length {site_len} "
+                                    f"in a sequence of length {seq_len}."
+                                )
+
+                            # Choose a random start position from the available spots
+                            start_pos = random_state.choice(available_indices)
+
+                            # Overwrite the sequence with the recognition site
+                            for j in range(site_len):
+                                sequence_list[start_pos + j] = site_seq[j]
+
+                            # Remove all indices from the available list that would now cause an overlap.
+                            # An overlap occurs if a new site starts anywhere from
+                            # (start_pos - site_len + 1) to (start_pos + site_len - 1).
+                            invalid_start = start_pos - site_len + 1
+                            invalid_end = start_pos + site_len - 1
+                            available_indices = [
+                                idx for idx in available_indices if not (invalid_start <= idx <= invalid_end)
+                            ]
+
+                        sequence = "".join(sequence_list)
+
+                    # Write the final sequence
+                    f.write(sequence + "\n")
+
+            return str(file_path)
+
+        except IOError as e:
+            print(f"Error writing to file {file_path}: {e}")
+            raise e
+
+    return _factory
 
 
 # Define a fixture to provide a temporary directory and file paths
@@ -84,8 +158,8 @@ def create_mock_aligned_segment(mocker, query_name, ref_id, ref_pos, mapq, align
     return seg
 
 
-@pytest.fixture()
-def binned_contact_map(mocker):
+@pytest.fixture
+def binned_contact_map(mocker, tmp_path, create_mock_fasta):
     """
     A factory fixture that produces fully initialized ContactMap instances by
     running the _bin_map method on a stream of mock AlignedSegment data.
@@ -100,27 +174,42 @@ def binned_contact_map(mocker):
                  min_separation,
                  no_duplicates,
                  min_signal,
-                 enzymes):
+                 enzymes,
+                 tip_size=None,
+                 simulated_fasta=False):
 
         random_state = np.random.RandomState(seed=seed)
-
-        # 1. Mock FASTA info
-        mock_fasta_info = {
-            f'ref_{n+1}': {'length': ref_len,
-                           'sites': random_state.poisson(ref_len / 256),
-                           'gc': random_state.beta(2, 2),
-                           'coords': np.linspace(1, ref_len, 21, endpoint=True, dtype='i8')}
-            for n in range(num_seqs)
-        }
-        mocker.patch.object(ContactMap, 'initialise_fasta_info', return_value=mock_fasta_info)
 
         # 2. Mock pysam.AlignmentFile
         mock_bamfile = mocker.MagicMock(spec=pysam.AlignmentFile)
         mock_bamfile.__enter__.return_value = mock_bamfile
         mock_bamfile.header.to_dict.return_value = {'HD': {'SO': 'queryname', "VN": "1.6"}}
-        mock_bamfile.references = sorted(mock_fasta_info.keys())
-        mock_bamfile.lengths = [v['length'] for k, v in sorted(mock_fasta_info.items(), key=lambda x: x[0])]
         mocker.patch("pysam.AlignmentFile", return_value=mock_bamfile)
+
+        # make actual fake sequences on the filesystem
+        if simulated_fasta:
+            fasta_path = create_mock_fasta(seed=seed,
+                                           num_seqs=num_seqs,
+                                           seq_len=ref_len,
+                                           site_seq='GATC',
+                                           num_sites=10)
+            seqs = OrderedDict({s.id: len(s.seq) for s in Bio.SeqIO.parse(fasta_path, format='fasta')})
+            mock_bamfile.references = list(seqs.keys())
+            mock_bamfile.lengths = list(seqs.values())
+        # mocked fasta info
+        else:
+            fasta_path = "dummy.fna"
+            # 1. Mock FASTA info
+            mock_fasta_info = {
+                f'ref_{n+1}': {'length': ref_len,
+                               'sites': random_state.poisson(ref_len / 256),
+                               'gc': random_state.beta(2, 2),
+                               'coords': np.linspace(1, ref_len, 21, endpoint=True, dtype='i8')}
+                for n in range(num_seqs)
+            }
+            mocker.patch.object(ContactMap, 'initialise_fasta_info', return_value=mock_fasta_info)
+            mock_bamfile.references = sorted(mock_fasta_info.keys())
+            mock_bamfile.lengths = [v['length'] for k, v in sorted(mock_fasta_info.items(), key=lambda x: x[0])]
 
         # 3. Generate mock AlignedSegments
         mock_alignments = []
@@ -148,12 +237,13 @@ def binned_contact_map(mocker):
         # 4. Instantiate the REAL ContactMap, which will call _bin_map
         contact_map = ContactMap(
             bam_file="dummy.bam",
-            seq_file="dummy.fasta",
+            seq_file=fasta_path,
             enzymes=enzymes,
             min_separation=min_separation,
             bin_size=bin_size,
             no_duplicates=no_duplicates,
             min_sig=min_signal,
+            tip_size=tip_size,
         )
         return contact_map
 
@@ -776,3 +866,92 @@ class TestBinnedContactMap:
             err_msg="Permutation should preserve total sum"
         )
 
+    # @pytest.mark.parametrize("method", ["sites", "length", "gothic"])
+    @pytest.mark.parametrize(('tip_based','method'),
+                             [(False, 'length'),
+                              (False, 'sites'),
+                              (False, 'gothic'),
+                              (True, 'length'),
+                              (True, 'sites'),
+                              pytest.param(True, 'gothic',
+                                           marks=pytest.mark.xfail(reason="Gothic method not implemented yet"))
+                              ])
+    def test_norm_seq_returns_coo_matrix_when_tip_based_is_false(self, binned_contact_map, tip_based, method):
+        """
+        Tests that _norm_seq returns a coo_matrix when tip_based is False.
+        """
+        contact_map = binned_contact_map(seed=12345,
+                                num_seqs=5,
+                                ref_len=10000,
+                                num_pairs=500,
+                                align_len=150,
+                                bin_size=None,
+                                min_separation=100,
+                                no_duplicates=True,
+                                min_signal=0,
+                                enzymes=["DpnII"],
+                                tip_size=1000 if tip_based else None,
+                                simulated_fasta=True)
+
+        normalized_map = contact_map._norm_seq(contact_map.seq_map, tip_based=tip_based, method=method)
+        if tip_based:
+            assert isinstance(normalized_map, sparse.COO), "Result should be of type sparse.COO"
+        else:
+            assert sp.isspmatrix_coo(normalized_map), "Result should be of type scipy.sparse.coo_matrix"
+        assert normalized_map.shape[0] == contact_map.total_seq
+        assert normalized_map.shape[1] == contact_map.total_seq
+
+    def test_get_sites(self, sample_contact_map):
+        sites = sample_contact_map._get_sites()
+        assert isinstance(sites, np.ndarray)
+        assert sites.dtype == np.float64
+        assert sites.shape[0] == sample_contact_map.total_seq
+        assert np.all(sites >= 1)
+
+    def test_bisto_seq(self, sample_contact_map):
+        bisto_map, bisto_scale = sample_contact_map._bisto_seq(sample_contact_map.seq_map)
+        assert isinstance(bisto_map, sp.coo_matrix)
+        assert isinstance(bisto_scale, np.ndarray)
+        assert bisto_map.shape[0] == sample_contact_map.total_seq
+        assert bisto_map.shape[1] == sample_contact_map.total_seq
+        assert bisto_scale.shape[0] == sample_contact_map.total_seq
+
+    def test_reorder_seq_returns_coo_matrix(self, sample_contact_map):
+        """
+        Tests that _reorder_seq returns a coo_matrix.
+        """
+        input_matrix = sample_contact_map.seq_map
+        reordered_map = sample_contact_map._reorder_seq(input_matrix)
+        assert isinstance(reordered_map, sp.coo_matrix)
+        assert reordered_map.shape == input_matrix.shape
+
+    def test_reorder_seq_correctly_reorders(self, binned_contact_map, mocker):
+        """
+        Tests that _reorder_seq correctly reorders the matrix.
+        """
+
+        contact_map = binned_contact_map(
+            seed=42, num_seqs=4, ref_len=1000, num_pairs=100, align_len=100,
+            bin_size=None, min_separation=0, no_duplicates=True, min_signal=0,
+            enzymes=['DpnII']
+        )
+        # mock the the input and order matrices so as to guarantee
+        # the predicted outcome
+        coords = [[0, 1, 2, 3], [1, 0, 3, 2]]
+        data = [10, 20, 30, 40]
+        input_matrix = sp.coo_matrix((data, coords), shape=(4, 4))
+        reorder_array = np.array([1, 0, 3, 2])
+        mocker.patch.object(contact_map, 'order', mocker.MagicMock())
+        contact_map.order.gapless_positions.return_value = reorder_array
+
+        # call reordering
+        reordered_map = contact_map._reorder_seq(_map=input_matrix)
+
+        expected_matrix = np.array([
+            [0, 20, 0, 0],
+            [10, 0, 0, 0],
+            [0, 0, 0, 40],
+            [0, 0, 30, 0]
+        ])
+
+        np.testing.assert_array_equal(reordered_map.toarray(), expected_matrix)

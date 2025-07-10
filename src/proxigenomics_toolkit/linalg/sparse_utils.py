@@ -262,7 +262,7 @@ def kr_bistochastic(m: SparseMatrix,
         logger.warning('Warning: maximum number of iterations ({}) reached without convergence'.format(max_iter))
 
     X = scisp.spdiags(x, 0, n, n, 'csr')
-    return X.T.dot(_orig.dot(X)), x
+    return X.T.dot(_orig.dot(X)).tocoo(), x
 
 
 class Sparse2DAccumulator(object):
