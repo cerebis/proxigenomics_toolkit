@@ -18,15 +18,51 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 def scaler(arr: np.ndarray,
            mu: Optional[float]=None,
            sig: Optional[float]=None) -> np.ndarray | Tuple[np.ndarray, float, float]:
+    """
+    Scales an array using Z-score normalization.
+
+    This function standardizes an array by subtracting the mean and dividing by the
+    standard deviation.
+
+    - If `mu` and `sig` are both omitted, they are computed from `arr`. The function
+      returns a tuple containing the scaled array, the computed mean, and the
+      computed standard deviation.
+    - If `mu` and `sig` are both provided, they are used to scale `arr`, and only
+      the scaled array is returned.
+
+    :param arr: The NumPy array to be scaled.
+    :param mu: Optional pre-computed mean.
+    :param sig: Optional pre-computed standard deviation.
+    :return: A tuple `(scaled_array, mean, std_dev)` or the `scaled_array` itself,
+             depending on whether `mu` and `sig` are provided.
+    :raises ValueError: If only one of `mu` or `sig` is provided.
+    """
     if mu is None:
         mu = np.mean(arr)
         sig = np.std(arr)
         return (arr - mu) / sig, mu, sig
-    else:
+    elif sig is not None:
         return (arr - mu) / sig
+    else:
+        raise ValueError('Both mu and sig must be provided if one is provided.')
 
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Transforms the given DataFrame by assigning new columns calculated with specific transformations.
+    The function performs the following modifications:
+
+    - Creates a new column `intra_z` by converting the `intra` column to type `uint8`.
+    - Computes a new column `cov_z` by scaling the logarithm of the product of columns `cov_u` and `cov_v`.
+    - Calculates a new column `freq_z` by scaling the logarithm of a fraction formed by the `contacts` column
+      divided by the product of several other columns: `sites_u`, `sites_v`, `uf_u`, `uf_v`.
+
+    :param df: Input DataFrame containing the required columns (`intra`, `cov_u`, `cov_v`, `contacts`, `sites_u`,
+                 `sites_v`, `uf_u`, `uf_v`) to apply transformation operations.
+    :type df: pd.DataFrame
+    :return: Transformed DataFrame with newly assigned columns `intra_z`, `cov_z`, and `freq_z`.
+    :rtype: pd.DataFrame
+    """
     return df.assign(intra_z = lambda x: x.intra.astype(np.uint8),
                      cov_z   = lambda x: scaler(np.log(x.cov_u * x.cov_v))[0],
                      freq_z  = lambda x: scaler(np.log(x.contacts / (x.sites_u*x.sites_v * x.uf_u*x.uf_v)))[0],
@@ -91,6 +127,40 @@ def identify_suspected_intra(df: pd.DataFrame,
                              max_seq_length: int,
                              min_degree: int=2,
                              sort_by: str='similarity') -> pd.DataFrame:
+    """
+    Identifies sequences that are likely fragments of larger clusters.
+
+    This function operates in two stages. First, it identifies sequences that
+    have a minimum number of high-quality associations (`min_degree`), where
+    "high-quality" is defined by `min_contacts` and `min_similarity`.
+
+    Second, from this reduced set, it selects contacts that represent a small
+    sequence (`length_u`) associating with a large cluster (`length_v`). For each
+    sequence that meets these criteria, the function selects the single best
+    association based on the `sort_by` parameter.
+
+    This is useful for finding contigs that may have been incorrectly binned
+    separately from their parent genome.
+
+    :param df: DataFrame with contact data. Must include columns: 'seq',
+               'cluster', 'cluster_name', 'contacts', 'similarity',
+               'length_u', and 'length_v'.
+    :param accepted_clusters: A set of cluster names to include in the analysis.
+    :param min_similarity: The minimum similarity score for a contact to be
+                           considered significant.
+    :param min_contacts: The minimum number of contacts for an association to
+                         be considered significant.
+    :param min_cluster_length: The minimum length required for the target
+                               cluster (`length_v`).
+    :param max_seq_length: The maximum length allowed for the source
+                           sequence (`length_u`).
+    :param min_degree: The minimum number of significant associations a sequence
+                       must have to be considered a candidate. Defaults to 2.
+    :param sort_by: The column used to rank and select the best candidate for
+                    each sequence. Defaults to 'similarity'.
+    :return: A DataFrame containing the top suspected intra-cellular contact
+             for each sequence, indexed by ['seq', 'cluster'].
+    """
 
     # number of relevant contacts per sequence
     degree = df.query('contacts>@min_contacts '
@@ -117,11 +187,31 @@ def identify_suspected_intra(df: pd.DataFrame,
 
 
 def seq2cluster_similarity(df: pd.DataFrame,
-                           embeddings: MetagenomeEmbeddings) -> np.ndarray:
+                           embeddings: MetagenomeEmbeddings,
+                           dimension: int = 768) -> np.ndarray:
+    """
+    Calculates the similarity between sequence and cluster embeddings.
+
+    For each sequence-cluster pair provided in the input DataFrame, this function
+    retrieves their respective embeddings and computes the similarity using a
+    linear kernel. The resulting array of scores corresponds to the order of
+    pairs in the input DataFrame.
+
+    :param df: A DataFrame with 'seq' and 'cluster' columns, specifying the
+               pairs for which to calculate similarity.
+    :param embeddings: An object containing `seq_embeds` and `cluster_embeds`
+                       DataFrames with the pre-computed embeddings.
+    :param dimension: The dimensionality of the embedding vectors to use for
+                      the calculation. Defaults to 768.
+    :return: A NumPy array of similarity scores, one for each input pair.
+    :raises AssertionError: If the dimensions of the sequence and cluster
+                            embedding matrices do not match.
+    """
+
     ix = df[['seq','cluster']].values
-    u = embeddings.seq_embeds.loc[ix[:, 0], range(768)].values
-    v = embeddings.cluster_embeds.loc[ix[:, 1], range(768)].values
-    assert u.shape == v.shape, 'U and V not of the same dimension'
+    u = embeddings.seq_embeds.loc[ix[:, 0], range(dimension)].values
+    v = embeddings.cluster_embeds.loc[ix[:, 1], range(dimension)].values
+    assert u.shape == v.shape, f'U and V not of the same dimension: {dimension}'
     return np.fromiter((linear_kernel(u[[i]], v[[i]])[0][0] for i in range(u.shape[0])), dtype='f8')
 
 
@@ -158,11 +248,45 @@ def replace_zeros(x: pd.Series, reduction_factor: float) -> pd.Series:
     :param reduction_factor: the factor by which to multiply the minimum non-zero value
     :return: updated series
     """
-    min_val = (x[x > 0]).min()
+    nz_ix = x > 0
+    if nz_ix.sum() == 0:
+        logger.warning('When attempting to replace zeros, there were no non-zero values in series')
+        return x
+    min_val = (x[nz_ix]).min()
     return x.replace(0, reduction_factor * min_val)
 
 
 class DataLabeller(object):
+    """
+    Represents a data labelling tool for preparing and managing clustered datasets for training
+    purposes. The class is responsible for processing various input datasets, filtering sequences
+    and clusters based on quality metrics, and combining them into a labelled training dataset.
+
+    The `DataLabeller` also facilitates utility functions for file management and projection
+    visualizations.
+
+    :ivar output_dir: Directory path for storing output files.
+    :type output_dir: str
+    :ivar embeddings_file: File path containing embedding data.
+    :type embeddings_file: str
+    :ivar clustering_file: File path containing clustering results.
+    :type clustering_file: str
+    :ivar faidx_file: File path of the fasta index associated with sequences.
+    :type faidx_file: str
+    :ivar spurious_file: File path containing spurious contact predictions.
+    :type spurious_file: str
+    :ivar all_contacts_file: File path containing all generic contact data.
+    :type all_contacts_file: str
+    :ivar excluded_file: File path for the list of excluded sequences.
+    :type excluded_file: str
+    :ivar binning_qc_file: File path containing quality control metrics for binning.
+    :type binning_qc_file: str
+    :ivar qc_method: Method used for quality control of clusters (default `'CheckMv1'`).
+    :type qc_method: str
+    :ivar use_suspected: Flag indicating whether suspected intra-cluster sequences should
+        be considered (default `False`).
+    :type use_suspected: bool
+    """
 
     _SMALL_UF = 1e-3
     _SMALL_COV = 1
@@ -195,6 +319,14 @@ class DataLabeller(object):
 
     @staticmethod
     def get_output_path(parent_dir: str, table_name: str) -> str:
+        """
+        Constructs and returns the output path for a specified table by combining the
+        parent directory with the table's designated name.
+
+        :param parent_dir: The base directory in which the output file should be located
+        :param table_name: The identifier for the table whose path should be retrieved
+        :return: A string representing the full file path for the specified table
+        """
         return os.path.join(parent_dir, DataLabeller.OUTPUT_TABLES[table_name])
 
     def __init__(self,
@@ -252,6 +384,23 @@ class DataLabeller(object):
         df.to_csv(file_path, index=index)
 
     def prepare_labelled_training_data(self) -> pd.DataFrame:
+        """
+        Prepares data for labelled training by combining spurious and real contacts datasets into a
+        structured training DataFrame, applying multiple filtering and processing steps.
+
+        This function processes two primary datasets: a spurious contacts dataset and a generic real
+        contacts dataset. It filters the spurious dataset based on high-quality cluster relationships
+        and excluded sequences, reduces redundancy between datasets, calculates similarity measures,
+        and assigns group labels indicating their origin. The processed datasets are standardized and
+        decomposed into separate pools: general, significant intra-cluster, suspected intra-cluster,
+        and undecided records. The final training dataset is prepared by combining labeled spurious
+        and intra-cluster data.
+
+        :raises AssertionError: If embeddings have not been analyzed before invoking.
+        :return: A DataFrame ready for training, structured with labels indicating spurious and
+            intra-cluster relationships.
+        :rtype: pandas.DataFrame
+        """
         assert self.embeddings is not None, 'The embeddings data must be analysed first'
 
         # Read initial prediction of spurious contacts

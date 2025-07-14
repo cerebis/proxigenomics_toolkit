@@ -97,6 +97,18 @@ class StatefulBinaryFBeta(Metric):
         self.predicted_positive.assign(0) # resets predicted positives to zero
         self.actual_positive.assign(0) # resets actual positives to zero
 
+#
+# The current implementation of Keras doesn't appear to have a legacy
+# version of AdamW (despite the warning suggesting otherwise), therefore
+# we'll just tolerate the runtime warning about slow execution for M1/M2
+# Macs at runtime.
+#
+# def _get_optimizer_func():
+#     if platform.system() == "Darwin" and platform.processor() == "arm":
+#         return tf.keras.optimizers.legacy.AdamW
+#     else:
+#         return tf.keras.optimizers.AdamW
+#
 
 def create_baseline(hidden_layer_sizes: List[int], learning_rate: float, meta: dict) -> Sequential:
     model = Sequential()
@@ -587,7 +599,7 @@ class ContactClassifier(object):
              f'decision boundary threshold {precision_threshold}')
         # wrapping CubicSpline in a lambda to overcome type warning
         # when supplying the instance to brentq.
-        decision_boundary = brentq(lambda x: CubicSpline(thres, precision[:-1] - precision_threshold),
+        decision_boundary = brentq(CubicSpline(thres, precision[:-1] - precision_threshold),
                                    thres[0],
                                    thres[-1])
         logger.info(f'{name}: requested precision of {precision_threshold:} '
@@ -613,8 +625,8 @@ class ContactClassifier(object):
                            'or (intra_z and cluster_name in @self.intra_clusters)')
 
         self.assess_predictions('all-data',
-                                df_all['intra_z'],
-                                df_all['pr_intracellular'])
+                                df_all['intra_z'].values,
+                                df_all['pr_intracellular'].values)
 
         self.assess_predictions('full-training',
                                 self.y_full,

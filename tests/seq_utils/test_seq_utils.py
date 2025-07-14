@@ -1,12 +1,15 @@
 # tests/test_seq_utils.py
 
 import os
+import tempfile
+from contextlib import closing
 
 import pytest
+from Bio import SeqIO
+from Bio.Seq import Seq
 
-from proxigenomics_toolkit.exceptions import NoRecordsException, UnknownEnzymeException
+from proxigenomics_toolkit.exceptions import BluntEnzymeException, NoRecordsException, UnknownEnzymeException
 from proxigenomics_toolkit.seq_utils import IndexedFasta, SiteCounter, count_fasta_sequences, revcomp
-from proxigenomics_toolkit.exceptions import BluntEnzymeException
 
 # from pytest_mock import mocker
 
@@ -237,3 +240,129 @@ class TestSiteCounter:
     def test_blunt_enzyme(self):
         with pytest.raises(BluntEnzymeException):
             SiteCounter('DpnI')
+
+
+@pytest.fixture(scope="module")
+def fasta_files():
+    """
+    Pytest fixture to create temporary FASTA files for all tests in this module.
+    This setup runs once, creates the necessary files in a temporary directory,
+    yields the paths, and then cleans up the directory after all tests are done.
+    """
+    with tempfile.TemporaryDirectory() as test_dir:
+        # 1. Valid FASTA content
+        fasta_content = ">seq1 description1\nACGTACGT\n>seq2 description2\nTCGATCGA\n"
+        valid_fasta_file = os.path.join(test_dir, "test.fasta")
+        with open(valid_fasta_file, "w") as f:
+            f.write(fasta_content)
+
+        # 2. Empty file
+        empty_file = os.path.join(test_dir, "empty.fasta")
+        open(empty_file, 'a').close()
+
+        # 3. File with invalid FASTA format
+        invalid_fasta_file = os.path.join(test_dir, "invalid.fasta")
+        with open(invalid_fasta_file, "w") as f:
+            f.write("this is not a valid fasta file")
+
+        yield {
+            "valid": valid_fasta_file,
+            "empty": empty_file,
+            "invalid": invalid_fasta_file,
+            "dir": test_dir
+        }
+
+
+def test_init_valid_fasta_and_close(fasta_files):
+    """Test initialization with a valid FASTA file and ensure the temp file is handled correctly."""
+    idx_fasta = IndexedFasta(fasta_files["valid"])
+    tmp_file_path = idx_fasta._tmp_file
+
+    # Check that the temporary index file was created
+    assert os.path.exists(tmp_file_path)
+    # Check that the index was created correctly
+    assert len(idx_fasta._index) == 2
+
+    # Close the handle and check that the temporary file is deleted
+    idx_fasta.close()
+    assert not os.path.exists(tmp_file_path)
+
+
+def test_init_with_missing_file():
+    """Test that initialization fails when the FASTA file does not exist."""
+    with pytest.raises(FileNotFoundError):
+        IndexedFasta("non_existent_file.fasta")
+
+
+def test_init_with_invalid_tmp_path(fasta_files):
+    """Test that initialization fails if a non-existent temporary path is specified."""
+    invalid_path = os.path.join(fasta_files["dir"], "non_existent_dir")
+    with pytest.raises(IOError, match=r"specified temporary path \[.*\] does not exist"):
+        IndexedFasta(fasta_files["valid"], tmp_path=invalid_path)
+
+
+def test_init_with_empty_file(fasta_files):
+    """Test that initialization fails for an empty FASTA file."""
+    with closing(IndexedFasta(fasta_files["empty"])) as idx_fasta:
+        assert len(idx_fasta) == 0, "Expected an empty IndexedFasta object"
+
+
+def test_init_with_invalid_format(fasta_files):
+    """Test that initialization fails for a file with an invalid FASTA format."""
+    with closing(IndexedFasta(fasta_files["invalid"])) as idx_fasta:
+        assert len(idx_fasta) == 0, "Expected a invalid format file will have an empty index"
+
+
+def test_getitem(fasta_files):
+    """Test the __getitem__ method for accessing sequences."""
+    with closing(IndexedFasta(fasta_files["valid"])) as idx_fasta:
+        record = idx_fasta["seq1"]
+        assert isinstance(record, SeqIO.SeqRecord)
+        assert record.id == "seq1"
+        assert record.seq == Seq("ACGTACGT")
+
+
+def test_getitem_keyerror(fasta_files):
+    """Test that accessing a non-existent sequence raises a KeyError."""
+    with closing(IndexedFasta(fasta_files["valid"])) as idx_fasta:
+        with pytest.raises(KeyError):
+            _ = idx_fasta["non_existent_seq"]
+
+
+def test_len(fasta_files):
+    """Test the __len__ method."""
+    with closing(IndexedFasta(fasta_files["valid"])) as idx_fasta:
+        assert len(idx_fasta) == 2
+
+
+def test_iter(fasta_files):
+    """Test the __iter__ method for iterating over sequence IDs."""
+    with closing(IndexedFasta(fasta_files["valid"])) as idx_fasta:
+        # The order is not guaranteed, so we use a set for comparison.
+        assert set(idx_fasta) == {"seq1", "seq2"}
+
+
+def test_close_is_safe_to_call_multiple_times(fasta_files):
+    """Test that the close() method can be called multiple times without error."""
+    idx_fasta = IndexedFasta(fasta_files["valid"])
+    assert os.path.exists(idx_fasta._tmp_file)
+    idx_fasta.close()
+    assert not os.path.exists(idx_fasta._tmp_file)
+    # Calling close again should not raise an exception
+    try:
+        idx_fasta.close()
+    except Exception as e:
+        pytest.fail(f"Calling close() a second time raised an exception: {e}")
+
+
+def test_context_manager_with_closing(fasta_files):
+    """Test that IndexedFasta works as a context manager via contextlib.closing."""
+    tmp_file_path = None
+    with closing(IndexedFasta(fasta_files["valid"])) as idx_fasta:
+        tmp_file_path = idx_fasta._tmp_file
+        assert os.path.exists(tmp_file_path)
+        assert len(idx_fasta) == 2
+        assert idx_fasta["seq2"].id == "seq2"
+
+    # The temp file should be deleted upon exiting the 'with' block because closing() calls close()
+    assert not os.path.exists(tmp_file_path)

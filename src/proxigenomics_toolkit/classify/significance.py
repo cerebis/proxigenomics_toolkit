@@ -542,7 +542,7 @@ def mappability_report(filename: str,
     :return: Pandas.DataFrame.
     """
 
-    def read_genmap(_filename: str) -> Generator[Tuple[str, np.ndarray], None]:
+    def read_genmap(_filename: str) -> Generator[Tuple[str, np.ndarray], None, None]:
         """
         Generator for reading records from the fasta-format genmap text output.
         The first line of each record is the standard FASTA header, while the next contains space-delimited
@@ -653,9 +653,10 @@ class SequencePromiscuity(object):
             return 0
         n = 0
         for v in v_list:
-            edge_data = cast(EdgeData, g[u][v])
-            if g.has_edge(u, v) and  edge_data['weight'] / u_degree > self.min_degree_fraction:
-                n += 1
+            if g.has_edge(u, v):
+                edge_data = cast(EdgeData, g[u][v])
+                if edge_data['weight'] / u_degree > self.min_degree_fraction:
+                    n += 1
         return n / len(v_list)
 
     def _sequence_promiscuity(self, g: nx.Graph) -> Dict[Hashable, List[Hashable]]:

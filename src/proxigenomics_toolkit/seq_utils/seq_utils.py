@@ -21,7 +21,8 @@ from Bio.Restriction import Restriction
 from Bio.Seq import MutableSeq, Seq
 from scipy.stats import mstats
 
-# from ..contact_map import SeqInfo
+from proxigenomics_toolkit.types import SparseMatrix
+
 from ..exceptions import BluntEnzymeException, NoRecordsException, UnknownEnzymeException
 from ..misc_utils import exe_exists
 
@@ -330,7 +331,25 @@ class SiteCounter(object):
 
 
 class SequenceAnalyzer(object):
+    """
+    Provides functionality for analyzing sequences based on their coverage, connectivity, and
+    degenerate status.
 
+    The `SequenceAnalyzer` class facilitates the analysis of sequences using adjacency graphs and
+    data derived from sequence reports. It includes methods for importing report data, detecting
+    degenerate sequences, and establishing connections between sequences based on coverage metrics.
+    This class is designed for processing genomic Hi-C data, with support for normalization
+    and proximity inference using graph traversal.
+
+    :ivar seq_map: A sparse matrix representing Hi-C contacts between sequences.
+    :type seq_map: SparseMatrix
+    :ivar seq_report: A dictionary containing metadata and analysis information for sequences.
+    :type seq_report: dict
+    :ivar seq_info: A list containing sequence-related information such as names or metadata.
+    :type seq_info: list
+    :ivar tip_size: An integer representing the size of the tip for sequence analysis.
+    :type tip_size: int
+    """
     COV_TYPE = np.dtype([('index', np.int16), ('status', bool), ('node', np.float64),
                          ('local', np.float64), ('fold', np.float64)])
 
@@ -339,7 +358,7 @@ class SequenceAnalyzer(object):
         return yaml.safe_load(open(file_name, 'r'))
 
     def __init__(self,
-                 seq_map: np.ndarray,
+                 seq_map: SparseMatrix,
                  seq_report: Dict,
                  seq_info: List,
                  tip_size: int) -> None:
@@ -349,6 +368,20 @@ class SequenceAnalyzer(object):
         self.tip_size = tip_size
 
     def _contact_graph(self) -> nx.Graph:
+        """
+        Constructs and returns a graph representation based on the sequence information
+        and sequence mapping. Nodes in the graph represent sequences from the input
+        `seq_info`, and edges between nodes are weighted based on the sequence mapping
+        data. Additionally, each node includes metadata such as coverage, length, and
+        sites derived from the sequence report.
+
+        The implementation supports a special case where optional `tip_size` information
+        is factored into node and edge construction.
+
+        :returns: A NetworkX Graph object where nodes represent sequences and edges
+                  are weighted based on sequence mapping data.
+        :rtype: nx.Graph
+        """
         g = nx.Graph()
         n_seq = len(self.seq_info)
 
