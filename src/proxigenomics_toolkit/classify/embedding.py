@@ -28,6 +28,30 @@ def center_of_mass(embeds: pd.DataFrame) -> np.ndarray:
 
 
 class MetagenomeEmbeddings(object):
+    """
+    Determination of cluster embedding vectors as calculated from embedding vectors of
+    member sequences. Visualise cluster and sequence vectors as a 2D projection. 
+
+    :ivar embeddings_file: Path to the embeddings file in gzip-pickled format that contains the
+        sequence embeddings.
+    :type embeddings_file: str
+    :ivar clustering_file: Path to the clustering metadata file in a pickled format.
+    :type clustering_file: str
+    :ivar faidx_file: Path to the sequence index file containing sequence lengths in a tab-separated
+        format.
+    :type faidx_file: str
+    :ivar chunk_names: A list of chunk names extracted from the embeddings file.
+    :type chunk_names: list or None
+    :ivar chunk_embeds: DataFrame with normalized embedding vectors per chunk.
+    :type chunk_embeds: pandas.DataFrame or None
+    :ivar seq_names: A list of sequence names extracted from the embeddings file.
+    :type seq_names: list or None
+    :ivar seq_embeds: DataFrame containing normalized embedding vectors for sequences, and cluster IDs
+        where applicable.
+    :type seq_embeds: pandas.DataFrame or None
+    :ivar cluster_embeds: DataFrame storing the normalized "center of mass" embeddings of clusters.
+    :type cluster_embeds: pandas.DataFrame or None
+    """
 
     def __init__(self, embeddings_file: str, clustering_file: str, faidx_file: str) -> None:
         self.embeddings_file = embeddings_file
@@ -41,11 +65,27 @@ class MetagenomeEmbeddings(object):
 
         self.load_embeddings()
         self.calculate_cluster_embeddings()
-
+        
     def load_embeddings(self) -> None:
         """
-        Load the embedding dictionary produced by the tool seq_embed. Calculate
-        the average normalized embedding for each sequence.
+        Loads and processes embeddings from a pickled dictionary.
+
+        This method reads a gzipped pickle file specified by `self.embeddings_file`.
+        The file should contain a dictionary where keys are sequence identifiers
+        and values are NumPy arrays of embeddings for the chunks within each
+        sequence.
+
+        The function computes two distinct sets of embeddings from this data:
+        1.  Chunk Embeddings (`self.chunk_embeds`): A DataFrame containing the
+            L2-normalized embedding for each individual chunk. A 'seq' column
+            is included to map each chunk back to its parent sequence.
+        2.  Sequence Embeddings (`self.seq_embeds`): A DataFrame containing a
+            single, L2-normalized embedding for each sequence. This is calculated
+            by taking the mean of all chunk embeddings belonging to that
+            sequence. The DataFrame is indexed by sequence ID.
+
+        The number of loaded chunk and sequence embeddings is logged to the
+        console.
         """
         with gzip.open(self.embeddings_file, 'rb') as in_h:
             embeds_dict = pickle.load(in_h)
@@ -79,16 +119,29 @@ class MetagenomeEmbeddings(object):
 
     def calculate_cluster_embeddings(self) -> None:
         """
-        Using the sequence embeddings, calculate a Center of Mass embedding vector for each cluster.
-        While performing this calculation, assign the cluster ID to any sequence involved in
-        a cluster.
+        Calculates a center-of-mass (CoM) embedding for each cluster.
+
+        This method leverages the pre-computed sequence embeddings to generate a
+        representative embedding for each cluster. The CoM is calculated as the
+        weighted average of the embeddings of all sequences within a cluster,
+        where each sequence's contribution is weighted by its length.
+
+        Sequence lengths are read from the `faidx_file`, and the cluster
+        memberships are determined from the `clustering_file`.
+
+        This method updates the instance's state in two ways:
+        1.  It populates `self.cluster_embeds` with a DataFrame where each row
+            contains a cluster ID and its corresponding L2-normalized CoM
+            embedding vector.
+        2.  It updates `self.seq_embeds` by adding a 'cluster' column,
+            assigning a cluster ID to each sequence that belongs to a cluster.
         """
         # We need a source of all sequence lengths, as the clustering
         #   solution can be missing references to some sequences.
         # This is a byproduct of sequences being included in a clustering
         #   result that would not participants in Hi-C.
         fai = pd.read_csv(self.faidx_file, sep='\t', header=None) \
-            .drop(columns=range(2,5)) \
+            .drop(columns=range(2, 5)) \
             .rename(columns={0: 'seq', 1: 'length'}) \
             .set_index('seq')
 
