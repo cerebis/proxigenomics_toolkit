@@ -292,15 +292,15 @@ class DataLabeller(object):
     _SMALL_COV = 1
     _GROUP_A = 1
     _GROUP_B = 2
-    _MIN_NUM_OBS = 0
+    _MIN_NUM_OBS = 2
     _MIN_EXTENT = 100_000
-    _BIG_EXTENT = 500
+    _BIG_EXTENT = 500_000
     _HQ_COMPL = 90
-    _HQ_CONTAM = 10
+    _HQ_CONTAM = 5
     _PURE_COMPL = 50
     _PURE_CONTAM = 10
-    _MQ_COMPL = 30
-    _MQ_CONTAM = 10
+    _MQ_COMPL = 50
+    _MQ_CONTAM = 5
 
     _SUSP_MIN_CLUSTER_EXTENT = 1_000_000
     _SUSP_MIN_SEQ_LENGTH = 500_000
@@ -341,7 +341,7 @@ class DataLabeller(object):
                  qc_method: str='CheckMv1',
                  use_suspected: bool=False,
                  plot_projection: bool=False,
-                 max_clusters: int=10) -> None:
+                 plot_max_clusters: int=10) -> None:
         self.output_dir = output_dir
         self.embeddings_file = embeddings_file
         self.clustering_file = clustering_file
@@ -365,7 +365,7 @@ class DataLabeller(object):
         if plot_projection:
             self.embeddings.plot_scatter_projection(
                 os.path.join(output_dir, 'Embedding_UMAP_Manhattan_projection.svg'),
-                max_clusters=max_clusters)
+                max_clusters=plot_max_clusters)
 
     def write_table(self,
                     df: pd.DataFrame,
