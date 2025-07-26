@@ -1,6 +1,7 @@
+import itertools
 import logging
 import os
-import platform
+import re
 from collections import OrderedDict
 from typing import Any, ClassVar, Dict, List, NamedTuple, Optional, Tuple
 
@@ -27,7 +28,7 @@ from plotnine import (
 from scikeras.wrappers import KerasClassifier
 from scipy.interpolate import CubicSpline
 from scipy.optimize import brentq
-from sklearn.metrics import precision_recall_curve
+from sklearn.metrics import f1_score, precision_recall_curve
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.losses import BinaryCrossentropy
@@ -57,7 +58,7 @@ class DataSet(NamedTuple):
     x: np.ndarray
     y: np.ndarray
 
-
+@tf.keras.utils.register_keras_serializable()
 class StatefulBinaryFBeta(Metric):
     """
     Custom metric for fbeta maximisation
@@ -68,9 +69,9 @@ class StatefulBinaryFBeta(Metric):
                  beta: float=1.0,
                  threshold: float=0.5,
                  epsilon: float=1e-7,
-                 **kwargs: Dict[str, Any]) -> None:
+                 dtype: np.dtype=np.float32) -> None:
         # initializing an object of the super class
-        super(StatefulBinaryFBeta, self).__init__(name=name, **kwargs)
+        super(StatefulBinaryFBeta, self).__init__(name=name, dtype=dtype)
 
         # initializing state variables
         self.tp = self.add_weight(name='tp', initializer='zeros') # initializing true positives
@@ -113,32 +114,49 @@ class StatefulBinaryFBeta(Metric):
         self.predicted_positive.assign(0) # resets predicted positives to zero
         self.actual_positive.assign(0) # resets actual positives to zero
 
+    def get_config(self) -> Dict:
+        import math
+        config = {
+            'beta': math.sqrt(self.beta_squared),
+            'epsilon': self.epsilon,
+            "threshold": self.threshold,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
-def get_adam_impl(ignore_platform: bool) -> type[keras.optimizers.AdamW | keras.optimizers.legacy.Adam]:
-    """
-    Determines and returns the appropriate Keras optimizer class based on the system's
-    platform and processor type. This function ensures compatibility with MacOS systems
-    using Apple Silicon (ARM architecture). It selects the legacy Adam optimizer for
-    such systems and returns the AdamW optimizer for other cases.
+    # @classmethod
+    # def from_config(cls, config: Dict[str, Any]) -> Self: #'StatefulBinaryFBeta':
+    #     """Creates a metric from its config."""
+    #     return cls(**config)
 
-    :param ignore_platform: If True, then the platform is ignored and the current implementation of
-    AdamW is returned regardless. Otherwise, the platform is considered, potentially returning a
-    legacy implementation of Adam.
-    :return: Keras optimizer class suitable for the current platform.
-    :rtype: type[Adam | AdamW].
-    """
-    mac_silicon = platform.system() == "Darwin" and platform.processor() == "arm"
-    if ignore_platform or not mac_silicon:
-        return keras.optimizers.AdamW
-    else:
-        logger.warning('Using legacy Adam optimizer for MacOS ARM architecture (override with "ignore-platform").')
-        return keras.optimizers.legacy.Adam
+
+#
+# The following function for selected Adam/AdamW appears to be unnecessary in Keras 3
+#
+# def get_adam_impl(ignore_platform: bool) -> type[keras.optimizers.AdamW | keras.optimizers.legacy.Adam]:
+#     """
+#     Determines and returns the appropriate Keras optimizer class based on the system's
+#     platform and processor type. This function ensures compatibility with MacOS systems
+#     using Apple Silicon (ARM architecture). It selects the legacy Adam optimizer for
+#     such systems and returns the AdamW optimizer for other cases.
+#
+#     :param ignore_platform: If True, then the platform is ignored and the current implementation of
+#     AdamW is returned regardless. Otherwise, the platform is considered, potentially returning a
+#     legacy implementation of Adam.
+#     :return: Keras optimizer class suitable for the current platform.
+#     :rtype: type[Adam | AdamW].
+#     """
+#     mac_silicon = platform.system() == "Darwin" and platform.processor() == "arm"
+#     if ignore_platform or not mac_silicon:
+#         return keras.optimizers.AdamW
+#     else:
+#         logger.warning('Using legacy Adam optimizer for MacOS ARM architecture (override with "ignore-platform").')
+#         return keras.optimizers.legacy.Adam
 
 
 def create_baseline(hidden_layer_sizes: List[int],
                     learning_rate: float | keras.optimizers.schedules.LearningRateSchedule,
-                    meta: dict,
-                    ignore_platform: bool=False) -> Sequential:
+                    meta: dict) -> Sequential:
     """
     Creates and returns a baseline neural network model with the specified hidden
     layer sizes, learning rate, and metadata. The returned model is compiled with
@@ -155,7 +173,6 @@ def create_baseline(hidden_layer_sizes: List[int],
         provided as a float or a Keras learning rate schedule.
     :param meta: Dictionary containing metadata required for model creation, such
         as the number of features (`n_features_in_`) and output classes (`n_outputs_`).
-    :param ignore_platform: If True, then ignore computational platform when choosing optimizer.
     :return: A compiled Keras Sequential model instance with the specified
         architecture.
     """
@@ -175,15 +192,13 @@ def create_baseline(hidden_layer_sizes: List[int],
 
     loss_func = BinaryCrossentropy()
 
-    adam = get_adam_impl(ignore_platform)
-
     model.compile(loss=loss_func,
-                  optimizer=adam(learning_rate=learning_rate, amsgrad=True),
+                  optimizer=keras.optimizers.AdamW(learning_rate=learning_rate, amsgrad=True),
                   metrics=['accuracy',
                            Precision(),
                            Recall(),
                            StatefulBinaryFBeta(beta=1.0),
-                           'crossentropy'])
+                           'binary_crossentropy'])
     return model
 
 
@@ -230,6 +245,8 @@ class ContactClassifier(object):
     early stopping, and model checkpointing to manage the training process
     effectively.
     """
+    PAGE_WIDTH_MM = 297
+    PAGE_HEIGHT_MM = 210
 
     _METRIC_NAME = 'fbeta'
     _FIT_VARS: ClassVar[List[str]]= ['similarity', 'freq_z', 'cov_z', 'linkage']
@@ -256,7 +273,6 @@ class ContactClassifier(object):
                  enable_tb: bool=False,
                  enable_es: bool=True,
                  patience: int=10,
-                 ignore_platform: bool=False,
                  verbose: bool=False) -> None:
         """
         An MLP classifier for Hi-C contacts, where classification decides if an accumulated contact
@@ -279,7 +295,6 @@ class ContactClassifier(object):
         :param enable_tb: Enable tensorboard logging.
         :param enable_es: Enable early stopping callback when training ceases to improve for 20 iterations.
         :param patience: Number of epochs to wait for when training ceases to improve.
-        :param ignore_platform: If True, then ignore platform when choosing optimizer.
         :param verbose: Verbosity of logging.
         """
 
@@ -299,7 +314,6 @@ class ContactClassifier(object):
         self.enable_tb = enable_tb
         self.enable_es = enable_es
         self.patience = patience
-        self.ignore_platform = ignore_platform
         self.verbose = verbose
 
         # Just a convienence property primarily for tensorboard logs.
@@ -494,7 +508,10 @@ class ContactClassifier(object):
         :param rs: random state, otherwise uses instance seed
         :return: Balanced DataSet
         """
-        self.plot_variable_scatter(dataset.x, dataset.y, 'raw_training_scatter.pdf')
+        self.plot_variable_scatter(dataset.x,
+                                   dataset.y,
+                                   ContactClassifier._FIT_VARS,
+                                   'raw_training_scatter.pdf')
 
         logger.info(f'Original set size:  x={dataset.x.shape}, y={dataset.y.shape}, '
                     f'class sizes: {np.bincount(dataset.y)}')
@@ -505,7 +522,10 @@ class ContactClassifier(object):
         logger.info('After application of random under-sampling: '
                     f'x={x_aug.shape}, y={y_aug.shape}, class sizes: {np.bincount(y_aug)}')
 
-        self.plot_variable_scatter(x_aug, y_aug, 'augmented_training_scatter.pdf')
+        self.plot_variable_scatter(x_aug,
+                                   y_aug,
+                                   ContactClassifier._FIT_VARS,
+                                   'augmented_training_scatter.pdf')
 
         return DataSet(x_aug, y_aug)
 
@@ -569,12 +589,18 @@ class ContactClassifier(object):
         logger.info(f'Writing {description} to {file_path}')
         df.to_csv(file_path, index=index)
 
-    def plot_variable_scatter(self, x: np.ndarray, y: np.ndarray, base_name: str, n_points: int=5000) -> None:
+    def plot_variable_scatter(self,
+                              x: np.ndarray,
+                              y: np.ndarray,
+                              params: List[str],
+                              base_name: str,
+                              n_points: int=5000) -> None:
         """
         Create scatter plots of the different fit variable combinations and save
         to PDF.
         :param x:
         :param y:
+        :param params:
         :param base_name:
         :param n_points:
         :return:
@@ -583,12 +609,10 @@ class ContactClassifier(object):
         with PdfPages(os.path.join(self.output_dir, base_name)) as pdf:
             if len(df) > n_points:
                 df = df.sample(n_points, random_state=self.seed)
-            pdf.savefig(sb.jointplot(df, x='similarity', y='freq_z', hue="intra_z").figure)
-            pdf.savefig(sb.jointplot(df, x='similarity', y='cov_z', hue="intra_z").figure)
-            pdf.savefig(sb.jointplot(df, x='similarity', y='linkage', hue="intra_z").figure)
-            pdf.savefig(sb.jointplot(df, x='freq_z', y='cov_z', hue="intra_z").figure)
-            pdf.savefig(sb.jointplot(df, x='freq_z', y='linkage', hue="intra_z").figure)
-            pdf.savefig(sb.jointplot(df, x='cov_z', y='linkage', hue="intra_z").figure)
+            for _x, _y in itertools.combinations(params, 2):
+                fig = sb.jointplot(df, x=_x, y=_y, hue="intra_z").figure
+                fig.set_size_inches(ContactClassifier.PAGE_WIDTH_MM / 25.4, ContactClassifier.PAGE_HEIGHT_MM / 25.4)
+                pdf.savefig(fig)
 
     def tensorboard_callback(self) -> tf.keras.callbacks.Callback:
         log_path = os.path.join(self.output_dir, 'tensorboard', self.run_name)
@@ -657,7 +681,6 @@ class ContactClassifier(object):
                 hidden_layer_sizes=[self.num_nodes] * self.num_layers,
                 learning_rate=self.learning_rate,
                 callbacks=callbacks,
-                ignore_platform=self.ignore_platform
             )
 
             # adding ignore of the following erroneous warning about incorrect type to validation_data
@@ -673,7 +696,24 @@ class ContactClassifier(object):
         self.model = model
         return histories
 
-    def train_full_model(self) -> None:
+    @staticmethod
+    def column_renamer(cn: str) -> str:
+        """
+        Simple function for renaming individual columns in history dataframe when trraining using balanced
+        bagging. This is largely to consolidate results for precision and recall, which receive
+        _[INT] suffixes for different blocks of jobs. THis is intended to be supplied to
+        the function `pandas.DataFrame.rename()`
+
+        :param cn: a column name
+        :return: modified column name
+        """
+        if cn == "index":
+            return "epoch"
+        elif cn.startswith("precision") or cn.startswith("recall"):
+            return re.sub("_[0-9]+$", "", cn)
+        return cn
+
+    def train_full_model(self, n_jobs: int=1) -> None:
         """
         Train the model on the full dataset.
         Depending on options at instantiation-time, this model is either fit using data-augmentation
@@ -685,14 +725,25 @@ class ContactClassifier(object):
         early-stopping occurs, the best model is automatically reloaded.
 
         The history of the optimization process is also saved to file.
+
+        :param n_jobs: Number of parallel jobs to run when the model is being trained using
+        balanced bagging only.
         """
+        if n_jobs > 1 and not self.enable_bag:
+            logging.warning('The number of jobs is ignored when bagging is not enabled.')
+
         tf.keras.backend.clear_session()
+
+        # if os.path.exists(self.checkpoint_dir):
+        #     logger.debug('Removing existing model checkpoint directory')
+        #     shutil.rmtree(self.checkpoint_dir)
 
         best_model_file = os.path.join(self.checkpoint_dir, self.model_filename)
 
         # always add the additional logging callback and checkpointing
-        callbacks = [AddInstanceLogCallback(),
-                     self.checkpoint_callback(best_model_file, self.verbose)]
+        callbacks = []
+        # callbacks = [AddInstanceLogCallback(),
+        #              self.checkpoint_callback(best_model_file, self.verbose)]
 
         if self.enable_tb:
             callbacks.append(self.tensorboard_callback())
@@ -713,19 +764,25 @@ class ContactClassifier(object):
                                 verbose=self.verbose,
                                 callbacks=callbacks,
                                 hidden_layer_sizes=[self.num_nodes] * self.num_layers,
-                                learning_rate=lr_scheduler,
-                                ignore_platform=self.ignore_platform)
+                                learning_rate=lr_scheduler)
 
         if self.enable_bag:
 
             logging.info('Classifier training will use balanced bagging')
 
+            # The fraction of training set to use in a bag. Leaving some out in each
+            # bag allows for out-of-bag estimations with fewer estimators.
+            # The following makes the OOB fraction equivalent in size to the test set.
+            samplfrac_per_bag = 1 - self.test_size / (1 - self.test_size)
+
             # wrap the base classifier in a balanced bagging classifier
             model = BalancedBaggingClassifier(model,
                                               oob_score=True,
+                                              max_samples=samplfrac_per_bag,
                                               n_estimators=self.num_estimators,
                                               replacement=True,
                                               random_state=self.seed,
+                                              n_jobs=n_jobs,
                                               verbose=self.verbose)
 
             logging.info("Beginning multi-estimator bagging model training ")
@@ -734,43 +791,61 @@ class ContactClassifier(object):
             self.model = model.fit(self.train.x, self.train.y)
 
             logger.info(f'Final model score on full dataset: {model.score(self.full.x, self.full.y)}')
+            logger.info(f'Final model OOB acc: {model.oob_score_}')
+            logger.info('Final model OOB f1: '
+                        f'{f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1))}')
+
+            # def collect_best_model_files(directory_path: str, num_models: int) -> Any:
+            #     files = [os.path.join(directory_path, f) for f in os.listdir(directory_path)
+            #              if os.path.isfile(os.path.join(directory_path, f))]
+            #     return sorted(files, key=os.path.getmtime, reverse=True)[:num_models]
+
+            # best_model_files = collect_best_model_files(self.checkpoint_dir, len(model.estimators_))
 
             # Load the best model weights and extract the history for plotting
             df_plots = []
+            # for n, (en, bmf) in enumerate(zip(model.estimators_, best_model_files), start=1):
             for n, en in enumerate(model.estimators_, start=1):
                 # get the contained instance of KerasClassifier
                 keras_clzr = en._final_estimator
 
-                logger.debug(f'Estimator {n} (id:{id(keras_clzr.model_)}): Final model score on full dataset: '
-                             f'{keras_clzr.score(self.full.x, self.full.y)}')
+                logger.debug(f'Estimator {n} (id:{id(keras_clzr.model_)}): Final model score: '
+                             f'{keras_clzr.score(self.train.x, self.train.y)}')
 
                 # the model instance id is derived from the underlying Keras object
-                instance_best = best_model_file.format(model_id = id(keras_clzr.model_))
-                logger.debug(f"Loading best model from: {instance_best}")
-                keras_clzr.model_.load_weights(instance_best)
+                # instance_best = best_model_file.format(model_id = id(keras_clzr.model_))
+                # logger.debug(f"Loading best model from: {instance_best}")
+                # keras_clzr.model_.load_weights(instance_best)
+                # logger.info(f'Loading weights from: {bmf}')
+                # keras_clzr.model_.load_weights(bmf)
 
-                logger.info(f'Estimator {n} (id:{id(keras_clzr.model_)}): Best model score on full dataset: '
-                            f'{keras_clzr.score(self.full.x, self.full.y)}')
+                logger.info(f'Estimator {n} (id:{id(keras_clzr.model_)}): Best model score: '
+                            f'{keras_clzr.score(self.train.x, self.train.y)}')
 
                 _df = pd.DataFrame(keras_clzr.history_) \
                     .reset_index() \
-                    .rename(columns={'index': 'epoch',
-                                     f'precision_{n-1}': 'precision',
-                                     f'recall_{n-1}': 'recall'})
+                    .rename(columns=ContactClassifier.column_renamer)
                 _df['estimator'] = n
                 df_plots.append(_df)
 
             logger.info(f'Best model score on full dataset: {model.score(self.full.x, self.full.y)}')
+            model._set_oob_score(self.train.x, self.train.y)
+            logger.info(f'Best model OOB acc: {model.oob_score_}')
+            logger.info(f'Best model OOB f1: {f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1))}')
 
             # combine the results of all the estimators and remove the
             #   uninformative model_id
-            df_plots = pd.concat(df_plots).drop(columns='model_id')
+            df_plots = pd.concat(df_plots)#.drop(columns='model_id')
 
             p = (ggplot(df_plots.query('epoch>=0').melt(id_vars=['epoch', 'estimator']))
                  + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
                  + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6])
                  + scale_color_discrete(name = "Estimator#"))
-            p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
+            p.save(filename=os.path.join(self.output_dir,'full_model.svg'),
+                   width = ContactClassifier.PAGE_WIDTH_MM,
+                   height = ContactClassifier.PAGE_HEIGHT_MM,
+                   units = "mm",
+                   verbose=False)
 
         else:
             logging.info("Beginning conventional model training")
@@ -795,7 +870,11 @@ class ContactClassifier(object):
             p = (ggplot(df_plot.query('epoch>=0').melt(id_vars=['epoch', 'data_set']))
                  + geom_line(aes(x='epoch', y='value', color='data_set'))
                  + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
-            p.save(filename=os.path.join(self.output_dir,'full_model.svg'), verbose=False)
+            p.save(filename=os.path.join(self.output_dir,'full_model.svg'),
+                   width = ContactClassifier.PAGE_WIDTH_MM,
+                   height = ContactClassifier.PAGE_HEIGHT_MM,
+                   units = "mm",
+                   verbose=False)
 
         # plot combined F1, P, R curves for training and test data if used.
         pr_train = model.predict_proba(self.train.x)[:, 1]
@@ -841,7 +920,12 @@ class ContactClassifier(object):
              + scale_x_continuous(breaks=np.arange(0, 1.01, 0.1))
              + scale_y_continuous(breaks=np.arange(0, 1.01, 0.1))
              + theme(figure_size=[10,8]))
-        p.save(filename=os.path.join(self.output_dir, file_name), verbose=False)
+
+        p.save(filename=os.path.join(self.output_dir, file_name),
+               width=ContactClassifier.PAGE_WIDTH_MM,
+               height=ContactClassifier.PAGE_HEIGHT_MM,
+               units="mm",
+               verbose=False)
 
     @staticmethod
     def compute_f1_curve(y_true: np.ndarray,
