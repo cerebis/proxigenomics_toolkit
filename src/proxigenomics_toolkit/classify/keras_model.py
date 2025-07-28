@@ -124,35 +124,6 @@ class StatefulBinaryFBeta(Metric):
         base_config = super().get_config()
         return {**base_config, **config}
 
-    # @classmethod
-    # def from_config(cls, config: Dict[str, Any]) -> Self: #'StatefulBinaryFBeta':
-    #     """Creates a metric from its config."""
-    #     return cls(**config)
-
-
-#
-# The following function for selected Adam/AdamW appears to be unnecessary in Keras 3
-#
-# def get_adam_impl(ignore_platform: bool) -> type[keras.optimizers.AdamW | keras.optimizers.legacy.Adam]:
-#     """
-#     Determines and returns the appropriate Keras optimizer class based on the system's
-#     platform and processor type. This function ensures compatibility with MacOS systems
-#     using Apple Silicon (ARM architecture). It selects the legacy Adam optimizer for
-#     such systems and returns the AdamW optimizer for other cases.
-#
-#     :param ignore_platform: If True, then the platform is ignored and the current implementation of
-#     AdamW is returned regardless. Otherwise, the platform is considered, potentially returning a
-#     legacy implementation of Adam.
-#     :return: Keras optimizer class suitable for the current platform.
-#     :rtype: type[Adam | AdamW].
-#     """
-#     mac_silicon = platform.system() == "Darwin" and platform.processor() == "arm"
-#     if ignore_platform or not mac_silicon:
-#         return keras.optimizers.AdamW
-#     else:
-#         logger.warning('Using legacy Adam optimizer for MacOS ARM architecture (override with "ignore-platform").')
-#         return keras.optimizers.legacy.Adam
-
 
 def create_baseline(hidden_layer_sizes: List[int],
                     learning_rate: float | keras.optimizers.schedules.LearningRateSchedule,
@@ -189,6 +160,9 @@ def create_baseline(hidden_layer_sizes: List[int],
         if n < len(hidden_layer_sizes):
             model.add(Dropout(DROPOUT_RATE))
     model.add(Dense(meta['n_outputs_'], activation='sigmoid'))
+
+    logger.debug("--- Model Architecture Summary ---")
+    model.summary(print_fn=logger.debug, show_trainable=True)
 
     loss_func = BinaryCrossentropy()
 
@@ -268,7 +242,8 @@ class ContactClassifier(object):
                  num_layers: int=5,
                  learning_rate: float=1e-4,
                  num_estimators: int=10,
-                 test_size: float=0.15,
+                 test_size: float=0.2,
+                 validation_size: float=0.2,
                  enable_bag: bool=False,
                  enable_tb: bool=False,
                  enable_es: bool=True,
@@ -289,8 +264,9 @@ class ContactClassifier(object):
         :param num_layers: Number of hidden layers.
         :param learning_rate: Global learning rate of AdamW optimizer.
         :param num_estimators: Number of estimators to use when the balanced bagging classifier is enabled.
-        :param test_size: The portion of the data set aside for testing and possibly again for validation. It is
-        important to note that when not bagging, 2 x test_size will be sacrificed for test + validation.
+        :param test_size: The portion of the data set aside for testing.
+        :param validation_size: The portion of the data set aside for validation and when bagging the proportion of the
+        sample set aside (eg. bag_size=1-validation_size).
         :param enable_bag: Enable balanced bagging classifier, rather than balancing data.
         :param enable_tb: Enable tensorboard logging.
         :param enable_es: Enable early stopping callback when training ceases to improve for 20 iterations.
@@ -310,6 +286,7 @@ class ContactClassifier(object):
         self.learning_rate = learning_rate
         self.num_estimators = num_estimators
         self.test_size = test_size
+        self.validation_size = validation_size
         self.enable_bag = enable_bag
         self.enable_tb = enable_tb
         self.enable_es = enable_es
@@ -335,8 +312,8 @@ class ContactClassifier(object):
         # the balanced dataset using undersampling
         self.balanced = None
         # split datasets
-        self.test = None
         self.train = None
+        self.test = None
         self.val = None
 
         # set a global seed through Keras, since there are
@@ -401,7 +378,6 @@ class ContactClassifier(object):
 
     @staticmethod
     def _split_dataset(full: DataSet,
-                       train_size: float,
                        test_size: float,
                        validation_size: Optional[float]=None,
                        seed: Optional[int]=None) -> Tuple[DataSet, DataSet] | Tuple[DataSet, DataSet, DataSet]:
@@ -412,7 +388,6 @@ class ContactClassifier(object):
         across the splits.
 
         :param full: The full feature set and corresponding labels provided as a DataSet object.
-        :param train_size: Proportion of the dataset to allocate for training, as a float between 0 and 1.
         :param test_size: Proportion of the dataset to allocate for testing, as a float between 0 and 1.
         :param validation_size: (Optional) Proportion of the dataset to allocate for validation,
                                 as a float between 0 and 1. If not provided, validation is not performed,
@@ -422,16 +397,11 @@ class ContactClassifier(object):
         :return: A tuple comprising two or three `DataSet` objects (training and testing,
                  and optionally validation if `validation_size` is provided).
         """
-        assert 0 < train_size < 1, 'Train size must be a value between 0 and 1'
-        assert 0 < test_size < 1, 'Test size must be a value between 0 and 1'
-        if validation_size is not None:
-            assert 0 < validation_size < 1, 'Validation size must be a value between 0 and 1'
-            assert train_size + test_size + validation_size == 1.0, \
-                'Training, test, and validaiton proportions must sum to 1'
-        else:
-            assert train_size + test_size == 1.0, 'Training and test proportions must sum to 1'
-
         rs = np.random.RandomState(seed)
+
+        train_size = 1 - test_size
+        if validation_size is not None:
+            train_size -= validation_size
 
         # Step 1: Split into training and conjoined temporary set of validation + test.
         x_train, x_temp, y_train, y_temp = train_test_split(full.x, full.y,
@@ -443,14 +413,43 @@ class ContactClassifier(object):
 
         # Step 2: Split the conjoined temporary set into validation and test.
         # Using supplied proportions, calculate the test_size relative to the temporary set.
-        val_test_split_ratio = test_size / (test_size + validation_size)
+        split_ratio = test_size / (validation_size + test_size)
 
         x_val, x_test, y_val, y_test = train_test_split(x_temp, y_temp,
-                                                        test_size=val_test_split_ratio,
+                                                        test_size=split_ratio,
                                                         stratify=y_temp,
                                                         random_state=rs)
 
         return DataSet(x_train, y_train), DataSet(x_test, y_test), DataSet(x_val, y_val)
+
+    def _validate_sizes(self) -> None:
+        """
+        Validates dataset size proportions for training, validation, and testing. Ensures that
+        the test and validation sizes are within a reasonable range and leaves a substantial
+        portion of the dataset for training. Provides warnings if values fall outside typical
+        guidelines.
+
+        :param self: Instance of the class containing validation and test size attributes.
+        :return: None
+        """
+        assert self.validation_size + self.test_size < 1, ('The test and validation sizes cannot exceed 1 and should '
+                                                           'be small enough to leave a substantial part of the dataset '
+                                                           'for training')
+
+        for _nm, _val in [('test', self.test_size), ('validation', self.validation_size)]:
+            assert 0 < _val < 1, f'{_nm} size must be a value between 0 and 1'
+            if _val < 0.1:
+                logger.warning(f'The specified {_nm} size is '
+                               'less than 10% of the total dataset size. '
+                               'Consider increasing.')
+            elif _val > 0.25:
+                logger.warning(f'The specified {_nm} size is '
+                               'greater than 25% of the total dataset size. '
+                               'Consider reducing.')
+
+        if self.validation_size + self.test_size > 0.5:
+            logger.warning('The specified test and validation proportions are '
+                           'leaving less than half the data for training.')
 
     def prepare_training_data(self) -> None:
         """Prepares the data structures for model training and evaluation.
@@ -476,28 +475,26 @@ class ContactClassifier(object):
           disabled).
         - `self.balanced`: A balanced DataSet (if bagging is disabled).
         """
-        assert self.test_size is not None and 0 < self.test_size < 1, 'Test size must be a value between 0 and 1'
+        self._validate_sizes()
 
         self.full = DataSet(ContactClassifier._extract_x(self.df_full_training),
                             ContactClassifier._extract_y(self.df_full_training))
 
+        # make a balanced version of the input data set,
+        # we'll use it eventually regardless of approach
+        self.balanced = self.balance_data(self.full)
+
         if self.enable_bag:
-            # This method handles balancing itself and does not use a validation set.
+            # This method handles balancing itself and does not use a validation set directly,
+            # instead it is handled in the sampling process of the underlying estimators.
             self.train, self.test = ContactClassifier._split_dataset(self.full,
-                                                                     train_size=1 - self.test_size,
                                                                      test_size=self.test_size,
                                                                      seed=self.seed)
-
         else:
-            assert self.test_size < 0.5, 'Test sizes larger than 0.5 will leave no data for training'
-            # balance the input data set
-            self.balanced = self.balance_data(self.full)
-
             # Split into training, test, and validation sets (equal sizes)
             self.train, self.test, self.val = ContactClassifier._split_dataset(self.balanced,
-                                                                               train_size=1 - 2*self.test_size,
                                                                                test_size=self.test_size,
-                                                                               validation_size=self.test_size,
+                                                                               validation_size=self.validation_size,
                                                                                seed=self.seed)
 
     def balance_data(self, dataset: DataSet, rs: Optional[np.random.RandomState]=None) -> DataSet:
@@ -734,17 +731,8 @@ class ContactClassifier(object):
 
         tf.keras.backend.clear_session()
 
-        # if os.path.exists(self.checkpoint_dir):
-        #     logger.debug('Removing existing model checkpoint directory')
-        #     shutil.rmtree(self.checkpoint_dir)
-
-        best_model_file = os.path.join(self.checkpoint_dir, self.model_filename)
-
         # always add the additional logging callback and checkpointing
         callbacks = []
-        # callbacks = [AddInstanceLogCallback(),
-        #              self.checkpoint_callback(best_model_file, self.verbose)]
-
         if self.enable_tb:
             callbacks.append(self.tensorboard_callback())
         if self.enable_es:
@@ -770,15 +758,19 @@ class ContactClassifier(object):
 
             logging.info('Classifier training will use balanced bagging')
 
-            # The fraction of training set to use in a bag. Leaving some out in each
-            # bag allows for out-of-bag estimations with fewer estimators.
-            # The following makes the OOB fraction equivalent in size to the test set.
-            samplfrac_per_bag = 1 - self.test_size / (1 - self.test_size)
+            # The fraction of the training set to use in a bag, leaving a subset
+            # out in each bag. Out-of-bag (OOB) scoring requires that across all
+            # bags, every sample point has been left out at least once. Even with
+            # replacement, a size less than 1 is recommended otherwise the classifier
+            # will require _many_ 10s of estimators.
+            # Failure to do so will result in errors when OOB functions are called.
+            # This is adjusted by what has alrady been removed for the test set.
+            per_bag_frac = 1 - self.validation_size / (1 - self.test_size)
 
             # wrap the base classifier in a balanced bagging classifier
             model = BalancedBaggingClassifier(model,
                                               oob_score=True,
-                                              max_samples=samplfrac_per_bag,
+                                              max_samples=per_bag_frac,
                                               n_estimators=self.num_estimators,
                                               replacement=True,
                                               random_state=self.seed,
@@ -790,37 +782,13 @@ class ContactClassifier(object):
             # Fit using the bagging classifier, which does not support supplying a validation data set.
             self.model = model.fit(self.train.x, self.train.y)
 
-            logger.info(f'Final model score on full dataset: {model.score(self.full.x, self.full.y)}')
-            logger.info(f'Final model OOB acc: {model.oob_score_}')
-            logger.info('Final model OOB f1: '
-                        f'{f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1))}')
-
-            # def collect_best_model_files(directory_path: str, num_models: int) -> Any:
-            #     files = [os.path.join(directory_path, f) for f in os.listdir(directory_path)
-            #              if os.path.isfile(os.path.join(directory_path, f))]
-            #     return sorted(files, key=os.path.getmtime, reverse=True)[:num_models]
-
-            # best_model_files = collect_best_model_files(self.checkpoint_dir, len(model.estimators_))
-
             # Load the best model weights and extract the history for plotting
             df_plots = []
-            # for n, (en, bmf) in enumerate(zip(model.estimators_, best_model_files), start=1):
             for n, en in enumerate(model.estimators_, start=1):
                 # get the contained instance of KerasClassifier
                 keras_clzr = en._final_estimator
 
-                logger.debug(f'Estimator {n} (id:{id(keras_clzr.model_)}): Final model score: '
-                             f'{keras_clzr.score(self.train.x, self.train.y)}')
-
-                # the model instance id is derived from the underlying Keras object
-                # instance_best = best_model_file.format(model_id = id(keras_clzr.model_))
-                # logger.debug(f"Loading best model from: {instance_best}")
-                # keras_clzr.model_.load_weights(instance_best)
-                # logger.info(f'Loading weights from: {bmf}')
-                # keras_clzr.model_.load_weights(bmf)
-
-                logger.info(f'Estimator {n} (id:{id(keras_clzr.model_)}): Best model score: '
-                            f'{keras_clzr.score(self.train.x, self.train.y)}')
+                logger.info(f'Estimator {n}: best model score: {keras_clzr.score(self.train.x, self.train.y):.4f}')
 
                 _df = pd.DataFrame(keras_clzr.history_) \
                     .reset_index() \
@@ -828,14 +796,15 @@ class ContactClassifier(object):
                 _df['estimator'] = n
                 df_plots.append(_df)
 
-            logger.info(f'Best model score on full dataset: {model.score(self.full.x, self.full.y)}')
+            logger.info('Best ensemble model score on an example balanced data set: '
+                        f'{model.score(self.balanced.x, self.balanced.y):.4f}')
             model._set_oob_score(self.train.x, self.train.y)
-            logger.info(f'Best model OOB acc: {model.oob_score_}')
-            logger.info(f'Best model OOB f1: {f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1))}')
+            logger.info(f'Best ensemble model OOB accuracy: {model.oob_score_:.4f}')
+            logger.info('Best ensemble model OOB f1-score: '
+                        f'{f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1)):.4f}')
 
-            # combine the results of all the estimators and remove the
-            #   uninformative model_id
-            df_plots = pd.concat(df_plots)#.drop(columns='model_id')
+            # combine the results of all the estimators
+            df_plots = pd.concat(df_plots)
 
             p = (ggplot(df_plots.query('epoch>=0').melt(id_vars=['epoch', 'estimator']))
                  + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
@@ -853,17 +822,10 @@ class ContactClassifier(object):
             # Just fit using the KerasClassifier instance alone, include validation data.
             # adding ignore of the following erroneous warning about incorrect type to validation_data
             # noinspection PyTypeChecker
-            self.model = model.fit(self.train.x, self.train.y, validation_data=self.val)
+            self.model = model.fit(self.train.x, self.train.y,
+                                   validation_data=(self.val.x, self.val.y[:, np.newaxis]))
 
-            logger.info(f'Final model score on balanced dataset: {self.model.score(self.balanced.x, self.balanced.y)}')
-            logger.info(f'Final model score on full dataset: {model.score(self.full.x, self.full.y)}')
-
-            # load the best model
-            best_name = best_model_file.format(model_id = id(self.model.model_))
-            logger.debug(f'Loading best model from: {best_name}')
-            model.model_.load_weights(best_name)
-            logger.info(f'Best model score on balanced dataset: {model.score(self.balanced.x, self.balanced.y)}')
-            logger.info(f'Best model score on full dataset: {model.score(self.full.x, self.full.y)}')
+            logger.info(f'Best model score on balanced dataset: {model.score(self.balanced.x, self.balanced.y):.4f}')
 
             # plot history of the single estimator
             df_plot = ContactClassifier._transform_history(model)
@@ -965,8 +927,8 @@ class ContactClassifier(object):
         f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
 
         max_thres, max_f1  = ContactClassifier.find_simple_maximum(thres, f1_scores)
-        logger.info(f'{name}: probability threshold of {max_thres:.5f} achieves the '
-                    f'highest F1-score: {max_f1:.5f}')
+        logger.info(f'{name}: probability threshold of {max_thres:.5g} achieves the '
+                    f'highest F1-score: {max_f1:.5g}')
 
         self.plot_precision_recall_curve(
             f'precision_recall_curve_{name}.svg',
@@ -974,36 +936,47 @@ class ContactClassifier(object):
 
         return max_f1, max_thres
 
-    @staticmethod
-    def compute_decision_boundary(name: str,
-                                  y_true: np.ndarray,
-                                  y_prob: np.ndarray,
+    # @staticmethod
+    def compute_decision_boundary(self,
+                                  set_name: str,
                                   precision_threshold: float) ->  float:
         """
         Using predictions and true values, compute the decision boundary (in terms of assigned model probability)
         at which overall dataset precision exceeds the requested threshold.
-        :param name: Data set name.
-        :param y_true: True values.
-        :param y_prob: Model probabilities for the same dataset.
+        :param set_name: specified data set by name [test, validation, training]
         :param precision_threshold: Requested threshold precision.
         :return: Probability boundary to achieve requested precision.
         """
+        if set_name == 'test':
+            y_true, y_prob = self.test.y, self.model.predict_proba(self.test.x)[:, 1]
+        elif set_name == 'validation':
+            y_true, y_prob = self.val.y, self.model.predict_proba(self.val.x)[:, 1]
+        elif set_name == 'training':
+            y_true, y_prob = self.train.y, self.model.predict_proba(self.train.x)[:, 1]
+        else:
+            raise ValueError(f'Unknown set name: {set_name}')
+
         f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
-        logger.debug(f'Maximum values obtained P: {precision.max()}, R:{recall.max()}, F1:{f1_scores.max()}')
         assert precision.max() >= precision_threshold, \
-            (f'The maximum precision score {precision.max()} is less than the requested '
-             f'decision boundary threshold {precision_threshold}')
+            (f'For the {set_name} set: the maximum value reached for Precision was {precision.max():.5g}, '
+             f'which is less than the requested decision boundary threshold: {precision_threshold:.5g}')
         if len(thres) <= 1:
-            logger.error(f'Predicted class probabilities have a single value: {np.unique(y_prob)}')
+            logger.error(f'For the {set_name} set: predicted class probabilities have a '
+                         f'single value: {np.unique(y_prob):.5g}')
             raise ValueError('Single-valued probability array suggests model fitting failure')
+
+        logger.info(f'Maximal values for set \"{set_name}\": '
+                     f'(pr,Pre)=({thres[precision.argmax()]:.4g}, {precision.max():.5g}), '
+                     f'(pr,Rec)=({thres[recall.argmax()]:.4g}, {recall.max():.5g}), '
+                     f'(pr,F1)=({thres[f1_scores.argmax()]:.4g}, {f1_scores.max():.5g})')
 
         # wrapping CubicSpline in a lambda to overcome type warning
         # when supplying the instance to brentq.
         decision_boundary = brentq(CubicSpline(thres, precision[:-1] - precision_threshold),
                                    thres[0],
                                    thres[-1])
-        logger.info(f'{name}: requested precision of {precision_threshold:} '
-                    f'achieved for probability threshold of {decision_boundary:.5f} ')
+        logger.info(f'For set \"{set_name}\": the requested precision of {precision_threshold:.4g} '
+                    f'is achieved when the probability threshold is {decision_boundary:.4g} ')
         return decision_boundary
 
     def classify(self, precision_thres: float, df: pd.DataFrame=None) -> pd.DataFrame:
@@ -1024,18 +997,15 @@ class ContactClassifier(object):
         x = ContactClassifier._extract_x(df)
         df['intracellular_score'] = self.model.predict_proba(x)[:, 1]
 
-        # Compute the decision boundary for the requested precision threshold
+        # Given the user-requested precision threshold, compute the decision boundary
+        # in terms of a probability threshold.
         if precision_thres is not None:
             assert self.test_size is not None and self.test_size > 0, \
                 'Computing a decision boundary requires a test set was set aside in training'
 
-            pr_test = self.model.predict_proba(self.test.x)[:, 1]
-            boundary = ContactClassifier.compute_decision_boundary('test',
-                                                                   self.test.y,
-                                                                   pr_test,
-                                                                   precision_thres)
+            boundary = self.compute_decision_boundary('test', precision_thres)
 
-            # Use this threshold as a decision boundary on whether a contact is intra-cellular.
+            # Use this threshold as a decision boundary on whether a contact is intracellular.
             df = df.assign(is_intracellular = lambda x: x.intracellular_score > boundary)
             # rename the original column to reduce confusion
             df = df.rename(columns={'intra': 'intracluster'})
