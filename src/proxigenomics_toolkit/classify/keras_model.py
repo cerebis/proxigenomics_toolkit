@@ -191,6 +191,38 @@ class AddInstanceLogCallback(keras.callbacks.Callback):
         logs['model_id'] = id(self.model)
 
 
+def find_root(x_values: npt.ArrayLike,
+              y_values: npt.ArrayLike) -> float|None:
+    """
+    Finds the root of a function defined by empirical x and y data points using cubic spline
+    interpolation. The function checks for an exact root or a sign change between consecutive
+    points to estimate the root.
+
+    :param x_values: Array-like sequence of x-coordinates for the function.
+    :param y_values: Array-like sequence of y-coordinates representing the function's values.
+    :return: A float representing the root if found, or None if no root exists in the interval.
+    """
+    # Cubic spline interpolation of the empirical data
+    root_func = CubicSpline(x_values, y_values)
+    # Check if the first point is a root.
+    f_prev = root_func(x_values[0])
+    if f_prev == 0:
+        return x_values[0]
+    # Iterate through the rest of the points
+    for i in range(1, len(x_values)):
+        x_prev = x_values[i - 1]
+        x_curr = x_values[i]
+        f_curr = root_func(x_curr)
+        # Case 1: an exact root
+        if f_curr == 0:
+            return x_curr
+        # Case 2: a change in sign
+        if f_curr * f_prev < 0:
+            return brentq(root_func, x_prev, x_curr)
+        f_prev = f_curr
+    return None
+
+
 class ContactClassifier(object):
     """
     A classifier for predicting contacts between contigs.
@@ -228,6 +260,7 @@ class ContactClassifier(object):
 
     OUTPUT_TABLES: ClassVar[Dict[str, str]] = {
         'predictions': 'predictions.csv',
+        'faceted_predictions': 'faceted_predictions.csv',
     }
 
     def __init__(self,
@@ -710,7 +743,99 @@ class ContactClassifier(object):
             return re.sub("_[0-9]+$", "", cn)
         return cn
 
-    def train_full_model(self, n_jobs: int=1) -> None:
+    def faceted_kfold_analysis(self, num_folds: int=5) -> None:
+
+        # we'll split the full training set into k folds
+        k_splitter = (StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=self.seed)
+                      .split(self.full.x, self.full.y))
+
+        df_folds = []
+        for fold_n, (train_index, test_index) in enumerate(k_splitter, 1):
+            logger.info(f'--- Starting training for fold {fold_n}/{num_folds} ---')
+
+            # use the (n-1) folds as training data.
+            self.train = DataSet(self.full.x[train_index, :], self.full.y[train_index])
+            # the nth fold will be held out for unbiased classification.
+            self.test = DataSet(self.full.x[test_index, :], self.full.y[test_index])
+
+            lr_scheduler = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=self.learning_rate,
+                alpha=0.1,
+                # decay smoothly until the last expected training step
+                decay_steps=len(self.train.y) // self.batch_size * self.n_epochs,
+            )
+
+            model = KerasClassifier(
+                model=create_baseline,
+                epochs=self.n_epochs,
+                batch_size=self.batch_size,
+                random_state=self.seed,
+                verbose=self.verbose,
+                callbacks=[self.earlystopping_callback('fbeta', verbose=self.verbose)],
+                hidden_layer_sizes=[self.num_nodes] * self.num_layers,
+                learning_rate=lr_scheduler,
+            )
+
+            per_bag_frac = 1 - self.validation_size / (1 - self.test_size)
+
+            # wrap the base classifier in a balanced bagging classifier
+            model = BalancedBaggingClassifier(model,
+                                              oob_score=True,
+                                              max_samples=per_bag_frac,
+                                              n_estimators=self.num_estimators,
+                                              replacement=True,
+                                              random_state=self.seed,
+                                              n_jobs=5,
+                                              verbose=self.verbose)
+
+            self.model = model.fit(self.train.x, self.train.y)
+
+            logger.info('Fold {fold_no}: best ensemble model score on an example balanced data set: '
+                        f'{model.score(self.balanced.x, self.balanced.y):.4f}')
+            model._set_oob_score(self.train.x, self.train.y)
+            logger.info(f'Fold {fold_n}: best ensemble model OOB accuracy: {model.oob_score_:.4f}')
+            logger.info(f'Fold {fold_n}: best ensemble model OOB f1-score: '
+                        f'{f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1)):.4f}')
+
+            df_plots = []
+            for n, en in enumerate(model.estimators_, start=1):
+                # get the contained instance of KerasClassifier
+                keras_clzr = en._final_estimator
+
+                logger.info(f'Fold {fold_n}: estimator {n}: best model score: '
+                            f'{keras_clzr.score(self.train.x, self.train.y):.4f}')
+
+                _df = pd.DataFrame(keras_clzr.history_) \
+                    .reset_index() \
+                    .rename(columns=ContactClassifier.column_renamer)
+                _df['estimator'] = n
+                df_plots.append(_df)
+
+            df_plots = pd.concat(df_plots)
+
+            p = (ggplot(df_plots.query('epoch>=0').melt(id_vars=['epoch', 'estimator']))
+                 + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
+                 + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6])
+                 + scale_color_discrete(name = "Estimator#"))
+            p.save(filename=os.path.join(self.output_dir,f'fold-{fold_n}_full_model.svg'),
+                   width = ContactClassifier.PAGE_WIDTH_MM,
+                   height = ContactClassifier.PAGE_HEIGHT_MM,
+                   units = "mm",
+                   verbose=False)
+
+            self.assess_predictions(f"training-{fold_n}", self.train.y, model.predict_proba(self.train.x)[:, 1])
+            if self.test is not None:
+                self.assess_predictions(f"test-{fold_n}", self.test.y, model.predict_proba(self.test.x)[:, 1])
+
+            df_folds.append(self.classify(0.95,
+                                          self.df_full_training.iloc[test_index].copy(),
+                                          table_name=None))
+
+        df_folds = pd.concat(df_folds, ignore_index=True)
+        self.write_table(df_folds, 'faceted_predictions',
+                         "final faceted predictions", index=False)
+
+    def train_full_model(self, n_jobs: int = 1) -> None:
         """
         Train the model on the full dataset.
         Depending on options at instantiation-time, this model is either fit using data-augmentation
@@ -873,9 +998,9 @@ class ContactClassifier(object):
                                     f1_scores: np.ndarray,
                                     pr_threshold: np.ndarray) -> None:
 
-        df_plot = pd.DataFrame({'Precision': precision[1:],
-                                'Recall': recall[1:],
-                                'F1-score': f1_scores[1:],
+        df_plot = pd.DataFrame({'Precision': precision,
+                                'Recall': recall,
+                                'F1-score': f1_scores,
                                 'Pr_threshold': pr_threshold})
         p = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
              + geom_line()
@@ -892,13 +1017,30 @@ class ContactClassifier(object):
     @staticmethod
     def compute_f1_curve(y_true: np.ndarray,
                          y_prob: np.ndarray) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray):
+        """
+        Computes the F1 score along with precision, recall, and thresholds for a
+        given prediction probability array and corresponding true labels.
 
+        Using the precision-recall curve, this method calculates the associated F1
+        scores, while avoiding division by zero by adjusting the denominator when
+        precision and recall are simultaneously zero.
+
+        :param y_true: Ground truth binary labels as a numpy array (0 or 1).
+        :param y_prob: Predicted probabilities from a classifier as a numpy array.
+        :return: A tuple containing four numpy arrays:
+                 - F1 scores (excluding last element to match thresholds).
+                 - Precision values (excluding last element to match thresholds).
+                 - Recall values (excluding last element to match thresholds).
+                 - Thresholds corresponding to precision-recall values.
+        """
         precision, recall, thres = precision_recall_curve(y_true, y_prob)
         # avoid zeros in the denominator
         denominator = recall+precision
         denominator[denominator == 0] = 0.01
         f1_scores = 2 * recall * precision / denominator
-        return f1_scores, precision, recall, thres
+        # for simplicity, just drop the last element of F1, P and R so as to match
+        # the length of thres.
+        return f1_scores[:-1], precision[:-1], recall[:-1], thres
 
     @staticmethod
     def find_simple_maximum(x: np.ndarray, y: np.ndarray) -> (float, float):
@@ -970,21 +1112,22 @@ class ContactClassifier(object):
                      f'(pr,Rec)=({thres[recall.argmax()]:.4g}, {recall.max():.5g}), '
                      f'(pr,F1)=({thres[f1_scores.argmax()]:.4g}, {f1_scores.max():.5g})')
 
-        # wrapping CubicSpline in a lambda to overcome type warning
-        # when supplying the instance to brentq.
-        decision_boundary = brentq(CubicSpline(thres, precision[:-1] - precision_threshold),
-                                   thres[0],
-                                   thres[-1])
+        decision_boundary = find_root(thres, precision - precision_threshold)
+        assert decision_boundary is not None, 'The specified precision threshold was not reachable'
         logger.info(f'For set \"{set_name}\": the requested precision of {precision_threshold:.4g} '
                     f'is achieved when the probability threshold is {decision_boundary:.4g} ')
         return decision_boundary
 
-    def classify(self, precision_thres: float, df: pd.DataFrame=None) -> pd.DataFrame:
+    def classify(self, precision_thres: float,
+                 df: pd.DataFrame=None,
+                 table_name: Optional[str]='predictions') -> pd.DataFrame:
         """
         Apply the trained model to the data and write the predictions to a file.
 
         :param precision_thres: Estimated precision at which to classify intra-cellular contacts.
         :param df: Optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
+        :param table_name: Optional table name -- if not supplied, use the default table name. If None, do not
+        write an output file.
         :return: Updated dataframe with the column of probabilities.
         """
         assert self.model is not None, 'Model has not been trained.'
@@ -1012,7 +1155,8 @@ class ContactClassifier(object):
             # reorder the table so that all the contacts for a given sequence are
             # adjacent rows, but give precedence to the greatest number of contacts.
             df = df.sort_values(['seq', 'contacts'], ascending=[True, False])
-            self.write_table(df, 'predictions', 'final predictions', index=False)
+            if table_name is not None:
+                self.write_table(df, table_name, 'final predictions', index=False)
 
         return df
 
