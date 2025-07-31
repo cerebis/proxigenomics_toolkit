@@ -60,8 +60,51 @@ class DataSet(NamedTuple):
 
 @tf.keras.utils.register_keras_serializable()
 class StatefulBinaryFBeta(Metric):
-    """
-    Custom metric for fbeta maximisation
+    """Computes the F-beta score for binary classification tasks in a stateful manner.
+
+    This metric calculates the F-beta score, which is the weighted harmonic mean of
+    precision and recall. It is a more general version of the F1-score. As a
+    stateful metric, it accumulates the counts for true positives, actual positives,
+    and predicted positives over multiple batches of data. This allows for the
+    correct calculation of the score over a full epoch or dataset during model
+    training and evaluation.
+
+    The `beta` parameter determines the weight of recall in the combined score.
+    - `beta < 1` lends more weight to precision.
+    - `beta > 1` favors recall.
+    - `beta = 1` corresponds to the traditional F1-score, where precision and
+      recall are equally weighted.
+
+    Usage:
+    ```python
+    model = tf.keras.Model(...)
+    model.compile(
+        optimizer='adam',
+        loss='binary_crossentropy',
+        metrics=[StatefulBinaryFBeta(beta=2.0, name='f2_score')]
+    )
+    ```
+
+    Args:
+        name (str): The name of the metric instance. Defaults to 'fbeta'.
+        beta (float): The beta parameter that determines the weighting between
+            precision and recall. Defaults to 1.0.
+        threshold (float): The classification threshold to apply to the predicted
+            probabilities. Values at or above this threshold are considered
+            positive predictions. Defaults to 0.5.
+        epsilon (float): A small constant added to denominators to avoid
+            division by zero. Defaults to 1e-7.
+        dtype (np.dtype): The data type for the metric's state variables.
+            Defaults to np.float32.
+
+    Attributes:
+        tp (tf.Variable): Stores the cumulative count of true positives.
+        actual_positive (tf.Variable): Stores the cumulative count of actual
+            positive samples (true positives + false negatives).
+        predicted_positive (tf.Variable): Stores the cumulative count of
+            predicted positive samples (true positives + false positives).
+        beta_squared (float): The squared value of the beta parameter, cached
+            for computational efficiency.
     """
 
     def __init__(self,
@@ -70,6 +113,26 @@ class StatefulBinaryFBeta(Metric):
                  threshold: float=0.5,
                  epsilon: float=1e-7,
                  dtype: np.dtype=np.float32) -> None:
+        """
+        Initialize a StatefulBinaryFBeta instance. This class calculates the F-beta score
+        considering binary classification tasks. F-beta is a weighted harmonic mean of precision
+        and recall, with beta determining the weight of recall in the combined score.
+
+        :param name: The name of the metric. Defaults to "fbeta".
+        :type name: str
+        :param beta: Weight of recall in the combined score. A beta value of 1.0 weighs precision
+            and recall equally, values greater than 1 emphasize recall, while values less than 1
+            stress precision. Defaults to 1.0.
+        :type beta: float
+        :param threshold: Classification probability threshold. Predictions above this value are
+            classified as positive. Defaults to 0.5.
+        :type threshold: float
+        :param epsilon: Small constant added to prevent division by zero or undefined values in
+            precision, recall, or F-beta calculations. Defaults to 1e-7.
+        :type epsilon: float
+        :param dtype: Data type of the state variables, typically a float type. Defaults to np.float32.
+        :type dtype: np.dtype
+        """
         # initializing an object of the super class
         super(StatefulBinaryFBeta, self).__init__(name=name, dtype=dtype)
 
@@ -90,6 +153,19 @@ class StatefulBinaryFBeta(Metric):
                      y_true: npt.ArrayLike,
                      y_pred: npt.ArrayLike,
                      sample_weight: Optional[npt.ArrayLike]=None) -> None:
+        """
+        Update the internal state of the metric by accumulating the true positives,
+        predicted positives, and actual positives based on the provided true labels,
+        predictions, and optional sample weights.
+
+        :param y_true: Array of true labels.
+        :type y_true: numpy.typing.ArrayLike
+        :param y_pred: Array of predicted values.
+        :type y_pred: numpy.typing.ArrayLike
+        :param sample_weight: Optional array of weights for scaling the metric computation.
+        :type sample_weight: Optional[numpy.typing.ArrayLike]
+        :return: None
+        """
         # casting y_true and y_pred as float dtype
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.cast(y_pred, tf.float32)
@@ -102,6 +178,18 @@ class StatefulBinaryFBeta(Metric):
         self.actual_positive.assign_add(tf.reduce_sum(y_true)) # updating actual positive attribute
 
     def result(self) -> float:
+        """
+        Calculates the F-beta score based on true positive, predicted positive, and actual positive counts.
+
+        The F-beta score is computed using the formula:
+            F-beta = (1 + beta^2) * (precision * recall) / (beta^2 * precision + recall + epsilon)
+        where precision and recall are calculated as:
+            precision = true_positive / (predicted_positive + epsilon)
+            recall = true_positive / (actual_positive + epsilon)
+
+        :return: The computed F-beta score.
+        :rtype: float
+        """
         self.precision = self.tp/(self.predicted_positive+self.epsilon) # calculates precision
         self.recall = self.tp/(self.actual_positive+self.epsilon) # calculates recall
         # calculating fbeta
@@ -110,11 +198,28 @@ class StatefulBinaryFBeta(Metric):
         return self.fb
 
     def reset_state(self) -> None:
+        """
+        Resets the internal state of the metrics to their initial values.
+        :return: None
+        """
         self.tp.assign(0) # resets true positives to zero
         self.predicted_positive.assign(0) # resets predicted positives to zero
         self.actual_positive.assign(0) # resets actual positives to zero
 
     def get_config(self) -> Dict:
+        """
+        Serializes the metric's configuration for model saving and loading.
+
+        This method is essential for Keras's serialization functionality. It
+        returns a JSON-serializable dictionary of parameters that allows the
+        framework to reconstruct the metric object when a model is saved and
+        later loaded.
+
+        It extends the base configuration from the parent `Metric` class with
+        the specific parameters of this `StatefulBinaryFBeta` instance.
+
+        :return: A dictionary containing the metric's configuration parameters.
+        """
         import math
         config = {
             'beta': math.sqrt(self.beta_squared),
@@ -232,35 +337,23 @@ class ContactClassifier(object):
     and evaluation. The primary goal is to train a model that can accurately
     predict whether two contigs are in contact based on a set of features.
 
-    The typical workflow involves:
-    1. Initializing the classifier with various parameters, including file paths
-       for input data and directories for output.
-    2. Preparing the training data using the `prepare_training_data` method, which
-       involves reading data, splitting it into training and testing sets, and
-       extracting features (X) and labels (y).
-    3. Training a model using either k-fold cross-validation
-       (`train_kfold_model`) or on the full training dataset
-       (`train_full_model`).
-    4. Classifying new, unseen data using the `classify` method.
-    5. Evaluating the performance of the model using various methods like
-       `assess_predictions`, `plot_precision_recall_curve`, and
-       `compute_decision_boundary`.
-
     The class makes use of TensorFlow/Keras for building and training the
     neural network models. It also includes functionality for logging,
     early stopping, and model checkpointing to manage the training process
     effectively.
     """
-    PAGE_WIDTH_MM = 297
-    PAGE_HEIGHT_MM = 210
+    _PAGE_WIDTH_MM = 297
+    _PAGE_HEIGHT_MM = 210
 
     _METRIC_NAME = 'fbeta'
     _FIT_VARS: ClassVar[List[str]]= ['similarity', 'freq_z', 'cov_z', 'linkage']
+    _PREDICT_DTYPE = np.dtype([('intracellular_score', np.float64),
+                               ('is_intracellular', np.uint8),
+                               ('boundary', np.float64)])
     _CLASS_VAR = 'intra_z'
 
     OUTPUT_TABLES: ClassVar[Dict[str, str]] = {
         'predictions': 'predictions.csv',
-        'faceted_predictions': 'faceted_predictions.csv',
     }
 
     def __init__(self,
@@ -268,6 +361,7 @@ class ContactClassifier(object):
                  complete_labelled_file: str,
                  spurious_cluster_file: str,
                  intra_cluster_file: str,
+                 threshold: float,
                  seed: int,
                  n_epochs: int,
                  batch_size: int,
@@ -280,6 +374,9 @@ class ContactClassifier(object):
                  enable_bag: bool=False,
                  enable_tb: bool=False,
                  enable_es: bool=True,
+                 enable_replacement: bool=True,
+                 enable_oob: bool=True,
+                 n_jobs: int=1,
                  patience: int=10,
                  verbose: bool=False) -> None:
         """
@@ -290,6 +387,7 @@ class ContactClassifier(object):
         :param complete_labelled_file: Labeled training data.
         :param spurious_cluster_file: File containing cluster ids accepted for spurious contacts.
         :param intra_cluster_file: File containing cluster ids accepted for intra contacts.
+        :param threshold: The threshold precision at which to carry out classifications.
         :param seed: A random seed.
         :param n_epochs: Number of epochs for training.
         :param batch_size: Batch size for training.
@@ -303,6 +401,9 @@ class ContactClassifier(object):
         :param enable_bag: Enable balanced bagging classifier, rather than balancing data.
         :param enable_tb: Enable tensorboard logging.
         :param enable_es: Enable early stopping callback when training ceases to improve for 20 iterations.
+        :param enable_replacement: Enable replacement of outliers in training data.
+        :param enable_oob: Enable out-of-bag (OOB) scoring when enable_bag=True.
+        :param n_jobs: Number of parallel jobs to use during training when enable_bag=True.
         :param patience: Number of epochs to wait for when training ceases to improve.
         :param verbose: Verbosity of logging.
         """
@@ -311,6 +412,7 @@ class ContactClassifier(object):
         self.complete_labeled_file = complete_labelled_file
         self.spurious_cluster_file = spurious_cluster_file
         self.intra_cluster_file = intra_cluster_file
+        self.threshold = threshold
         self.seed = seed
         self.n_epochs = n_epochs
         self.batch_size = batch_size
@@ -323,6 +425,9 @@ class ContactClassifier(object):
         self.enable_bag = enable_bag
         self.enable_tb = enable_tb
         self.enable_es = enable_es
+        self.enable_replacement = enable_replacement
+        self.enable_oob = enable_oob
+        self.n_jobs = n_jobs
         self.patience = patience
         self.verbose = verbose
 
@@ -335,13 +440,16 @@ class ContactClassifier(object):
         # read data for training
         self.df_complete = pd.read_csv(complete_labelled_file)
         # separate out the complete training set
-        self.df_full_training = ContactClassifier._separate_training(self.df_complete)
+        self.df_labelled, self.df_unlabelled = ContactClassifier._split_training_unlabelled(self.df_complete)
         self.spurious_clusters = set(pd.read_csv(spurious_cluster_file)['cluster'].values)
         self.intra_clusters = set(pd.read_csv(intra_cluster_file)['cluster'].values)
 
         self.model = None
+        self.history = None
         # complete input dataset
-        self.full = None
+        self.labelled = None
+        # complete unlabelled dataset
+        self.unlabelled = None
         # the balanced dataset using undersampling
         self.balanced = None
         # split datasets
@@ -353,10 +461,10 @@ class ContactClassifier(object):
         #   many objects within the package that consume a seed.
         keras.utils.set_random_seed(self.seed)
         # prepare the training and possibly test dataset(s)
-        self.prepare_training_data()
+        self._prepare_primary_data()
 
     @staticmethod
-    def get_output_path(parent_dir: str, table_name: str) -> str:
+    def _get_output_path(parent_dir: str, table_name: str) -> str:
         """
         Generates the output file path for a specified table based on its parent directory
         and table name by joining them and aligning them with the corresponding entry in
@@ -370,13 +478,16 @@ class ContactClassifier(object):
         return os.path.join(parent_dir, str(ContactClassifier.OUTPUT_TABLES[table_name]))
 
     @staticmethod
-    def _separate_training(df: pd.DataFrame) -> pd.DataFrame:
+    def _split_training_unlabelled(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Return the table containing only the data marked for training.
-        :param df: A pandas dataframe.
-        :return: Dataframe containing just training data.
+        Return two tables, one containing only the data marked for training and the remainder
+        considered as the unlabelled data. This method assumes the input table contains the boolean
+        column "train".
+        :param df: A pandas dataframe from DataLabeller.
+        :return: a tuple of two Dataframes containing either training or unlabelled data.
         """
-        return df.query('train==True')
+        return (df.query('train==True').reset_index(drop=True),
+                df.query('train==False').reset_index(drop=True))
 
     @staticmethod
     def _extract_x(df: pd.DataFrame) -> np.ndarray:
@@ -408,9 +519,44 @@ class ContactClassifier(object):
         df[ContactClassifier._FIT_VARS] = x
         return df
 
+    @staticmethod
+    def _column_renamer(cn: str) -> str:
+        """
+        Simple function for renaming individual columns in history dataframe when trraining using balanced
+        bagging. This is largely to consolidate results for precision and recall, which receive
+        _[INT] suffixes for different blocks of jobs. THis is intended to be supplied to
+        the function `pandas.DataFrame.rename()`
+
+        :param cn: a column name
+        :return: modified column name
+        """
+        if cn == "index":
+            return "epoch"
+        elif cn.startswith("precision") or cn.startswith("recall"):
+            return re.sub("_[0-9]+$", "", cn)
+        return cn
 
     @staticmethod
-    def _split_dataset(full: DataSet,
+    def _transform_history(model: scikeras.wrappers.KerasClassifier) -> pd.DataFrame:
+        """
+        Transforms and prepares the model's history data for plotting.
+
+        :param model: The model object with a recorded history.
+        :return: A pandas DataFrame containing combined training and validation data with
+           set type labels.
+        """
+        df_plot = pd.DataFrame(model.history_).reset_index().rename(columns={"index": "epoch"})
+        # without leading val_, assume calculated from the training set
+        _tra = df_plot.loc[:, ~df_plot.columns.str.startswith("val_") | (df_plot.columns == "epoch")].copy()
+        _tra["data_set"] = "training"
+        # with leading val_, assume calculated from the validation set
+        _val = df_plot.loc[:, df_plot.columns.str.startswith("val_") | (df_plot.columns == "epoch")].copy()
+        _val["data_set"] = "validation"
+        _val.columns = _val.columns.str.replace('val_', '')
+        return pd.concat([_val, _tra])
+
+    @staticmethod
+    def _split_dataset(dataset: DataSet,
                        test_size: float,
                        validation_size: Optional[float]=None,
                        seed: Optional[int]=None) -> Tuple[DataSet, DataSet] | Tuple[DataSet, DataSet, DataSet]:
@@ -420,7 +566,7 @@ class ContactClassifier(object):
         and that stratification is maintained, providing consistent data distribution
         across the splits.
 
-        :param full: The full feature set and corresponding labels provided as a DataSet object.
+        :param dataset: The dataset to split.
         :param test_size: Proportion of the dataset to allocate for testing, as a float between 0 and 1.
         :param validation_size: (Optional) Proportion of the dataset to allocate for validation,
                                 as a float between 0 and 1. If not provided, validation is not performed,
@@ -437,9 +583,9 @@ class ContactClassifier(object):
             train_size -= validation_size
 
         # Step 1: Split into training and conjoined temporary set of validation + test.
-        x_train, x_temp, y_train, y_temp = train_test_split(full.x, full.y,
+        x_train, x_temp, y_train, y_temp = train_test_split(dataset.x, dataset.y,
                                                             train_size=train_size,
-                                                            stratify=full.y,
+                                                            stratify=dataset.y,
                                                             random_state=rs)
         if validation_size is None:
             return DataSet(x_train, y_train), DataSet(x_temp, y_temp)
@@ -484,53 +630,7 @@ class ContactClassifier(object):
             logger.warning('The specified test and validation proportions are '
                            'leaving less than half the data for training.')
 
-    def prepare_training_data(self) -> None:
-        """Prepares the data structures for model training and evaluation.
-
-        This method orchestrates the data preparation pipeline. It begins by
-        extracting the feature set (X) and target labels (y) from the
-        initial dataframe (`self.df_full_training`).
-
-        The process then diverges based on the `self.enable_bag` attribute:
-        - If bagging is enabled, the data is split into training and testing
-          sets. Data balancing is assumed to be handled by the bagging
-          process itself.
-        - If bagging is disabled, the method first balances the dataset using
-          the `balance_data` method. The balanced data is then split into
-          training, testing, and validation sets.
-
-        As a result of this method, the following instance attributes are
-        populated:
-        - `self.full`: A DataSet object containing all features and labels.
-        - `self.train`: A DataSet for training the model.
-        - `self.test`: A DataSet for final model evaluation.
-        - `self.val`: A DataSet for validation during training (if bagging is
-          disabled).
-        - `self.balanced`: A balanced DataSet (if bagging is disabled).
-        """
-        self._validate_sizes()
-
-        self.full = DataSet(ContactClassifier._extract_x(self.df_full_training),
-                            ContactClassifier._extract_y(self.df_full_training))
-
-        # make a balanced version of the input data set,
-        # we'll use it eventually regardless of approach
-        self.balanced = self.balance_data(self.full)
-
-        if self.enable_bag:
-            # This method handles balancing itself and does not use a validation set directly,
-            # instead it is handled in the sampling process of the underlying estimators.
-            self.train, self.test = ContactClassifier._split_dataset(self.full,
-                                                                     test_size=self.test_size,
-                                                                     seed=self.seed)
-        else:
-            # Split into training, test, and validation sets (equal sizes)
-            self.train, self.test, self.val = ContactClassifier._split_dataset(self.balanced,
-                                                                               test_size=self.test_size,
-                                                                               validation_size=self.validation_size,
-                                                                               seed=self.seed)
-
-    def balance_data(self, dataset: DataSet, rs: Optional[np.random.RandomState]=None) -> DataSet:
+    def _balance_data(self, dataset: DataSet, rs: Optional[np.random.RandomState]=None) -> DataSet:
         """
         Apply data augmentation to equalize the training classes sizes using
         a random undersampling procedure.
@@ -559,18 +659,165 @@ class ContactClassifier(object):
 
         return DataSet(x_aug, y_aug)
 
+    def _prepare_primary_data(self) -> None:
+        """Prepares the primary data structures for model training and evaluation.
+
+        This method orchestrates the data preparation pipeline. It begins by
+        extracting the feature set (X) and target labels (y) from the
+        initial dataframe (`self.df_labelled`).
+
+        As a result of this method, the following instance attributes are
+        populated:
+        - `self.labelled`: A DataSet object containing the confidently labelled observations.
+        - `self.unlabelled`: A DataSet of essentially unlabelled observations.
+        """
+        self._validate_sizes()
+
+        self.labelled = DataSet(ContactClassifier._extract_x(self.df_labelled),
+                                ContactClassifier._extract_y(self.df_labelled))
+
+        self.unlabelled = DataSet(ContactClassifier._extract_x(self.df_unlabelled),
+                                  ContactClassifier._extract_y(self.df_unlabelled))
+
+    def _get_datasets(self, dataset: DataSet) -> Tuple[DataSet, DataSet, DataSet|None]:
+        """
+        Splits the input dataset into training, testing, and optionally validation sets
+        based on the class settings. If `enable_bag` is set to True, only training
+        and testing sets are returned. When `enable_bag` is False, the dataset is
+        balanced first, and then split into training, testing, and validation sets.
+
+        :param dataset: Input dataset to be processed and split.
+        :type dataset: DataSet
+        :return: A tuple containing train, test, and validation datasets, where val is None
+          if enable_bag is True.
+        :rtype: Tuple[DataSet, DataSet, DataSet|None]
+        """
+
+        if self.enable_bag:
+            # Only train and test. Bagging internally handles balancing.
+            self.val = None
+            self.train, self.test = ContactClassifier._split_dataset(dataset,
+                                                                     test_size=self.test_size,
+                                                                     seed=self.seed)
+        else:
+            # First balance the labels
+            self.balanced = self._balance_data(dataset)
+            # Split into training, test, and validation sets
+            self.train, self.test, self.val = ContactClassifier._split_dataset(self.balanced,
+                                                                               test_size=self.test_size,
+                                                                               validation_size=self.validation_size,
+                                                                               seed=self.seed)
+        return self.train, self.test, self.val
+
+    def _tensorboard_callback(self) -> tf.keras.callbacks.Callback:
+        log_path = os.path.join(self.output_dir, 'tensorboard', self.run_name)
+        return keras.callbacks.TensorBoard(log_dir=log_path,
+                                           histogram_freq=1,
+                                           embeddings_freq=1,
+                                           write_graph=True,
+                                           write_images=True,
+                                           update_freq="epoch")
+
+    def _earlystopping_callback(self, metric: str, verbose: bool=False) -> tf.keras.callbacks.Callback:
+        return tf.keras.callbacks.EarlyStopping(monitor=metric,
+                                                patience=self.patience,
+                                                mode='max',
+                                                min_delta=1e-4,
+                                                restore_best_weights=True,
+                                                start_from_epoch=10,
+                                                verbose=verbose)
+
+    @staticmethod
+    def _checkpoint_callback(best_model_file: str, verbose: bool=False) -> tf.keras.callbacks.Callback:
+        return tf.keras.callbacks.ModelCheckpoint(best_model_file,
+                                                  monitor=ContactClassifier._METRIC_NAME,
+                                                  verbose=verbose,
+                                                  save_best_only=True,
+                                                  mode='max')
+
+    def _get_callbacks(self) -> List:
+        """
+        A private helper to gather all enabled Keras callbacks.
+        This cleans up the training logic and centralizes callback configuration.
+        """
+        callbacks = []
+        if self.enable_tb:
+            callbacks.append(self._tensorboard_callback())
+        if self.enable_es:
+            callbacks.append(self._earlystopping_callback('fbeta', verbose=self.verbose))
+        return callbacks
+
+    def _build_model(self) -> KerasClassifier | BalancedBaggingClassifier:
+        """
+        Constructs the classification model based on the instance's configuration.
+
+        This factory method builds a `KerasClassifier` using the `create_baseline`
+        function and configures it with the instance's parameters (e.g., learning rate,
+        layers, epochs).
+
+        If `self.enable_bag` is True, this base classifier is wrapped in a
+        `BalancedBaggingClassifier` to create an ensemble model for improved
+        performance on imbalanced datasets.
+
+        Returns:
+            KerasClassifier | BalancedBaggingClassifier: An unfitted scikit-learn
+            compatible classifier instance ready for training.
+        """
+
+        if self.n_jobs > 1 and not self.enable_bag:
+            logging.warning("The number of jobs is ignored when bagging is not enabled.")
+
+        lr_scheduler = tf.keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=self.learning_rate,
+            alpha=0.1,
+            # decay smoothly until the last expected training step
+            decay_steps=len(self.train.y) // self.batch_size * self.n_epochs,
+        )
+
+        model = KerasClassifier(model=create_baseline,
+                                epochs=self.n_epochs,
+                                batch_size=self.batch_size,
+                                random_state=self.seed,
+                                verbose=self.verbose,
+                                callbacks=self._get_callbacks(),
+                                hidden_layer_sizes=[self.num_nodes] * self.num_layers,
+                                learning_rate=lr_scheduler)
+
+        if self.enable_bag:
+            logging.info('Classifier model will use balanced bagging')
+            # The fraction of the training set to use in a bag, leaving a subset
+            # out in each bag. Out-of-bag (OOB) scoring requires that across all
+            # bags, every sample point has been left out at least once. Even with
+            # replacement, a size less than 1 is recommended otherwise the classifier
+            # will require _many_ 10s of estimators.
+            # Failure to do so will result in errors when OOB functions are called.
+            # This is adjusted by what has alrady been removed for the test set.
+            per_bag_frac = 1 - self.validation_size / (1 - self.test_size)
+
+            # wrap the base classifier in a balanced bagging classifier
+            model = BalancedBaggingClassifier(model,
+                                              oob_score=self.enable_oob,
+                                              max_samples=per_bag_frac,
+                                              n_estimators=self.num_estimators,
+                                              replacement=self.enable_replacement,
+                                              random_state=self.seed,
+                                              n_jobs=self.n_jobs,
+                                              verbose=self.verbose)
+
+        return model
+
     def write_table(self,
                     df: pd.DataFrame,
                     table_name: str,
-                    description: str,
-                    index: bool,
+                    reorder: bool=True,
                     format_columns: bool=True) -> None:
         """
         Standardised writing of a table to a file.
         :param df: The dataframe to write.
-        :param table_name: Name of the table to write, for which the actual file name will be obtained.
-        :param description: A description of logging.
-        :param index: Whether to include.
+        :param table_name: Name of the table to write, for which the actual file name will be obtained. This mechanism
+        exists purely so downstream classes can easily obtain the file.
+        :param reorder: Whether to reorder the table rows.
+        :param format_columns: Whether to format the column values.
         """
 
         COLUMN_FORMATS = OrderedDict({
@@ -601,10 +848,20 @@ class ContactClassifier(object):
             "is_intracellular": "{}",
         })
 
+        # first, if "intra" exists as a column, rename it something
+        # a little more explicit for clarity.
+        df = df.rename(columns={'intra': 'intracluster'})
+
+        if reorder:
+            # do sorting before formatting, as formatting converts
+            # numerica data to strings, resulting in unexpected order.
+            logger.info(f'Reordering {table_name} table')
+            df = df.sort_values(['seq','contacts'], ascending=[True, False])
+
         if format_columns:
             # reorder the columns in the dataframe, dropping those
             # which are not mentioned in the formatting dictionary
-            logger.debug("Applying column-specific formatting to report for legibility")
+            logger.debug(f'Applying column-specific formatting to {table_name} table')
             # dictate the order of columns
             df = pd.DataFrame(df, columns=[_cl for _cl in COLUMN_FORMATS if _cl in df.columns])
             # apply formats
@@ -615,9 +872,9 @@ class ContactClassifier(object):
                     logger.error(f'Could not format column "{_cn}" using format string "{_spec}"')
                     raise
 
-        file_path = ContactClassifier.get_output_path(self.output_dir, table_name)
-        logger.info(f'Writing {description} to {file_path}')
-        df.to_csv(file_path, index=index)
+        file_path = ContactClassifier._get_output_path(self.output_dir, table_name)
+        logger.info(f'Writing {table_name} table to {file_path}')
+        df.to_csv(file_path, index=False)
 
     def plot_variable_scatter(self,
                               x: np.ndarray,
@@ -641,355 +898,224 @@ class ContactClassifier(object):
                 df = df.sample(n_points, random_state=self.seed)
             for _x, _y in itertools.combinations(params, 2):
                 fig = sb.jointplot(df, x=_x, y=_y, hue="intra_z").figure
-                fig.set_size_inches(ContactClassifier.PAGE_WIDTH_MM / 25.4, ContactClassifier.PAGE_HEIGHT_MM / 25.4)
+                fig.set_size_inches(ContactClassifier._PAGE_WIDTH_MM / 25.4, ContactClassifier._PAGE_HEIGHT_MM / 25.4)
                 pdf.savefig(fig)
 
-    def tensorboard_callback(self) -> tf.keras.callbacks.Callback:
-        log_path = os.path.join(self.output_dir, 'tensorboard', self.run_name)
-        return keras.callbacks.TensorBoard(log_dir=log_path,
-                                           histogram_freq=1,
-                                           embeddings_freq=1,
-                                           write_graph=True,
-                                           write_images=True,
-                                           update_freq="epoch")
-
-    def earlystopping_callback(self, metric: str, verbose: bool=False) -> tf.keras.callbacks.Callback:
-        return tf.keras.callbacks.EarlyStopping(monitor=metric,
-                                                patience=self.patience,
-                                                mode='max',
-                                                min_delta=1e-4,
-                                                restore_best_weights=True,
-                                                start_from_epoch=10,
-                                                verbose=verbose)
-
-    @staticmethod
-    def checkpoint_callback(best_model_file: str, verbose: bool=False) -> tf.keras.callbacks.Callback:
-        return tf.keras.callbacks.ModelCheckpoint(best_model_file,
-                                                  monitor=ContactClassifier._METRIC_NAME,
-                                                  verbose=verbose,
-                                                  save_best_only=True,
-                                                  mode='max')
-
-    def train_kfold_model(self, n_splits: int = 5) -> List[tf.keras.callbacks.History]:
+    def report_and_plot(self,
+                        tag: str,
+                        train: DataSet,
+                        test: DataSet,
+                        val: Optional[DataSet]=None) -> None:
         """
-        Trains and evaluates the model using k-fold cross-validation.
+        Generates a performance report and training history plots for the model.
 
-        This method performs stratified k-fold cross-validation on the full training dataset.
-        For each fold, it trains a new model and evaluates it on the hold-out validation set.
-        The training data within each fold is balanced before training. Callbacks for
-        TensorBoard, early stopping, and model checkpointing are supported.
+        This method performs an analysis of model performance during and after training.
+        It handles both ensemble models with bagging enabled and single classifiers.
+        Detailed metrics such as model scores for training, validation, and testing are
+        computed and logged. For ensemble models, metrics of individual base models
+        are also captured. The method creates comprehensive plots representing the
+        model's training history and saves them into the specified output directory.
 
-        :param n_splits: The number of folds to use for cross-validation.
-        :return: A list of Keras History objects, one for each fold.
+        :param tag: A string representing the tag used to identify the report and plot.
+        :param train: The DataSet object containing the training data used in model fitting.
+        :param test: The DataSet object containing test data.
+        :param val: Optional DataSet object containing validation data.
+        :return: None
         """
-        rs = np.random.RandomState(self.seed)
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=rs)
 
-        model = None
-        histories = []
-        for fold_no, (train_index, val_index) in enumerate(skf.split(self.full.x, self.full.y), 1):
-            logger.info(f'--- Starting training for fold {fold_no}/{n_splits} ---')
-
-            # balance both training and validation sets
-            train = self.balance_data(DataSet(self.full.x[train_index, :], self.full.y[train_index]), rs)
-            val = self.balance_data(DataSet(self.full.x[val_index, :], self.full.y[val_index]), rs)
-
-            run_name_fold = os.path.join(self.output_dir, 'tb', f'fold_{fold_no}_{self.run_name}')
-            callbacks = [keras.callbacks.TensorBoard(log_dir=run_name_fold,
-                                                     histogram_freq=1,
-                                                     embeddings_freq=1,
-                                                     write_graph=True,
-                                                     write_images=True,
-                                                     update_freq="epoch")]
-
-            model = KerasClassifier(
-                model=create_baseline,
-                epochs=self.n_epochs,
-                batch_size=self.batch_size,
-                random_state=self.seed,
-                verbose=self.verbose,
-                hidden_layer_sizes=[self.num_nodes] * self.num_layers,
-                learning_rate=self.learning_rate,
-                callbacks=callbacks,
-            )
-
-            # adding ignore of the following erroneous warning about incorrect type to validation_data
-            # noinspection PyTypeChecker
-            history = model.fit(train.x, train.y, validation_data=val)
-            histories.append(history)
-
-            scores = model.model_.evaluate(val.x, val.y, verbose=self.verbose)
-            logger.info(f'Score for fold {fold_no}: {model.model_.metrics_names[0]} of {scores[0]}; '
-                        f'{model.model_.metrics_names[1]} of {scores[1] * 100}%')
-
-        # The trained model for the last fold is stored in self.model
-        self.model = model
-        return histories
-
-    @staticmethod
-    def column_renamer(cn: str) -> str:
-        """
-        Simple function for renaming individual columns in history dataframe when trraining using balanced
-        bagging. This is largely to consolidate results for precision and recall, which receive
-        _[INT] suffixes for different blocks of jobs. THis is intended to be supplied to
-        the function `pandas.DataFrame.rename()`
-
-        :param cn: a column name
-        :return: modified column name
-        """
-        if cn == "index":
-            return "epoch"
-        elif cn.startswith("precision") or cn.startswith("recall"):
-            return re.sub("_[0-9]+$", "", cn)
-        return cn
-
-    def faceted_kfold_analysis(self, num_folds: int=5) -> None:
-
-        # we'll split the full training set into k folds
-        k_splitter = (StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=self.seed)
-                      .split(self.full.x, self.full.y))
-
-        df_folds = []
-        for fold_n, (train_index, test_index) in enumerate(k_splitter, 1):
-            logger.info(f'--- Starting training for fold {fold_n}/{num_folds} ---')
-
-            # use the (n-1) folds as training data.
-            self.train = DataSet(self.full.x[train_index, :], self.full.y[train_index])
-            # the nth fold will be held out for unbiased classification.
-            self.test = DataSet(self.full.x[test_index, :], self.full.y[test_index])
-
-            lr_scheduler = tf.keras.optimizers.schedules.CosineDecay(
-                initial_learning_rate=self.learning_rate,
-                alpha=0.1,
-                # decay smoothly until the last expected training step
-                decay_steps=len(self.train.y) // self.batch_size * self.n_epochs,
-            )
-
-            model = KerasClassifier(
-                model=create_baseline,
-                epochs=self.n_epochs,
-                batch_size=self.batch_size,
-                random_state=self.seed,
-                verbose=self.verbose,
-                callbacks=[self.earlystopping_callback('fbeta', verbose=self.verbose)],
-                hidden_layer_sizes=[self.num_nodes] * self.num_layers,
-                learning_rate=lr_scheduler,
-            )
-
-            per_bag_frac = 1 - self.validation_size / (1 - self.test_size)
-
-            # wrap the base classifier in a balanced bagging classifier
-            model = BalancedBaggingClassifier(model,
-                                              oob_score=True,
-                                              max_samples=per_bag_frac,
-                                              n_estimators=self.num_estimators,
-                                              replacement=True,
-                                              random_state=self.seed,
-                                              n_jobs=5,
-                                              verbose=self.verbose)
-
-            self.model = model.fit(self.train.x, self.train.y)
-
-            logger.info('Fold {fold_no}: best ensemble model score on an example balanced data set: '
-                        f'{model.score(self.balanced.x, self.balanced.y):.4f}')
-            model._set_oob_score(self.train.x, self.train.y)
-            logger.info(f'Fold {fold_n}: best ensemble model OOB accuracy: {model.oob_score_:.4f}')
-            logger.info(f'Fold {fold_n}: best ensemble model OOB f1-score: '
-                        f'{f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1)):.4f}')
-
-            df_plots = []
-            for n, en in enumerate(model.estimators_, start=1):
-                # get the contained instance of KerasClassifier
-                keras_clzr = en._final_estimator
-
-                logger.info(f'Fold {fold_n}: estimator {n}: best model score: '
-                            f'{keras_clzr.score(self.train.x, self.train.y):.4f}')
-
-                _df = pd.DataFrame(keras_clzr.history_) \
-                    .reset_index() \
-                    .rename(columns=ContactClassifier.column_renamer)
-                _df['estimator'] = n
-                df_plots.append(_df)
-
-            df_plots = pd.concat(df_plots)
-
-            p = (ggplot(df_plots.query('epoch>=0').melt(id_vars=['epoch', 'estimator']))
-                 + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
-                 + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6])
-                 + scale_color_discrete(name = "Estimator#"))
-            p.save(filename=os.path.join(self.output_dir,f'fold-{fold_n}_full_model.svg'),
-                   width = ContactClassifier.PAGE_WIDTH_MM,
-                   height = ContactClassifier.PAGE_HEIGHT_MM,
-                   units = "mm",
-                   verbose=False)
-
-            self.assess_predictions(f"training-{fold_n}", self.train.y, model.predict_proba(self.train.x)[:, 1])
-            if self.test is not None:
-                self.assess_predictions(f"test-{fold_n}", self.test.y, model.predict_proba(self.test.x)[:, 1])
-
-            df_folds.append(self.classify(0.95,
-                                          self.df_full_training.iloc[test_index].copy(),
-                                          table_name=None))
-
-        df_folds = pd.concat(df_folds, ignore_index=True)
-        self.write_table(df_folds, 'faceted_predictions',
-                         "final faceted predictions", index=False)
-
-    def train_full_model(self, n_jobs: int = 1) -> None:
-        """
-        Train the model on the full dataset.
-        Depending on options at instantiation-time, this model is either fit using data-augmentation
-        or a balanced bagging classifier. This is necessary as commonly there are many more negative
-        class (not an intra-cellular contact) examples and positive (is an intra-cellular contact) class
-        examples.
-
-        The model can employ callbacks to record "best model", tensorboard and early-stopping. If
-        early-stopping occurs, the best model is automatically reloaded.
-
-        The history of the optimization process is also saved to file.
-
-        :param n_jobs: Number of parallel jobs to run when the model is being trained using
-        balanced bagging only.
-        """
-        if n_jobs > 1 and not self.enable_bag:
-            logging.warning('The number of jobs is ignored when bagging is not enabled.')
-
-        tf.keras.backend.clear_session()
-
-        # always add the additional logging callback and checkpointing
-        callbacks = []
-        if self.enable_tb:
-            callbacks.append(self.tensorboard_callback())
-        if self.enable_es:
-            callbacks.append(self.earlystopping_callback('fbeta', verbose=self.verbose))
-
-        lr_scheduler = tf.keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=self.learning_rate,
-            alpha=0.1,
-            # decay smoothly until the last expected training step
-            decay_steps=len(self.train.y) // self.batch_size * self.n_epochs,
-        )
-
-        model = KerasClassifier(model=create_baseline,
-                                epochs=self.n_epochs,
-                                batch_size=self.batch_size,
-                                random_state=self.seed,
-                                verbose=self.verbose,
-                                callbacks=callbacks,
-                                hidden_layer_sizes=[self.num_nodes] * self.num_layers,
-                                learning_rate=lr_scheduler)
+        # use a capitalized tag for leading
+        cap_tag = tag.capitalize()
+        # otherwise, consistent lower case
+        tag = tag.lower()
 
         if self.enable_bag:
-
-            logging.info('Classifier training will use balanced bagging')
-
-            # The fraction of the training set to use in a bag, leaving a subset
-            # out in each bag. Out-of-bag (OOB) scoring requires that across all
-            # bags, every sample point has been left out at least once. Even with
-            # replacement, a size less than 1 is recommended otherwise the classifier
-            # will require _many_ 10s of estimators.
-            # Failure to do so will result in errors when OOB functions are called.
-            # This is adjusted by what has alrady been removed for the test set.
-            per_bag_frac = 1 - self.validation_size / (1 - self.test_size)
-
-            # wrap the base classifier in a balanced bagging classifier
-            model = BalancedBaggingClassifier(model,
-                                              oob_score=True,
-                                              max_samples=per_bag_frac,
-                                              n_estimators=self.num_estimators,
-                                              replacement=True,
-                                              random_state=self.seed,
-                                              n_jobs=n_jobs,
-                                              verbose=self.verbose)
-
-            logging.info("Beginning multi-estimator bagging model training ")
-
-            # Fit using the bagging classifier, which does not support supplying a validation data set.
-            self.model = model.fit(self.train.x, self.train.y)
-
-            # Load the best model weights and extract the history for plotting
             df_plots = []
-            for n, en in enumerate(model.estimators_, start=1):
+            for n, en in enumerate(self.model.estimators_, start=1):
                 # get the contained instance of KerasClassifier
                 keras_clzr = en._final_estimator
-
-                logger.info(f'Estimator {n}: best model score: {keras_clzr.score(self.train.x, self.train.y):.4f}')
-
+                logger.info(f'{cap_tag} - Estimator {n}: best model score: '
+                            f'{keras_clzr.score(train.x, train.y):.4f}')
                 _df = pd.DataFrame(keras_clzr.history_) \
                     .reset_index() \
-                    .rename(columns=ContactClassifier.column_renamer)
+                    .rename(columns=ContactClassifier._column_renamer)
                 _df['estimator'] = n
                 df_plots.append(_df)
 
-            logger.info('Best ensemble model score on an example balanced data set: '
-                        f'{model.score(self.balanced.x, self.balanced.y):.4f}')
-            model._set_oob_score(self.train.x, self.train.y)
-            logger.info(f'Best ensemble model OOB accuracy: {model.oob_score_:.4f}')
-            logger.info('Best ensemble model OOB f1-score: '
-                        f'{f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1)):.4f}')
+            self.model._set_oob_score(train.x, train.y)
+            logger.info(f'{cap_tag} - Best ensemble model OOB accuracy: {self.model.oob_score_:.4f}')
+            logger.info(f'{cap_tag} - Best ensemble model OOB f1-score: '
+                        f'{f1_score(train.y, np.argmax(self.model.oob_decision_function_, axis=1)):.4f}')
 
             # combine the results of all the estimators
             df_plots = pd.concat(df_plots)
+            plt = (ggplot(df_plots.query('epoch>=0').melt(id_vars=['epoch', 'estimator']))
+                   + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
+                   + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6])
+                   + scale_color_discrete(name = "Estimator#"))
+        else:
+            # plot history of the single estimator
+            df_plot = ContactClassifier._transform_history(self.model)
+            plt = (ggplot(df_plot.query('epoch>=0').melt(id_vars=['epoch', 'data_set']))
+                   + geom_line(aes(x='epoch', y='value', color='data_set'))
+                   + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
 
-            p = (ggplot(df_plots.query('epoch>=0').melt(id_vars=['epoch', 'estimator']))
-                 + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
-                 + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6])
-                 + scale_color_discrete(name = "Estimator#"))
-            p.save(filename=os.path.join(self.output_dir,'full_model.svg'),
-                   width = ContactClassifier.PAGE_WIDTH_MM,
-                   height = ContactClassifier.PAGE_HEIGHT_MM,
-                   units = "mm",
-                   verbose=False)
+        plt.save(filename=os.path.join(self.output_dir, f'model_training_history_{tag}.svg'),
+                 width = ContactClassifier._PAGE_WIDTH_MM,
+                 height = ContactClassifier._PAGE_HEIGHT_MM,
+                 units = "mm",
+                 verbose=False)
 
+        pr_train = self.model.predict_proba(train.x)[:, 1]
+        self.assess_predictions(f'{tag}_training', train.y, pr_train)
+        if test is not None:
+            self.assess_predictions(f'{tag}_test', test.y, self.model.predict_proba(test.x)[:, 1])
+        if self.val is not None:
+            self.assess_predictions(f'{tag}_validation', val.y, self.model.predict_proba(val.x)[:, 1])
+
+    def fit(self, train: DataSet, validation: Optional[DataSet]=None) -> None:
+        """
+        Trains the configured model on the prepared dataset.
+
+        This is the primary training method. It orchestrates data preparation,
+        model building, and training, handling both the standard and bagging cases.
+        The final trained model is stored in `self.model`.
+        :param train: The DataSet object containing the training data used in model fitting.
+        :param validation: Optional DataSet object containing validation data.
+        :return: None
+        """
+        logger.info("Initiating model training process.")
+
+        tf.keras.backend.clear_session()
+
+        model = self._build_model()
+
+        if self.enable_bag:
+            logging.info("Beginning multi-estimator bagging model training ")
+            self.history = model.fit(train.x, train.y)
+            model._set_oob_score(train.x, train.y)
         else:
             logging.info("Beginning conventional model training")
-
-            # Just fit using the KerasClassifier instance alone, include validation data.
-            # adding ignore of the following erroneous warning about incorrect type to validation_data
+            # validation_data is supplied correctly, disabling warning
             # noinspection PyTypeChecker
-            self.model = model.fit(self.train.x, self.train.y,
-                                   validation_data=(self.val.x, self.val.y[:, np.newaxis]))
+            self.history = model.fit(train.x, train.y,
+                                     validation_data=(validation.x, validation.y[:, np.newaxis]))
 
-            logger.info(f'Best model score on balanced dataset: {model.score(self.balanced.x, self.balanced.y):.4f}')
+        self.model = model
+        logger.info("Model training complete.")
 
-            # plot history of the single estimator
-            df_plot = ContactClassifier._transform_history(model)
-            p = (ggplot(df_plot.query('epoch>=0').melt(id_vars=['epoch', 'data_set']))
-                 + geom_line(aes(x='epoch', y='value', color='data_set'))
-                 + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
-            p.save(filename=os.path.join(self.output_dir,'full_model.svg'),
-                   width = ContactClassifier.PAGE_WIDTH_MM,
-                   height = ContactClassifier.PAGE_HEIGHT_MM,
-                   units = "mm",
-                   verbose=False)
-
-        # plot combined F1, P, R curves for training and test data if used.
-        pr_train = model.predict_proba(self.train.x)[:, 1]
-        self.assess_predictions('training', self.train.y, pr_train)
-
-        if self.test is not None:
-            self.assess_predictions('test', self.test.y, model.predict_proba(self.test.x)[:, 1])
-        if self.val is not None:
-            self.assess_predictions('validation', self.val.y, model.predict_proba(self.val.x)[:, 1])
-
-    @staticmethod
-    def _transform_history(model: scikeras.wrappers.KerasClassifier) -> pd.DataFrame:
+    def predict(self, samples: npt.NDArray) -> npt.NDArray:
         """
-        Transforms and prepares the model's history data for plotting.
+        Classifies input samples using a pre-trained model and returns the classification results.
+        This method computes the probability of each sample belonging to a specific class using the
+        trained model. It then applies a decision boundary to classify the samples based on a specified
+        threshold precision. The results include both the computed probabilities and the classification labels.
 
-        :param model: The model object with a recorded history.
-        :return: A pandas DataFrame containing combined training and validation data with
-           set type labels.
+        :param samples: A 2D array representing the input samples to be classified. Each row corresponds
+            to a sample, and columns correspond to feature values required for prediction.
+        :return: A structured array containing the probability scores and classification labels for the
+            input samples. The first field of the array contains the probability scores, and the second field
+            contains the classification labels (boolean).
+        :raises AssertionError: If the model is not trained prior to calling this function or if the shape
+            of the samples array does not match the expected number of features.
+        :raises ValueError: If the prediction contains NaN values.
         """
-        df_plot = pd.DataFrame(model.history_).reset_index().rename(columns={"index": "epoch"})
-        # without leading val_, assume calculated from the training set
-        _tra = df_plot.loc[:, ~df_plot.columns.str.startswith("val_") | (df_plot.columns == "epoch")].copy()
-        _tra["data_set"] = "training"
-        # with leading val_, assume calculated from the validation set
-        _val = df_plot.loc[:, df_plot.columns.str.startswith("val_") | (df_plot.columns == "epoch")].copy()
-        _val["data_set"] = "validation"
-        _val.columns = _val.columns.str.replace('val_', '')
-        return pd.concat([_val, _tra])
+        assert self.model is not None, 'Model has not been trained. Please call .fit() first.'
+        assert samples.shape[1] == len(ContactClassifier._FIT_VARS), \
+            'The supplied samples array does not contain the correct number of features.'
+
+        logger.info(f"Classifying {len(samples)} samples.")
+        result = np.zeros(shape=len(samples),
+                          dtype=ContactClassifier._PREDICT_DTYPE)
+
+        scor_col = ContactClassifier._PREDICT_DTYPE.names[0]
+        clzz_col = ContactClassifier._PREDICT_DTYPE.names[1]
+        bndr_col = ContactClassifier._PREDICT_DTYPE.names[2]
+
+        prob_intra = self.model.predict_proba(samples)[:, 1]
+        if np.any(np.isnan(prob_intra)):
+            msg = f'There were {np.isnan(prob_intra).sum()} NaNs in the prediction result'
+            logger.error(msg)
+            raise ValueError(msg)
+
+        result[scor_col] = prob_intra
+        # determine the decision boundary for classification.
+        boundary = self.compute_decision_boundary('test', self.threshold)
+        logger.info(f"Applying decision boundary at p > {boundary:.4f}")
+        # apply it to the newly scored samples, tweak and reorder the table.
+        result[clzz_col] = result[scor_col] > boundary
+        result[bndr_col] = boundary
+        return result
+
+    def get_cross_validated_labelled_predictions(self, k_folds: int=5) -> pd.DataFrame:
+        """
+        Performs k-fold cross-validation on the complete labelled set (that is used for model
+        training) so as to generate unbiased predictions.
+
+        To do so, it splits the labelled set into k non-overlapping sets (k folds). A single
+        fold is then held-out while the remainder is used to train the model. The model is then
+        used to predict classes on the held-out fold. The process is repeated for each fold.
+
+        The methods supports both the standard KerasClassifier and BalancedBaggingClassifier
+        models. Keep in mind that calculation of the BalancedBaggingClassifier is computationally
+        much more demanding (but tractable).
+
+        :param k_folds: The number of folds to use for cross-validation.
+        :return: A DataFrame containing the original training data with an added
+                 'intracellular_score_cv' column.
+        """
+        logger.info(f'Obtaining {k_folds}-fold cross-validated classification of the labelled data.')
+
+        k_splitter = (StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=self.seed)
+                      .split(self.labelled.x, self.labelled.y))
+
+        predictions = np.zeros(shape=len(self.labelled.x),
+                               dtype=ContactClassifier._PREDICT_DTYPE)
+
+        for fold_n, (train_index, test_index) in enumerate(k_splitter, 1):
+            logger.info(f'--- Processing Fold {fold_n}/{k_folds} ---')
+
+            # use the (n-1) folds as training data.
+            self.train = DataSet(self.labelled.x[train_index, :], self.labelled.y[train_index])
+            # the nth fold will be held out for unbiased classification.
+            self.test = DataSet(self.labelled.x[test_index, :], self.labelled.y[test_index])
+
+            # When not bagging additional work is required.
+            # 1. balance the training set of (n-1)-folds
+            # 2. split off a piece of this balanced set to become the validation data
+            if not self.enable_bag:
+                self.train = self._balance_data(self.train)
+                # adjust the fraction based on what has already
+                # been removed as the "test" set.
+                val_frac = self.validation_size / (1 - 1/k_folds)
+                x_train, x_val, y_train, y_val = train_test_split(self.train.x, self.train.y,
+                                                                   test_size=val_frac,
+                                                                   shuffle=True,
+                                                                   stratify=self.train.y,
+                                                                   random_state=self.seed)
+                self.train, self.val = DataSet(x_train, y_train), DataSet(x_val, y_val)
+
+            self.fit(self.train, validation=self.val)
+            self.report_and_plot(f'fold_{fold_n}', self.train, self.test, self.val)
+            predictions[test_index] = self.predict(self.test.x)
+
+        logger.info('Cross-validation complete.')
+        return self.df_labelled.join(pd.DataFrame(predictions), validate='1:1')
+
+    def get_unlabelled_predictions(self) -> pd.DataFrame:
+        """
+        Retrieves predictions for unlabelled data by performing model fitting
+        on training data and generating a report and plot for validation.
+
+        :return: A DataFrame containing the unlabelled data joined with
+            the predicted values.
+        """
+        logger.info('Obtaining classification of the unlabelled data.')
+        train, test, val = self._get_datasets(self.labelled)
+        self.fit(train, validation=val)
+        self.report_and_plot('complete', train, test, val)
+        predictions = self.predict(self.unlabelled.x)
+        logger.info("Unlabelled classification complete.")
+        return self.df_unlabelled.join(pd.DataFrame(predictions), validate='1:1')
 
     def plot_precision_recall_curve(self,
                                     file_name: str,
@@ -997,22 +1123,34 @@ class ContactClassifier(object):
                                     recall: np.ndarray,
                                     f1_scores: np.ndarray,
                                     pr_threshold: np.ndarray) -> None:
+        """
+        Plots the Precision-Recall curve with F1 scores and saves the plot to the specified file. This function
+        creates a visualization of Precision, Recall, and F1-Score metrics as they vary with the predicted
+        probability. The resulting plot is saved as an SVG file in the defined output directory.
+
+        :param file_name: The name of the output file to save the plot.
+        :param precision: An array of precision values.
+        :param recall: An array of recall values.
+        :param f1_scores: An array of F1-score values.
+        :param pr_threshold: An array of threshold values for the Precision-Recall curve.
+        :return: None
+        """
 
         df_plot = pd.DataFrame({'Precision': precision,
                                 'Recall': recall,
                                 'F1-score': f1_scores,
                                 'Pr_threshold': pr_threshold})
-        p = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
-             + geom_line()
-             + scale_x_continuous(breaks=np.arange(0, 1.01, 0.1))
-             + scale_y_continuous(breaks=np.arange(0, 1.01, 0.1))
-             + theme(figure_size=[10,8]))
+        plt = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
+               + geom_line()
+               + scale_x_continuous(breaks=np.arange(0, 1.01, 0.1))
+               + scale_y_continuous(breaks=np.arange(0, 1.01, 0.1))
+               + theme(figure_size=[10,8]))
 
-        p.save(filename=os.path.join(self.output_dir, file_name),
-               width=ContactClassifier.PAGE_WIDTH_MM,
-               height=ContactClassifier.PAGE_HEIGHT_MM,
-               units="mm",
-               verbose=False)
+        plt.save(filename=os.path.join(self.output_dir, file_name),
+                 width=ContactClassifier._PAGE_WIDTH_MM,
+                 height=ContactClassifier._PAGE_HEIGHT_MM,
+                 units="mm",
+                 verbose=False)
 
     @staticmethod
     def compute_f1_curve(y_true: np.ndarray,
@@ -1045,7 +1183,9 @@ class ContactClassifier(object):
     @staticmethod
     def find_simple_maximum(x: np.ndarray, y: np.ndarray) -> (float, float):
         """
-        Find the maximum value of y and the corresponding x value, using simple means without interpolation.
+        Find the maximum value of y and the corresponding x value, using simple means
+        without interpolation.
+
         :param x: Independent variable.
         :param y: Dependent variable.
         :return: "X at maximum y", "y max".
@@ -1118,50 +1258,145 @@ class ContactClassifier(object):
                     f'is achieved when the probability threshold is {decision_boundary:.4g} ')
         return decision_boundary
 
-    def classify(self, precision_thres: float,
-                 df: pd.DataFrame=None,
-                 table_name: Optional[str]='predictions') -> pd.DataFrame:
-        """
-        Apply the trained model to the data and write the predictions to a file.
-
-        :param precision_thres: Estimated precision at which to classify intra-cellular contacts.
-        :param df: Optional dataframe -- if not supplied, use the complete dataset supplied at instantiation.
-        :param table_name: Optional table name -- if not supplied, use the default table name. If None, do not
-        write an output file.
-        :return: Updated dataframe with the column of probabilities.
-        """
-        assert self.model is not None, 'Model has not been trained.'
-
-        # use the instance data if not supplied
-        if df is None:
-            df = self.df_complete.copy()
-
-        # extract features and predict classes
-        x = ContactClassifier._extract_x(df)
-        df['intracellular_score'] = self.model.predict_proba(x)[:, 1]
-
-        # Given the user-requested precision threshold, compute the decision boundary
-        # in terms of a probability threshold.
-        if precision_thres is not None:
-            assert self.test_size is not None and self.test_size > 0, \
-                'Computing a decision boundary requires a test set was set aside in training'
-
-            boundary = self.compute_decision_boundary('test', precision_thres)
-
-            # Use this threshold as a decision boundary on whether a contact is intracellular.
-            df = df.assign(is_intracellular = lambda x: x.intracellular_score > boundary)
-            # rename the original column to reduce confusion
-            df = df.rename(columns={'intra': 'intracluster'})
-            # reorder the table so that all the contacts for a given sequence are
-            # adjacent rows, but give precedence to the greatest number of contacts.
-            df = df.sort_values(['seq', 'contacts'], ascending=[True, False])
-            if table_name is not None:
-                self.write_table(df, table_name, 'final predictions', index=False)
-
-        return df
+# def train_full_model(self, n_jobs: int = 1) -> None:
+#     """
+#     Train the model on the full dataset.
+#     Depending on options at instantiation-time, this model is either fit using data-augmentation
+#     or a balanced bagging classifier. This is necessary as commonly there are many more negative
+#     class (not an intra-cellular contact) examples and positive (is an intra-cellular contact) class
+#     examples.
+#
+#     The model can employ callbacks to record "best model", tensorboard and early-stopping. If
+#     early-stopping occurs, the best model is automatically reloaded.
+#
+#     The history of the optimization process is also saved to file.
+#
+#     :param n_jobs: Number of parallel jobs to run when the model is being trained using
+#     balanced bagging only.
+#     """
+#     if n_jobs > 1 and not self.enable_bag:
+#         logging.warning('The number of jobs is ignored when bagging is not enabled.')
+#
+#     tf.keras.backend.clear_session()
+#
+#     # always add the additional logging callback and checkpointing
+#     callbacks = []
+#     if self.enable_tb:
+#         callbacks.append(self.tensorboard_callback())
+#     if self.enable_es:
+#         callbacks.append(self.earlystopping_callback('fbeta', verbose=self.verbose))
+#
+#     lr_scheduler = tf.keras.optimizers.schedules.CosineDecay(
+#         initial_learning_rate=self.learning_rate,
+#         alpha=0.1,
+#         # decay smoothly until the last expected training step
+#         decay_steps=len(self.train.y) // self.batch_size * self.n_epochs,
+#     )
+#
+#     model = KerasClassifier(model=create_baseline,
+#                             epochs=self.n_epochs,
+#                             batch_size=self.batch_size,
+#                             random_state=self.seed,
+#                             verbose=self.verbose,
+#                             callbacks=callbacks,
+#                             hidden_layer_sizes=[self.num_nodes] * self.num_layers,
+#                             learning_rate=lr_scheduler)
+#
+#     if self.enable_bag:
+#
+#         logging.info('Classifier training will use balanced bagging')
+#
+#         # The fraction of the training set to use in a bag, leaving a subset
+#         # out in each bag. Out-of-bag (OOB) scoring requires that across all
+#         # bags, every sample point has been left out at least once. Even with
+#         # replacement, a size less than 1 is recommended otherwise the classifier
+#         # will require _many_ 10s of estimators.
+#         # Failure to do so will result in errors when OOB functions are called.
+#         # This is adjusted by what has alrady been removed for the test set.
+#         per_bag_frac = 1 - self.validation_size / (1 - self.test_size)
+#
+#         # wrap the base classifier in a balanced bagging classifier
+#         model = BalancedBaggingClassifier(model,
+#                                           oob_score=True,
+#                                           max_samples=per_bag_frac,
+#                                           n_estimators=self.num_estimators,
+#                                           replacement=True,
+#                                           random_state=self.seed,
+#                                           n_jobs=n_jobs,
+#                                           verbose=self.verbose)
+#
+#         logging.info("Beginning multi-estimator bagging model training ")
+#
+#         # Fit using the bagging classifier, which does not support supplying a validation data set.
+#         self.model = model.fit(self.train.x, self.train.y)
+#
+#         # Load the best model weights and extract the history for plotting
+#         df_plots = []
+#         for n, en in enumerate(model.estimators_, start=1):
+#             # get the contained instance of KerasClassifier
+#             keras_clzr = en._final_estimator
+#
+#             logger.info(f'Estimator {n}: best model score: {keras_clzr.score(self.train.x, self.train.y):.4f}')
+#
+#             _df = pd.DataFrame(keras_clzr.history_) \
+#                 .reset_index() \
+#                 .rename(columns=ContactClassifier.column_renamer)
+#             _df['estimator'] = n
+#             df_plots.append(_df)
+#
+#         logger.info('Best ensemble model score on an example balanced data set: '
+#                     f'{model.score(self.balanced.x, self.balanced.y):.4f}')
+#         model._set_oob_score(self.train.x, self.train.y)
+#         logger.info(f'Best ensemble model OOB accuracy: {model.oob_score_:.4f}')
+#         logger.info('Best ensemble model OOB f1-score: '
+#                     f'{f1_score(self.train.y, np.argmax(model.oob_decision_function_, axis=1)):.4f}')
+#
+#         # combine the results of all the estimators
+#         df_plots = pd.concat(df_plots)
+#
+#         plt = (ggplot(df_plots.query('epoch>=0').melt(id_vars=['epoch', 'estimator']))
+#                + geom_line(aes(x='epoch', y='value', group='estimator',color='factor(estimator)'))
+#                + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6])
+#                + scale_color_discrete(name = "Estimator#"))
+#         plt.save(filename=os.path.join(self.output_dir,'full_model.svg'),
+#                  width = ContactClassifier.PAGE_WIDTH_MM,
+#                  height = ContactClassifier.PAGE_HEIGHT_MM,
+#                  units = "mm",
+#                  verbose=False)
+#
+#     else:
+#         logging.info("Beginning conventional model training")
+#
+#         # Just fit using the KerasClassifier instance alone, include validation data.
+#         # adding ignore of the following erroneous warning about incorrect type to validation_data
+#         # noinspection PyTypeChecker
+#         self.model = model.fit(self.train.x, self.train.y,
+#                                validation_data=(self.val.x, self.val.y[:, np.newaxis]))
+#
+#         logger.info(f'Best model score on balanced dataset: {model.score(self.balanced.x, self.balanced.y):.4f}')
+#
+#         # plot history of the single estimator
+#         df_plot = ContactClassifier._transform_history(model)
+#         plt = (ggplot(df_plot.query('epoch>=0').melt(id_vars=['epoch', 'data_set']))
+#                + geom_line(aes(x='epoch', y='value', color='data_set'))
+#                + facet_wrap('~ variable', scales='free') + theme(figure_size=[10,6]))
+#         plt.save(filename=os.path.join(self.output_dir,'full_model.svg'),
+#                  width = ContactClassifier.PAGE_WIDTH_MM,
+#                  height = ContactClassifier.PAGE_HEIGHT_MM,
+#                  units = "mm",
+#                  verbose=False)
+#
+#     # plot combined F1, P, R curves for training and test data if used.
+#     pr_train = model.predict_proba(self.train.x)[:, 1]
+#     self.assess_predictions('training', self.train.y, pr_train)
+#
+#     if self.test is not None:
+#         self.assess_predictions('test', self.test.y, model.predict_proba(self.test.x)[:, 1])
+#     if self.val is not None:
+#         self.assess_predictions('validation', self.val.y, model.predict_proba(self.val.x)[:, 1])
 
 # def hp_tuning(self):
-    #
+#
     #     from tensorboard.plugins.hparams import api as hp
     #
     #     X, y, X_aug, y_aug = self.apply_imbalanced_data_augmentation()
