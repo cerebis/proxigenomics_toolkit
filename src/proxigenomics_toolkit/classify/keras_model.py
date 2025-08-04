@@ -1,9 +1,10 @@
 import itertools
+import json
 import logging
 import os
 import re
-from collections import OrderedDict
-from typing import Any, ClassVar, Dict, List, NamedTuple, Optional, Tuple
+from collections import OrderedDict, defaultdict
+from typing import Any, ClassVar, Dict, Generator, List, NamedTuple, Optional, Tuple
 
 import keras
 import numpy as np
@@ -28,7 +29,7 @@ from plotnine import (
 from scikeras.wrappers import KerasClassifier
 from scipy.interpolate import CubicSpline
 from scipy.optimize import brentq
-from sklearn.metrics import f1_score, precision_recall_curve
+from sklearn.metrics import f1_score, precision_recall_curve, precision_score, recall_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.losses import BinaryCrossentropy
@@ -57,6 +58,69 @@ class DataSet(NamedTuple):
     """
     x: np.ndarray
     y: np.ndarray
+
+class TVStratifiedKFold(StratifiedKFold):
+    """
+    A K-fold cross-validator that yields indices for training, validation,
+    and testing sets.
+
+    In each split, one fold is used for testing, the next fold for validation,
+    and the remaining K-2 folds are used for training.
+
+    Parameters
+    ----------
+    n_splits : int, default=5
+        Number of folds. Must be at least 3.
+
+    random_state : int, RandomState instance or None, default=None
+        Controls the randomness of the fold shuffling.
+    """
+    def __init__(self, n_splits: int, random_state: np.random.RandomState|int) -> None:
+        """
+        Initializes the instance of this class, setting up the number of splits and
+        random state required for its internal functioning. Inherits behavior from
+        the parent class constructor. Also, initializes internal attributes that
+        handle information related to folds.
+
+        :param n_splits: Number of folds to create for the splitting process
+        :type n_splits: int
+        :param random_state: Controls the randomness of the split
+        :type random_state: int or None
+        """
+        if n_splits < 3:
+            raise ValueError("n_splits must be at least 3 for train/validation/test split.")
+        super().__init__(n_splits, random_state=random_state, shuffle=True)
+        self.fold_indices = None
+
+    def split(self,
+              x: np.ndarray,
+              y: np.ndarray,
+              groups: Optional[object]=None) -> Generator[Tuple[np.ndarray, np.ndarray, np.ndarray], None, None]:
+        """
+        Splits data into training, testing, and validation sets for a given number of splits.
+
+        The method ensures that for each split, a portion of the dataset is allocated
+        to training, testing, and validation subsets. The process is cyclical, ensuring
+        the dataset is evenly distributed across the splits for each subset. If `fold_indices`
+        are not precomputed, they are computed only once and reused across iterations.
+
+        :param x: Data to be split.
+        :param y: Target labels corresponding to the data.
+        :param groups: unused compatibility argument.
+        :return: A generator that yields tuples of three numpy arrays:
+                 - training indices
+                 - testing indices
+                 - validation indices
+        """
+        if self.fold_indices is None:
+            self.fold_indices = [yi for xi, yi in super().split(x, y)]
+        for i in range(self.n_splits):
+            test = self.fold_indices[i]
+            j = (i + 1) % self.n_splits
+            validate = self.fold_indices[j]
+            train = np.hstack([self.fold_indices[k] for k in set(range(self.n_splits)) - {i, j}])
+            yield np.sort(train), test, validate
+
 
 @tf.keras.utils.register_keras_serializable()
 class StatefulBinaryFBeta(Metric):
@@ -276,7 +340,7 @@ def create_baseline(hidden_layer_sizes: List[int],
                   metrics=['accuracy',
                            Precision(),
                            Recall(),
-                           StatefulBinaryFBeta(beta=1.0),
+                           StatefulBinaryFBeta(beta=0.5),
                            'binary_crossentropy'])
     return model
 
@@ -450,8 +514,6 @@ class ContactClassifier(object):
         self.labelled = None
         # complete unlabelled dataset
         self.unlabelled = None
-        # the balanced dataset using undersampling
-        self.balanced = None
         # split datasets
         self.train = None
         self.test = None
@@ -462,6 +524,37 @@ class ContactClassifier(object):
         keras.utils.set_random_seed(self.seed)
         # prepare the training and possibly test dataset(s)
         self._prepare_primary_data()
+        self.metadata = {}
+
+    def reset_metadata(self) -> None:
+        """
+        Resets the metadata of the object by clearing its contents.
+
+        This method sets the metadata attribute to an empty list, effectively removing
+        all previously stored metadata. Use this method when a fresh start or a reset
+        of the metadata is required.
+
+        :return: None
+        """
+        self.metadata = {}
+
+    def write_metadata(self, run_name: str) -> None:
+        """
+        Writes metadata to a JSON file in the specified output directory.
+
+        This method takes the metadata stored in the ``self.metadata``
+        attribute and writes it to a JSON file named "metadata.json"
+        in the directory specified by the ``self.output_dir`` attribute.
+
+        :param run_name: The name of the run for which the metadata is being written.
+        :raises FileNotFoundError: If the specified output directory does not exist.
+        :raises IOError: If there is an issue writing the file.
+        :return: None
+        """
+        output_path = os.path.join(self.output_dir, f"{run_name}_metadata.json")
+        logger.info(f"Writing metadata for {run_name} to {output_path}")
+        with open(output_path, 'w') as f_out:
+            json.dump(self.metadata, f_out)
 
     @staticmethod
     def _get_output_path(parent_dir: str, table_name: str) -> str:
@@ -679,34 +772,26 @@ class ContactClassifier(object):
         self.unlabelled = DataSet(ContactClassifier._extract_x(self.df_unlabelled),
                                   ContactClassifier._extract_y(self.df_unlabelled))
 
-    def _get_datasets(self, dataset: DataSet) -> Tuple[DataSet, DataSet, DataSet|None]:
+    def _get_datasets(self, dataset: DataSet) -> Tuple[DataSet, DataSet, DataSet]:
         """
-        Splits the input dataset into training, testing, and optionally validation sets
-        based on the class settings. If `enable_bag` is set to True, only training
-        and testing sets are returned. When `enable_bag` is False, the dataset is
-        balanced first, and then split into training, testing, and validation sets.
+        Splits the input dataset into training, testing, and validation sets. If `enable_bag` is set to False,
+        also balance the training set. only training
 
         :param dataset: Input dataset to be processed and split.
         :type dataset: DataSet
         :return: A tuple containing train, test, and validation datasets, where val is None
           if enable_bag is True.
-        :rtype: Tuple[DataSet, DataSet, DataSet|None]
+        :rtype: Tuple[DataSet, DataSet, DataSet]
         """
+        # Split into training, test, and validation sets
+        self.train, self.test, self.val = ContactClassifier._split_dataset(dataset,
+                                                                           test_size=self.test_size,
+                                                                           validation_size=self.validation_size,
+                                                                           seed=self.seed)
+        if not self.enable_bag:
+            # balance the training set for non-bagging classifier
+            self.train = self._balance_data(self.train)
 
-        if self.enable_bag:
-            # Only train and test. Bagging internally handles balancing.
-            self.val = None
-            self.train, self.test = ContactClassifier._split_dataset(dataset,
-                                                                     test_size=self.test_size,
-                                                                     seed=self.seed)
-        else:
-            # First balance the labels
-            self.balanced = self._balance_data(dataset)
-            # Split into training, test, and validation sets
-            self.train, self.test, self.val = ContactClassifier._split_dataset(self.balanced,
-                                                                               test_size=self.test_size,
-                                                                               validation_size=self.validation_size,
-                                                                               seed=self.seed)
         return self.train, self.test, self.val
 
     def _tensorboard_callback(self) -> tf.keras.callbacks.Callback:
@@ -846,6 +931,7 @@ class ContactClassifier(object):
             "train": "{}",
             "intracellular_score": "{:0.5f}",
             "is_intracellular": "{}",
+            "boundary": "{:0.5f}",
         })
 
         # first, if "intra" exists as a column, rename it something
@@ -930,21 +1016,31 @@ class ContactClassifier(object):
 
         if self.enable_bag:
             df_plots = []
+            estim_md = defaultdict(list)
             for n, en in enumerate(self.model.estimators_, start=1):
                 # get the contained instance of KerasClassifier
                 keras_clzr = en._final_estimator
-                logger.info(f'{cap_tag} - Estimator {n}: best model score: '
-                            f'{keras_clzr.score(train.x, train.y):.4f}')
+                best_score = keras_clzr.score(train.x, train.y)
+                estim_md['estimator_score'].append(f'{best_score:.4f}')
+                estim_md['estimator_precision'].append(f'{precision_score(train.y, keras_clzr.predict(train.x)):.4f}')
+                estim_md['estimator_recall'].append(f'{recall_score(train.y, keras_clzr.predict(train.x)):.4f}')
+                estim_md['estimator_f1'].append(f'{f1_score(train.y, keras_clzr.predict(train.x)):.4f}')
+
+                logger.info(f'{cap_tag} - Estimator {n}: best model score: {best_score:.4f}')
                 _df = pd.DataFrame(keras_clzr.history_) \
                     .reset_index() \
                     .rename(columns=ContactClassifier._column_renamer)
                 _df['estimator'] = n
                 df_plots.append(_df)
 
+            self.metadata.update(estim_md)
+
             self.model._set_oob_score(train.x, train.y)
+            self.metadata['oob_score'] = f'{self.model.oob_score_:.4f}'
             logger.info(f'{cap_tag} - Best ensemble model OOB accuracy: {self.model.oob_score_:.4f}')
-            logger.info(f'{cap_tag} - Best ensemble model OOB f1-score: '
-                        f'{f1_score(train.y, np.argmax(self.model.oob_decision_function_, axis=1)):.4f}')
+            oob_f1 = f1_score(train.y, np.argmax(self.model.oob_decision_function_, axis=1))
+            self.metadata['oob_f1'] = f'{oob_f1:.4f}'
+            logger.info(f'{cap_tag} - Best ensemble model OOB f1-score: {oob_f1:.4f}')
 
             # combine the results of all the estimators
             df_plots = pd.concat(df_plots)
@@ -1003,15 +1099,21 @@ class ContactClassifier(object):
         self.model = model
         logger.info("Model training complete.")
 
-    def predict(self, samples: npt.NDArray) -> npt.NDArray:
+    def predict(self, samples: npt.NDArray, decision_set: str='validation') -> npt.NDArray:
         """
         Classifies input samples using a pre-trained model and returns the classification results.
         This method computes the probability of each sample belonging to a specific class using the
         trained model. It then applies a decision boundary to classify the samples based on a specified
         threshold precision. The results include both the computed probabilities and the classification labels.
 
+        Assuming there are three sets, the decision boundary should be determined on either "test" or "validation",
+        and that set should not be the source of the samples array. i.e. decision=test, predict=validation or
+        visa versa.
+
         :param samples: A 2D array representing the input samples to be classified. Each row corresponds
             to a sample, and columns correspond to feature values required for prediction.
+        :param decision_set: The set that will be used to determine the decision boundary used ib classification. This
+            should be a set NOT used in training nor used again for prediction.
         :return: A structured array containing the probability scores and classification labels for the
             input samples. The first field of the array contains the probability scores, and the second field
             contains the classification labels (boolean).
@@ -1039,7 +1141,7 @@ class ContactClassifier(object):
 
         result[scor_col] = prob_intra
         # determine the decision boundary for classification.
-        boundary = self.compute_decision_boundary('test', self.threshold)
+        boundary = self.compute_decision_boundary(decision_set, self.threshold)
         logger.info(f"Applying decision boundary at p > {boundary:.4f}")
         # apply it to the newly scored samples, tweak and reorder the table.
         result[clzz_col] = result[scor_col] > boundary
@@ -1064,39 +1166,47 @@ class ContactClassifier(object):
                  'intracellular_score_cv' column.
         """
         logger.info(f'Obtaining {k_folds}-fold cross-validated classification of the labelled data.')
+        logger.info(f'The fractional set sizes will be: training={(k_folds-2)//k_folds:.2f}%, '
+                    f'validation/test={1//k_folds:.2f}%')
 
-        k_splitter = (StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=self.seed)
+        # Training, Test, and Validation sets adapted from K-fold.
+        k_splitter = (TVStratifiedKFold(n_splits=k_folds, random_state=self.seed)
                       .split(self.labelled.x, self.labelled.y))
 
         predictions = np.zeros(shape=len(self.labelled.x),
                                dtype=ContactClassifier._PREDICT_DTYPE)
 
-        for fold_n, (train_index, test_index) in enumerate(k_splitter, 1):
+        self.metadata['bagging'] = self.enable_bag
+
+        fold_info = defaultdict(list)
+        for fold_n, (train_index, test_index, val_index) in enumerate(k_splitter, 1):
             logger.info(f'--- Processing Fold {fold_n}/{k_folds} ---')
 
-            # use the (n-1) folds as training data.
-            self.train = DataSet(self.labelled.x[train_index, :], self.labelled.y[train_index])
-            # the nth fold will be held out for unbiased classification.
-            self.test = DataSet(self.labelled.x[test_index, :], self.labelled.y[test_index])
+            fold_info['train_size'].append(len(train_index))
+            fold_info['test_size'].append(len(test_index))
+            fold_info['val_size'].append(len(val_index))
 
-            # When not bagging additional work is required.
-            # 1. balance the training set of (n-1)-folds
-            # 2. split off a piece of this balanced set to become the validation data
+            # (n-2) folds are used as training data.
+            self.train = DataSet(self.labelled.x[train_index, :], self.labelled.y[train_index])
+            # 1 fold each for test and validation
+            self.test = DataSet(self.labelled.x[test_index, :], self.labelled.y[test_index])
+            self.val = DataSet(self.labelled.x[val_index, :], self.labelled.y[val_index])
+
+            fold_info['positive_frac'].append(f'{self.train.y.sum() / len(self.train.y):.5g}')
+
             if not self.enable_bag:
+                # balance only the training data.
                 self.train = self._balance_data(self.train)
-                # adjust the fraction based on what has already
-                # been removed as the "test" set.
-                val_frac = self.validation_size / (1 - 1/k_folds)
-                x_train, x_val, y_train, y_val = train_test_split(self.train.x, self.train.y,
-                                                                   test_size=val_frac,
-                                                                   shuffle=True,
-                                                                   stratify=self.train.y,
-                                                                   random_state=self.seed)
-                self.train, self.val = DataSet(x_train, y_train), DataSet(x_val, y_val)
+                fold_info['balanced_size'].append(len(self.train.x))
+                fold_info['balanced_postive_frac'].append(self.train.y.sum() / len(self.train.y))
 
             self.fit(self.train, validation=self.val)
             self.report_and_plot(f'fold_{fold_n}', self.train, self.test, self.val)
             predictions[test_index] = self.predict(self.test.x)
+
+        self.metadata.update(fold_info)
+        self.write_metadata('crossvalidated')
+        self.reset_metadata()
 
         logger.info('Cross-validation complete.')
         return self.df_labelled.join(pd.DataFrame(predictions), validate='1:1')
@@ -1110,11 +1220,21 @@ class ContactClassifier(object):
             the predicted values.
         """
         logger.info('Obtaining classification of the unlabelled data.')
+
+        self.metadata['bagging'] = self.enable_bag
+
         train, test, val = self._get_datasets(self.labelled)
+        self.metadata['balanced_size'] = len(self.train.x)
+        self.metadata['balanced_postive_frac'] = f'{self.train.y.sum() / len(self.train.y):.5g}'
+
         self.fit(train, validation=val)
-        self.report_and_plot('complete', train, test, val)
+        self.report_and_plot('unlabelled', train, test, val)
         predictions = self.predict(self.unlabelled.x)
-        logger.info("Unlabelled classification complete.")
+
+        self.write_metadata('unlabelled')
+        self.reset_metadata()
+
+        logger.info('Unlabelled classification complete.')
         return self.df_unlabelled.join(pd.DataFrame(predictions), validate='1:1')
 
     def plot_precision_recall_curve(self,
@@ -1252,8 +1372,15 @@ class ContactClassifier(object):
                      f'(pr,Rec)=({thres[recall.argmax()]:.4g}, {recall.max():.5g}), '
                      f'(pr,F1)=({thres[f1_scores.argmax()]:.4g}, {f1_scores.max():.5g})')
 
+        # add various scores to metadata run log
+        for nm, arr in [('precision', precision), ('recall', recall), ('f1_score', f1_scores)]:
+            self.metadata[f'{set_name}_{nm}_max'] = f'({thres[arr.argmax()]:.4g}, {arr.max():.5g})'
+
         decision_boundary = find_root(thres, precision - precision_threshold)
         assert decision_boundary is not None, 'The specified precision threshold was not reachable'
         logger.info(f'For set \"{set_name}\": the requested precision of {precision_threshold:.4g} '
                     f'is achieved when the probability threshold is {decision_boundary:.4g} ')
+        self.metadata['precision_threshold'] = f'{precision_threshold:.4g}'
+        self.metadata[f'{set_name}_decision_boundary'] = f'{decision_boundary:.4g}'
+
         return decision_boundary
