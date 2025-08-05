@@ -180,16 +180,6 @@ def test_adhoc_order(community_graph):
 
 
 @pytest.fixture
-def weighted_graph():
-    """A simple weighted graph for testing shortest path algorithms."""
-    g = nx.Graph()
-    g.add_edge(0, 1, weight=1.0)
-    g.add_edge(1, 2, weight=4.0)
-    g.add_edge(0, 2, weight=9.0)  # A longer path between 0 and 2
-    return g
-
-
-@pytest.fixture
 def disconnected_graph():
     """A graph with a disconnected component to test path existence."""
     g = nx.Graph()

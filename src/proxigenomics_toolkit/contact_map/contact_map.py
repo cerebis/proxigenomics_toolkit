@@ -1028,14 +1028,14 @@ class ContactMap(object):
                 if r.reference_start == 0:
                     return True
                 # extract the read's aligned sequence
-                seq = revcomp(r.seq)
+                seq = revcomp(r.query_sequence)
                 aln_seq = seq[r.query_length - r.query_alignment_end: r.query_length - r.query_alignment_start]
             else:
                 # accept alignments where the 3' end goes beyond the end of the reference
                 if r.reference_end >= _refid_to_reflen[r.reference_id]:
                     return True
                 # extract the read's aligned sequence
-                seq = r.seq
+                seq = r.query_sequence
                 aln_seq = seq[r.query_alignment_start: r.query_alignment_end]
 
             # accept alignments which terminate at cut-site remnant
@@ -1096,7 +1096,8 @@ class ContactMap(object):
             tailhead_mat[i, j] = 1
             return i is not None and j is not None, tailhead_mat
 
-        def _always_true(*args: Any) -> Tuple[bool, int]:
+        # noinspection PyUnusedLocal
+        def _always_true(*args: int) -> Tuple[bool, int]:
             return True, 1
 
         # lookup table for reference lengths

@@ -106,7 +106,10 @@ def downsample(m: SparseMatrix, block_size: int, method: str='mean') -> SparseMa
         m = scisp.dok_matrix(m)
     else:
         m = m.todok()
-    m.resize(m.shape[0] + pad_row, m.shape[1] + pad_col)
+    # eliminate linter false positive about "Unexpected attribute"
+    #   when the shape elements individually passed to resize()
+    newshape = (m.shape[0] + pad_row, m.shape[1] + pad_col)
+    m.resize(*newshape)
 
     # conversion to csr here appears necessary to properly preserve matrix
     m = sparse.COO(m.tocsr())

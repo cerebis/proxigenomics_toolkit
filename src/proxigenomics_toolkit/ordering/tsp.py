@@ -102,7 +102,7 @@ def similarity_to_distance(m: MatrixType,
 
     # remember where zeros were
     zeros = (m == 0)
-    logger.debug('Zero count: {}'.format(zeros.sum()))
+    logger.debug('Zero count: {}'.format(np.sum(zeros)))
     logger.debug('Initial non-zero range: {:.3e} {:.3e}'.format(m[np.where(~zeros)].min(), m.max()))
 
     nzix = np.where(~zeros)

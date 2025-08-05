@@ -1,6 +1,6 @@
 import os
 import sys
-from distutils.sysconfig import get_python_lib
+import sysconfig
 
 import numpy as np
 
@@ -49,7 +49,7 @@ def package_path(subdir: str, filename: str) -> str:
     """
     assert subdir, 'subdir cannot be empty'
     assert filename, 'filename cannot be empty'
-    return os.path.join(get_python_lib(), __name__.split('.')[0], subdir, filename)
+    return os.path.join(sysconfig.get_path('purelib'), __name__.split('.')[0], subdir, filename)
 
 
 def exe_exists(exe_name: str) -> bool:

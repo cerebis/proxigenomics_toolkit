@@ -22,7 +22,6 @@ import scipy.sparse as sp
 import tqdm
 from Bio.SeqRecord import SeqRecord
 from gfa_io import GFA
-from tensorflow.python.ops.linalg.sparse.sparse_csr_matrix_ops import SparseMatrix
 
 from ..exceptions import (
     ApplicationException,
@@ -35,7 +34,7 @@ from ..exceptions import (
 from ..linalg import kr_bistochastic
 from ..misc_utils import make_dir, package_path
 from ..seq_utils import IndexedFasta
-from ..types import FULL_REPORT_NPTYPE, MINIMAL_REPORT_NPTYPE, ClusterType
+from ..types import FULL_REPORT_NPTYPE, MINIMAL_REPORT_NPTYPE, ClusterType, SparseMatrix
 from .contact_map import ContactMap, SeqOrder
 
 logger = logging.getLogger(__name__)

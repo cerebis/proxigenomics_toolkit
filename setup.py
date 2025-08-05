@@ -88,7 +88,7 @@ class build_tarball(build_ext_orig, object):
         for ext in self.extensions:
             self.build_tarball(ext)
                                    
-    def build_tarball(self, ext: Extension) -> None:
+    def build_tarball(self, ext: TarballExtension) -> None:
 
         # fetch the relevant commit from github
         if curl_exists():

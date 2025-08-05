@@ -118,7 +118,8 @@ def exclude_clusters(df_target: pd.DataFrame,
     logger.info(f'Removing contacts involving acceptable quality clusters: in={len(df_target)}, out={len(result)}')
     return result
 
-
+# eliminate false positive "unused local symbol" due to parameters being embedded in pandas queries.
+# noinspection PyUnusedLocal
 def identify_suspected_intra(df: pd.DataFrame,
                              accepted_clusters: set,
                              min_similarity: float,

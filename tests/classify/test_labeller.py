@@ -2,7 +2,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
-import pytest
 
 # Assuming the functions are in a file named labeller.py
 from proxigenomics_toolkit.classify.labeller import (

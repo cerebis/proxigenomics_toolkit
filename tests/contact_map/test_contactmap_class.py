@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional, List
+from typing import List
 from unittest.mock import MagicMock
 
 import Bio.SeqIO
@@ -22,7 +22,7 @@ def create_mock_fasta(tmp_path):
                  num_seqs: int,
                  seq_len: int,
                  enzyme_site_seqs: List[str],
-                 num_sites,
+                 num_sites: int,
                  prob_n: float = 1e-2) -> str:
         """
         Generates a mock multi-FASTA file with random DNA sequences.
@@ -31,7 +31,6 @@ def create_mock_fasta(tmp_path):
         into each sequence.
 
         Args:
-            file_path (str): The full path where the FASTA file will be saved.
             seed (int): The seed for the random number generator.
             num_seqs (int): The number of sequences to generate.
             seq_len (int): The length of each DNA sequence.
@@ -704,8 +703,6 @@ class TestBinnedContactMap:
         """
         Tests that _reorder_extent preserves the shape of the input matrix.
         """
-        import scipy.sparse as sp
-
         # Test with different shapes
         test_cases = [
             sample_contact_map.extent_map
@@ -713,7 +710,8 @@ class TestBinnedContactMap:
 
         for matrix in test_cases:
             result = sample_contact_map._reorder_extent(matrix)
-            assert result.shape == matrix.shape, f"Shape should be preserved: expected {matrix.shape}, got {result.shape}"
+            assert result.shape == matrix.shape, \
+                f"Shape should be preserved: expected {matrix.shape}, got {result.shape}"
 
     def test_reorder_extent_simple_case(self, mocker, contact_map_assets):
         """
