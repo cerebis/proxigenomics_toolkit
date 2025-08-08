@@ -1,5 +1,4 @@
 import itertools
-import json
 import logging
 import os
 import re
@@ -29,13 +28,15 @@ from plotnine import (
 from scikeras.wrappers import KerasClassifier
 from scipy.interpolate import CubicSpline
 from scipy.optimize import brentq
-from sklearn.metrics import f1_score, precision_recall_curve, precision_score, recall_score
+from sklearn.metrics import accuracy_score, fbeta_score, precision_recall_curve, precision_score, recall_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras.metrics import Metric, Precision, Recall
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.regularizers import L2
+
+from ..io_utils import serialize_simple_object
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ class StatefulBinaryFBeta(Metric):
     """Computes the F-beta score for binary classification tasks in a stateful manner.
 
     This metric calculates the F-beta score, which is the weighted harmonic mean of
-    precision and recall. It is a more general version of the F1-score. As a
+    precision and recall. It is a more general version of the Fbeta-score. As a
     stateful metric, it accumulates the counts for true positives, actual positives,
     and predicted positives over multiple batches of data. This allows for the
     correct calculation of the score over a full epoch or dataset during model
@@ -136,7 +137,7 @@ class StatefulBinaryFBeta(Metric):
     The `beta` parameter determines the weight of recall in the combined score.
     - `beta < 1` lends more weight to precision.
     - `beta > 1` favors recall.
-    - `beta = 1` corresponds to the traditional F1-score, where precision and
+    - `beta = 1` corresponds to the traditional Fbeta-score, where precision and
       recall are equally weighted.
 
     Usage:
@@ -296,6 +297,7 @@ class StatefulBinaryFBeta(Metric):
 
 def create_baseline(hidden_layer_sizes: List[int],
                     learning_rate: float | keras.optimizers.schedules.LearningRateSchedule,
+                    f_beta: float,
                     meta: dict) -> Sequential:
     """
     Creates and returns a baseline neural network model with the specified hidden
@@ -311,6 +313,7 @@ def create_baseline(hidden_layer_sizes: List[int],
         in each hidden layer.
     :param learning_rate: The learning rate for the optimizer, which can be
         provided as a float or a Keras learning rate schedule.
+    :param f_beta: Weight of recall in the combined score.
     :param meta: Dictionary containing metadata required for model creation, such
         as the number of features (`n_features_in_`) and output classes (`n_outputs_`).
     :return: A compiled Keras Sequential model instance with the specified
@@ -340,7 +343,7 @@ def create_baseline(hidden_layer_sizes: List[int],
                   metrics=['accuracy',
                            Precision(),
                            Recall(),
-                           StatefulBinaryFBeta(beta=0.5),
+                           StatefulBinaryFBeta(beta=f_beta),
                            'binary_crossentropy'])
     return model
 
@@ -442,6 +445,7 @@ class ContactClassifier(object):
                  enable_oob: bool=True,
                  n_jobs: int=1,
                  patience: int=10,
+                 f_beta: float=1.0,
                  verbose: bool=False) -> None:
         """
         An MLP classifier for Hi-C contacts, where classification decides if an accumulated contact
@@ -469,6 +473,8 @@ class ContactClassifier(object):
         :param enable_oob: Enable out-of-bag (OOB) scoring when enable_bag=True.
         :param n_jobs: Number of parallel jobs to use during training when enable_bag=True.
         :param patience: Number of epochs to wait for when training ceases to improve.
+        :param f_beta: The F-beta score (range [0,]) to use for evaluation. Values >1 emphasise Recall, while
+        values <1 emphasise Precision.
         :param verbose: Verbosity of logging.
         """
 
@@ -493,6 +499,7 @@ class ContactClassifier(object):
         self.enable_oob = enable_oob
         self.n_jobs = n_jobs
         self.patience = patience
+        self.f_beta = f_beta
         self.verbose = verbose
 
         # Just a convienence property primarily for tensorboard logs.
@@ -524,21 +531,32 @@ class ContactClassifier(object):
         keras.utils.set_random_seed(self.seed)
         # prepare the training and possibly test dataset(s)
         self._prepare_primary_data()
-        self.metadata = {}
+        # initialise the dictionary of runtime metadata
+        self._init_metadata()
 
-    def reset_metadata(self) -> None:
+    def _init_metadata(self) -> None:
         """
-        Resets the metadata of the object by clearing its contents.
-
-        This method sets the metadata attribute to an empty list, effectively removing
-        all previously stored metadata. Use this method when a fresh start or a reset
-        of the metadata is required.
-
-        :return: None
+        Resets the metadata of the object to default values for this instance.
+        :return: metadata dict containing initial runtime values.
         """
-        self.metadata = {}
+        self.metadata = {'bagging': self.enable_bag,
+                    'f_beta': self.f_beta,
+                    'n_jobs': self.n_jobs,
+                    'enable_es': self.enable_es,
+                    'patience': self.patience,
+                    'threshold': self.threshold,
+                    'test_size': self.test_size,
+                    'validation_size': self.validation_size,
+                    'num_layers': self.num_layers,
+                    'num_nodes': self.num_nodes,
+                    'batch_size': self.batch_size,
+                    'seed': self.seed,
+                    'n_epochs': self.n_epochs,
+                    'learning_rate': self.learning_rate,
+                    'enable_replacement': self.enable_replacement,
+                    'enable_oob': self.enable_oob}
 
-    def write_metadata(self, run_name: str) -> None:
+    def _write_metadata(self, run_name: str) -> None:
         """
         Writes metadata to a JSON file in the specified output directory.
 
@@ -553,8 +571,7 @@ class ContactClassifier(object):
         """
         output_path = os.path.join(self.output_dir, f"{run_name}_metadata.json")
         logger.info(f"Writing metadata for {run_name} to {output_path}")
-        with open(output_path, 'w') as f_out:
-            json.dump(self.metadata, f_out)
+        serialize_simple_object(output_path, self.metadata, fmt='json', float_precision=5)
 
     @staticmethod
     def _get_output_path(parent_dir: str, table_name: str) -> str:
@@ -866,7 +883,8 @@ class ContactClassifier(object):
                                 verbose=self.verbose,
                                 callbacks=self._get_callbacks(),
                                 hidden_layer_sizes=[self.num_nodes] * self.num_layers,
-                                learning_rate=lr_scheduler)
+                                learning_rate=lr_scheduler,
+                                f_beta=self.f_beta)
 
         if self.enable_bag:
             logging.info('Classifier model will use balanced bagging')
@@ -1021,10 +1039,14 @@ class ContactClassifier(object):
                 # get the contained instance of KerasClassifier
                 keras_clzr = en._final_estimator
                 best_score = keras_clzr.score(train.x, train.y)
-                estim_md['estimator_score'].append(f'{best_score:.4f}')
-                estim_md['estimator_precision'].append(f'{precision_score(train.y, keras_clzr.predict(train.x)):.4f}')
-                estim_md['estimator_recall'].append(f'{recall_score(train.y, keras_clzr.predict(train.x)):.4f}')
-                estim_md['estimator_f1'].append(f'{f1_score(train.y, keras_clzr.predict(train.x)):.4f}')
+                estim_md[f'{tag}_estimator_score'].append(
+                    best_score)
+                estim_md[f'{tag}_estimator_precision'].append(
+                    precision_score(train.y, keras_clzr.predict(train.x)))
+                estim_md[f'{tag}_estimator_recall'].append(
+                    recall_score(train.y, keras_clzr.predict(train.x)))
+                estim_md[f'{tag}_estimator_fbeta'].append(
+                    fbeta_score(train.y, keras_clzr.predict(train.x), beta=self.f_beta))
 
                 logger.info(f'{cap_tag} - Estimator {n}: best model score: {best_score:.4f}')
                 _df = pd.DataFrame(keras_clzr.history_) \
@@ -1036,11 +1058,11 @@ class ContactClassifier(object):
             self.metadata.update(estim_md)
 
             self.model._set_oob_score(train.x, train.y)
-            self.metadata['oob_score'] = f'{self.model.oob_score_:.4f}'
+            self.metadata[f'{tag}_oob_score'] = self.model.oob_score_
             logger.info(f'{cap_tag} - Best ensemble model OOB accuracy: {self.model.oob_score_:.4f}')
-            oob_f1 = f1_score(train.y, np.argmax(self.model.oob_decision_function_, axis=1))
-            self.metadata['oob_f1'] = f'{oob_f1:.4f}'
-            logger.info(f'{cap_tag} - Best ensemble model OOB f1-score: {oob_f1:.4f}')
+            oob_fbeta = fbeta_score(train.y, np.argmax(self.model.oob_decision_function_, axis=1), beta=self.f_beta)
+            self.metadata[f'{tag}_oob_fbeta'] = oob_fbeta
+            logger.info(f'{cap_tag} - Best ensemble model OOB Fbeta score: {oob_fbeta:.4f}')
 
             # combine the results of all the estimators
             df_plots = pd.concat(df_plots)
@@ -1062,11 +1084,11 @@ class ContactClassifier(object):
                  verbose=False)
 
         pr_train = self.model.predict_proba(train.x)[:, 1]
-        self.assess_predictions(f'{tag}_training', train.y, pr_train)
+        self.assess_predictions(f'{tag}', 'training', train.y, pr_train)
         if test is not None:
-            self.assess_predictions(f'{tag}_test', test.y, self.model.predict_proba(test.x)[:, 1])
+            self.assess_predictions(f'{tag}', 'test', test.y, self.model.predict_proba(test.x)[:, 1])
         if self.val is not None:
-            self.assess_predictions(f'{tag}_validation', val.y, self.model.predict_proba(val.x)[:, 1])
+            self.assess_predictions(f'{tag}', 'validation', val.y, self.model.predict_proba(val.x)[:, 1])
 
     def fit(self, train: DataSet, validation: Optional[DataSet]=None) -> None:
         """
@@ -1176,8 +1198,6 @@ class ContactClassifier(object):
         predictions = np.zeros(shape=len(self.labelled.x),
                                dtype=ContactClassifier._PREDICT_DTYPE)
 
-        self.metadata['bagging'] = self.enable_bag
-
         fold_info = defaultdict(list)
         for fold_n, (train_index, test_index, val_index) in enumerate(k_splitter, 1):
             logger.info(f'--- Processing Fold {fold_n}/{k_folds} ---')
@@ -1192,7 +1212,7 @@ class ContactClassifier(object):
             self.test = DataSet(self.labelled.x[test_index, :], self.labelled.y[test_index])
             self.val = DataSet(self.labelled.x[val_index, :], self.labelled.y[val_index])
 
-            fold_info['positive_frac'].append(f'{self.train.y.sum() / len(self.train.y):.5g}')
+            fold_info['positive_frac'].append(self.train.y.sum() / len(self.train.y))
 
             if not self.enable_bag:
                 # balance only the training data.
@@ -1205,8 +1225,9 @@ class ContactClassifier(object):
             predictions[test_index] = self.predict(self.test.x)
 
         self.metadata.update(fold_info)
-        self.write_metadata('crossvalidated')
-        self.reset_metadata()
+        self._write_metadata('crossvalidated')
+        # clear result records from metadata.
+        self._init_metadata()
 
         logger.info('Cross-validation complete.')
         return self.df_labelled.join(pd.DataFrame(predictions), validate='1:1')
@@ -1225,14 +1246,15 @@ class ContactClassifier(object):
 
         train, test, val = self._get_datasets(self.labelled)
         self.metadata['balanced_size'] = len(self.train.x)
-        self.metadata['balanced_postive_frac'] = f'{self.train.y.sum() / len(self.train.y):.5g}'
+        self.metadata['balanced_postive_frac'] = self.train.y.sum() / len(self.train.y)
 
         self.fit(train, validation=val)
         self.report_and_plot('unlabelled', train, test, val)
         predictions = self.predict(self.unlabelled.x)
 
-        self.write_metadata('unlabelled')
-        self.reset_metadata()
+        self._write_metadata('unlabelled')
+        # clear result records from metadata.
+        self._init_metadata()
 
         logger.info('Unlabelled classification complete.')
         return self.df_unlabelled.join(pd.DataFrame(predictions), validate='1:1')
@@ -1241,24 +1263,24 @@ class ContactClassifier(object):
                                     file_name: str,
                                     precision: np.ndarray,
                                     recall: np.ndarray,
-                                    f1_scores: np.ndarray,
+                                    fbeta_scores: np.ndarray,
                                     pr_threshold: np.ndarray) -> None:
         """
-        Plots the Precision-Recall curve with F1 scores and saves the plot to the specified file. This function
-        creates a visualization of Precision, Recall, and F1-Score metrics as they vary with the predicted
+        Plots the Precision-Recall curve with Fbeta scores and saves the plot to the specified file. This function
+        creates a visualization of Precision, Recall, and Fbeta-Score metrics as they vary with the predicted
         probability. The resulting plot is saved as an SVG file in the defined output directory.
 
         :param file_name: The name of the output file to save the plot.
         :param precision: An array of precision values.
         :param recall: An array of recall values.
-        :param f1_scores: An array of F1-score values.
+        :param fbeta_scores: An array of Fbeta-score values.
         :param pr_threshold: An array of threshold values for the Precision-Recall curve.
         :return: None
         """
 
         df_plot = pd.DataFrame({'Precision': precision,
                                 'Recall': recall,
-                                'F1-score': f1_scores,
+                                'Fbeta-score': fbeta_scores,
                                 'Pr_threshold': pr_threshold})
         plt = (ggplot(df_plot.melt(id_vars='Pr_threshold'), aes(x='Pr_threshold', y='value', color='variable'))
                + geom_line()
@@ -1273,32 +1295,38 @@ class ContactClassifier(object):
                  verbose=False)
 
     @staticmethod
-    def compute_f1_curve(y_true: np.ndarray,
-                         y_prob: np.ndarray) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray):
+    def compute_fbeta_curve(y_true: np.ndarray,
+                         y_prob: np.ndarray,
+                         beta: float=1.0,
+                         epsilon: float=1e-7) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray):
         """
-        Computes the F1 score along with precision, recall, and thresholds for a
+        Computes the Fbeta score along with precision, recall, and thresholds for a
         given prediction probability array and corresponding true labels.
 
-        Using the precision-recall curve, this method calculates the associated F1
+        Using the precision-recall curve, this method calculates the associated Fbeta
         scores, while avoiding division by zero by adjusting the denominator when
         precision and recall are simultaneously zero.
 
         :param y_true: Ground truth binary labels as a numpy array (0 or 1).
         :param y_prob: Predicted probabilities from a classifier as a numpy array.
+        :param beta: The beta value for the Fbeta score. Defaults to 1, which corresponds to the Fbeta score.
+        :param epsilon: A small value to avoid division by zero. Defaults to 1e-7.
         :return: A tuple containing four numpy arrays:
-                 - F1 scores (excluding last element to match thresholds).
+                 - Fbeta scores (excluding last element to match thresholds).
                  - Precision values (excluding last element to match thresholds).
                  - Recall values (excluding last element to match thresholds).
                  - Thresholds corresponding to precision-recall values.
         """
         precision, recall, thres = precision_recall_curve(y_true, y_prob)
         # avoid zeros in the denominator
-        denominator = recall+precision
-        denominator[denominator == 0] = 0.01
-        f1_scores = 2 * recall * precision / denominator
-        # for simplicity, just drop the last element of F1, P and R so as to match
-        # the length of thres.
-        return f1_scores[:-1], precision[:-1], recall[:-1], thres
+        # denominator = recall+precision
+        # denominator[denominator == 0] = 0.01
+
+        fbeta_scores = (1 + beta**2) * precision * recall / (beta**2 * precision + recall + epsilon)
+
+        # for simplicity, just drop the last element of Fbeta, P and R so as
+        # to match the length of thres.
+        return fbeta_scores[:-1], precision[:-1], recall[:-1], thres
 
     @staticmethod
     def find_simple_maximum(x: np.ndarray, y: np.ndarray) -> (float, float):
@@ -1315,28 +1343,38 @@ class ContactClassifier(object):
         return x[ix_max], y[ix_max]
 
     def assess_predictions(self,
-                           name: str,
+                           tag: str,
+                           set_name: str,
                            y_true: np.ndarray,
-                           y_prob: np.ndarray) -> (float, float):
+                           y_prob: np.ndarray,
+                           threshold: float=0.5) -> (float, float):
         """
         Compute and report statistics and plot the models predictive performance.
 
-        :param name: Name of the dataset.
+        :param tag: Name of the dataset.
+        :param set_name: Name of the dataset.
         :param y_true: True class variable.
         :param y_prob: Predicted probabilities.
-        :return: Best f1_score and threshold.
+        :param threshold: Threshold for classification.
+        :return: Best fbeta_score and threshold.
         """
-        f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
+        y_pred = y_prob > threshold
+        self.metadata.setdefault(f'{set_name}_score', []).append(accuracy_score(y_true, y_pred))
+        self.metadata.setdefault(f'{set_name}_precision', []).append(precision_score(y_true, y_pred))
+        self.metadata.setdefault(f'{set_name}_recall', []).append(recall_score(y_true, y_pred))
+        self.metadata.setdefault(f'{set_name}_fbeta', []).append(fbeta_score(y_true, y_pred, beta=self.f_beta))
 
-        max_thres, max_f1  = ContactClassifier.find_simple_maximum(thres, f1_scores)
-        logger.info(f'{name}: probability threshold of {max_thres:.5g} achieves the '
-                    f'highest F1-score: {max_f1:.5g}')
+        fbeta_scores, precision, recall, thres = ContactClassifier.compute_fbeta_curve(y_true, y_prob, beta=self.f_beta)
+
+        max_thres, max_fbeta  = ContactClassifier.find_simple_maximum(thres, fbeta_scores)
+        logger.info(f'{tag}: probability threshold of {max_thres:.5g} achieves the '
+                    f'highest Fbeta-score: {max_fbeta:.5g}')
 
         self.plot_precision_recall_curve(
-            f'precision_recall_curve_{name}.svg',
-            precision, recall, f1_scores, thres)
+            f'precision_recall_curve_{tag}.svg',
+            precision, recall, fbeta_scores, thres)
 
-        return max_f1, max_thres
+        return max_fbeta, max_thres
 
     # @staticmethod
     def compute_decision_boundary(self,
@@ -1358,7 +1396,7 @@ class ContactClassifier(object):
         else:
             raise ValueError(f'Unknown set name: {set_name}')
 
-        f1_scores, precision, recall, thres = ContactClassifier.compute_f1_curve(y_true, y_prob)
+        fbeta_scores, precision, recall, thres = ContactClassifier.compute_fbeta_curve(y_true, y_prob, beta=self.f_beta)
         assert precision.max() >= precision_threshold, \
             (f'For the {set_name} set: the maximum value reached for Precision was {precision.max():.5g}, '
              f'which is less than the requested decision boundary threshold: {precision_threshold:.5g}')
@@ -1370,17 +1408,18 @@ class ContactClassifier(object):
         logger.info(f'Maximal values for set \"{set_name}\": '
                      f'(pr,Pre)=({thres[precision.argmax()]:.4g}, {precision.max():.5g}), '
                      f'(pr,Rec)=({thres[recall.argmax()]:.4g}, {recall.max():.5g}), '
-                     f'(pr,F1)=({thres[f1_scores.argmax()]:.4g}, {f1_scores.max():.5g})')
+                     f'(pr,Fbeta)=({thres[fbeta_scores.argmax()]:.4g}, {fbeta_scores.max():.5g})')
 
         # add various scores to metadata run log
-        for nm, arr in [('precision', precision), ('recall', recall), ('f1_score', f1_scores)]:
-            self.metadata[f'{set_name}_{nm}_max'] = f'({thres[arr.argmax()]:.4g}, {arr.max():.5g})'
+        for nm, arr in [('precision', precision), ('recall', recall), ('fbeta_score', fbeta_scores)]:
+            self.metadata[f"{set_name}_{nm}_argmax"] = thres[arr.argmax()]
+            self.metadata[f'{set_name}_{nm}_max'] = arr.max()
 
         decision_boundary = find_root(thres, precision - precision_threshold)
         assert decision_boundary is not None, 'The specified precision threshold was not reachable'
         logger.info(f'For set \"{set_name}\": the requested precision of {precision_threshold:.4g} '
                     f'is achieved when the probability threshold is {decision_boundary:.4g} ')
-        self.metadata['precision_threshold'] = f'{precision_threshold:.4g}'
-        self.metadata[f'{set_name}_decision_boundary'] = f'{decision_boundary:.4g}'
+        self.metadata['precision_threshold'] = precision_threshold
+        self.metadata[f'{set_name}_decision_boundary'] = decision_boundary
 
         return decision_boundary
