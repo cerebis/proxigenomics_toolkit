@@ -6,6 +6,7 @@ from .io_utils import (
     open_output,
     read_from_stream,
     save_object,
+    serialize_simple_object,
     write_to_stream,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     'open_output',
     'read_from_stream',
     'save_object',
+    'serialize_simple_object',
     'write_to_stream',
 ]
