@@ -77,19 +77,20 @@ def sequence_details(contact_map: ContactMap,
     # 3. join the table of coverage, using sequence name as the key
     seq_info = seq_info.reset_index(drop=False)
     before_len = len(seq_info)
-    seq_info = seq_info.set_index('name', drop=False).join(coverage_info, how='inner')
+    seq_info = seq_info.set_index('name', drop=False).join(coverage_info, how='inner', validate='1:1')
     assert len(seq_info) == before_len, ('Coverage data did not contain information '
                                          'for all clustered sequences')
-    # just include uniq_frac column
-    seq_info = seq_info.join(mappability_info[['uniq_frac']], how='inner')
+    # just include mappability mean (we call uniq_frac) column
+    seq_info = seq_info.join(mappability_info[['uniq_frac']], how='inner', validate='1:1')
     assert len(seq_info) == before_len, ('Mappability data did not contain information '
                                          'for all clustered sequences')
 
     # 4. prepare a lookup table from seq_id to sequence length and number of sites
     # - this is used for removing the contribution of an excluded
     #   sequence from its cluster.
-    _ix2info = seq_info.set_index('seq_id').loc[:, ['length', 'sites', 'gc',
-                                                    'coverage', 'uniq_frac']].to_dict(orient='records')
+    _ix2info = (seq_info.set_index('seq_id')
+                        .loc[:, ['length', 'sites', 'gc', 'coverage', 'uniq_frac']]
+                        .to_dict(orient='records'))
 
     # create a cluster id column, with isolated sequences assigned -1
     _nm2cl = [(contact_map.seq_info[_si].name, _cl, _d['name'])
@@ -566,15 +567,13 @@ def mappability_report(filename: str,
     for seq, data in read_genmap(filename):
         assert seq not in map_data, f'Duplicate sequence id {seq} in {filename}'
         assert len(data) > kmer_size, f'Record for {seq} was shorter than specified k-mer size'
-        data = data[:-(kmer_size - 1)]
-        uniq_frac = 1 - ((data < 1).sum() / len(data))
-        map_data[seq] = [len(data), np.mean(data), np.median(data), uniq_frac]
+        map_data[seq] = [len(data), np.mean(data)]
 
     logger.debug(f'Found mappability results for {len(map_data):,} sequences')
 
     map_data = pandas.DataFrame.from_dict(map_data,
                                           orient='index',
-                                          columns=['length', 'mean', 'median', 'uniq_frac'])
+                                          columns=['length', 'uniq_fraq'])
     map_data.index.name = 'name'
     return map_data
 
