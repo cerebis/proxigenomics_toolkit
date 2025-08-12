@@ -573,7 +573,7 @@ def mappability_report(filename: str,
 
     map_data = pandas.DataFrame.from_dict(map_data,
                                           orient='index',
-                                          columns=['length', 'uniq_fraq'])
+                                          columns=['length', 'uniq_frac'])
     map_data.index.name = 'name'
     return map_data
 
