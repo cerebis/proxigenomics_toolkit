@@ -192,7 +192,7 @@ def write_to_stream(stream: IO, data: object, fmt: str= 'plain') -> None:
         raise ValueError('Unsupported format: {0}'.format(fmt))
 
 
-def read_from_stream(stream: IO, fmt: str='yaml') -> object:
+def read_from_stream(stream: IO, fmt: str='yaml') -> T:
     """
     Load an object instance from a serialized format. How, in terms of classes
     the object is represented will depend on the serialized information. For
