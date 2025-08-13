@@ -36,7 +36,7 @@ from tensorflow.keras.metrics import Metric, Precision, Recall
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.regularizers import L2
 
-from ..io_utils import serialize_simple_object
+from ..io_utils import load_object, read_from_stream, save_object, serialize_simple_object
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +94,8 @@ class TVStratifiedKFold(StratifiedKFold):
         self.fold_indices = None
 
     def split(self,
-              x: np.ndarray,
-              y: np.ndarray,
+              x: npt.ArrayLike,
+              y: npt.ArrayLike,
               groups: Optional[object]=None) -> Generator[Tuple[np.ndarray, np.ndarray, np.ndarray], None, None]:
         """
         Splits data into training, testing, and validation sets for a given number of splits.
@@ -414,14 +414,15 @@ class ContactClassifier(object):
 
     _METRIC_NAME = 'fbeta'
     _FIT_VARS: ClassVar[List[str]]= ['similarity', 'freq_z', 'cov_z', 'linkage']
-    _PREDICT_DTYPE = np.dtype([('intracellular_score', np.float64),
-                               ('is_intracellular', np.uint8),
-                               ('boundary', np.float64)])
-    _CLASS_VAR = 'intra_z'
+    _PREDICT_DTYPE = np.dtype([('intracellular_score', 'f8'),
+                               ('is_intracellular', bool),
+                               ('boundary', 'f8')])
 
-    OUTPUT_TABLES: ClassVar[Dict[str, str]] = {
-        'predictions': 'predictions.csv',
-    }
+    _METRIC_DTYPE = np.dtype([('proba', 'f8'),
+                              ('precision', 'f8'),
+                              ('recall', 'f8'),
+                              ('fbeta', 'f8')])
+    _CLASS_VAR = 'intra_z'
 
     def __init__(self,
                  output_dir: str,
@@ -556,6 +557,28 @@ class ContactClassifier(object):
                     'enable_replacement': self.enable_replacement,
                     'enable_oob': self.enable_oob}
 
+    def _write_metrics(self, run_name: str, tables: List[np.ndarray]) -> None:
+        """
+        Writes decision metric tables to a compressed file based on the run type.
+
+        This method validates the number of tables provided based on the type of run
+        ('crossvalidated' or 'unlabelled') and saves these tables in a compressed
+        format at a specified output directory.
+
+        :param run_name: The name of the run, which determines validation requirements.
+            Valid options include 'crossvalidated' and 'unlabelled'.
+        :param tables: A list of decision metric tables to be written, which are
+            validated based on the type of run.
+        :return: None
+        """
+        if run_name == 'crossvalidated':
+            assert len(tables) == self.metadata['k_folds'], \
+                'The number of decision metric tables does not match the number of folds.'
+        if run_name == 'unlabelled':
+            assert len(tables) == 1, \
+                'There should be only one decision metric tables for unlabelled data.'
+        save_object(os.path.join(self.output_dir, f'{run_name}_metrics.p.gz'), tables)
+
     def _write_metadata(self, run_name: str) -> None:
         """
         Writes metadata to a JSON file in the specified output directory.
@@ -572,20 +595,6 @@ class ContactClassifier(object):
         output_path = os.path.join(self.output_dir, f"{run_name}_metadata.json")
         logger.info(f"Writing metadata for {run_name} to {output_path}")
         serialize_simple_object(output_path, self.metadata, fmt='json', float_precision=5)
-
-    @staticmethod
-    def _get_output_path(parent_dir: str, table_name: str) -> str:
-        """
-        Generates the output file path for a specified table based on its parent directory
-        and table name by joining them and aligning them with the corresponding entry in
-        the OUTPUT_TABLES dictionary.
-
-        :param parent_dir: Directory path where output files are located
-        :param table_name: Name of the table being processed
-        :return: Full file path to the output file for the specified table
-        :rtype: str
-        """
-        return os.path.join(parent_dir, str(ContactClassifier.OUTPUT_TABLES[table_name]))
 
     @staticmethod
     def _split_training_unlabelled(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -909,16 +918,15 @@ class ContactClassifier(object):
 
         return model
 
-    def write_table(self,
-                    df: pd.DataFrame,
-                    table_name: str,
+    @staticmethod
+    def write_table(df: pd.DataFrame,
+                    output_path: str,
                     reorder: bool=True,
                     format_columns: bool=True) -> None:
         """
         Standardised writing of a table to a file.
         :param df: The dataframe to write.
-        :param table_name: Name of the table to write, for which the actual file name will be obtained. This mechanism
-        exists purely so downstream classes can easily obtain the file.
+        :param output_path: The path and filename to write the table.
         :param reorder: Whether to reorder the table rows.
         :param format_columns: Whether to format the column values.
         """
@@ -959,13 +967,13 @@ class ContactClassifier(object):
         if reorder:
             # do sorting before formatting, as formatting converts
             # numerica data to strings, resulting in unexpected order.
-            logger.info(f'Reordering {table_name} table')
+            logger.debug('Reordering table')
             df = df.sort_values(['seq','contacts'], ascending=[True, False])
 
         if format_columns:
             # reorder the columns in the dataframe, dropping those
             # which are not mentioned in the formatting dictionary
-            logger.debug(f'Applying column-specific formatting to {table_name} table')
+            logger.debug('Applying column-specific formatting to table')
             # dictate the order of columns
             df = pd.DataFrame(df, columns=[_cl for _cl in COLUMN_FORMATS if _cl in df.columns])
             # apply formats
@@ -976,9 +984,8 @@ class ContactClassifier(object):
                     logger.error(f'Could not format column "{_cn}" using format string "{_spec}"')
                     raise
 
-        file_path = ContactClassifier._get_output_path(self.output_dir, table_name)
-        logger.info(f'Writing {table_name} table to {file_path}')
-        df.to_csv(file_path, index=False)
+        logger.info(f'Writing table to {output_path}')
+        df.to_csv(output_path, index=False)
 
     def plot_variable_scatter(self,
                               x: np.ndarray,
@@ -1121,7 +1128,10 @@ class ContactClassifier(object):
         self.model = model
         logger.info("Model training complete.")
 
-    def predict(self, samples: npt.NDArray, decision_set: str='validation') -> npt.NDArray:
+    def predict(self,
+                samples: npt.NDArray,
+                decision_set: str='validation',
+                metrics: Optional[Dict[str, npt.ArrayLike]]=None) -> npt.NDArray:
         """
         Classifies input samples using a pre-trained model and returns the classification results.
         This method computes the probability of each sample belonging to a specific class using the
@@ -1136,6 +1146,7 @@ class ContactClassifier(object):
             to a sample, and columns correspond to feature values required for prediction.
         :param decision_set: The set that will be used to determine the decision boundary used ib classification. This
             should be a set NOT used in training nor used again for prediction.
+        :param metrics: Optional classification metrics that have been/will be used for decision making.
         :return: A structured array containing the probability scores and classification labels for the
             input samples. The first field of the array contains the probability scores, and the second field
             contains the classification labels (boolean).
@@ -1163,7 +1174,7 @@ class ContactClassifier(object):
 
         result[scor_col] = prob_intra
         # determine the decision boundary for classification.
-        boundary = self.compute_decision_boundary(decision_set, self.threshold)
+        boundary = self.compute_decision_boundary(decision_set, self.threshold, metrics)
         logger.info(f"Applying decision boundary at p > {boundary:.4f}")
         # apply it to the newly scored samples, tweak and reorder the table.
         result[clzz_col] = result[scor_col] > boundary
@@ -1191,6 +1202,8 @@ class ContactClassifier(object):
         logger.info(f'The fractional set sizes will be: training={(k_folds-2)//k_folds:.2f}%, '
                     f'validation/test={1//k_folds:.2f}%')
 
+        self.metadata['k_folds'] = k_folds
+
         # Training, Test, and Validation sets adapted from K-fold.
         k_splitter = (TVStratifiedKFold(n_splits=k_folds, random_state=self.seed)
                       .split(self.labelled.x, self.labelled.y))
@@ -1198,6 +1211,7 @@ class ContactClassifier(object):
         predictions = np.zeros(shape=len(self.labelled.x),
                                dtype=ContactClassifier._PREDICT_DTYPE)
 
+        cv_metrics = []
         fold_info = defaultdict(list)
         for fold_n, (train_index, test_index, val_index) in enumerate(k_splitter, 1):
             logger.info(f'--- Processing Fold {fold_n}/{k_folds} ---')
@@ -1222,15 +1236,27 @@ class ContactClassifier(object):
 
             self.fit(self.train, validation=self.val)
             self.report_and_plot(f'fold_{fold_n}', self.train, self.test, self.val)
-            predictions[test_index] = self.predict(self.test.x)
+
+            # compute predictions and keep a record of the decision making results for each fold.
+            # this additional data can be used to reclassify the dataset without retraining or
+            # recomputing classification.
+            fold_metrics = {}
+            predictions[test_index] = self.predict(self.test.x, metrics=fold_metrics)
+            assert 'validation' in fold_metrics, 'Decision metrics must be derived from validation data'
+            cv_metrics.append(fold_metrics['validation'])
 
         self.metadata.update(fold_info)
+        self._write_metrics('crossvalidated', cv_metrics)
         self._write_metadata('crossvalidated')
         # clear result records from metadata.
         self._init_metadata()
 
         logger.info('Cross-validation complete.')
-        return self.df_labelled.join(pd.DataFrame(predictions), validate='1:1')
+        df_result = self.df_labelled.join(pd.DataFrame(predictions), validate='1:1')
+        ContactClassifier.write_table(df_result,
+                                      os.path.join(self.output_dir, 'crossvalidated_predictions.csv'),
+                                      reorder=False, format_columns=False)
+        return df_result
 
     def get_unlabelled_predictions(self) -> pd.DataFrame:
         """
@@ -1250,14 +1276,25 @@ class ContactClassifier(object):
 
         self.fit(train, validation=val)
         self.report_and_plot('unlabelled', train, test, val)
-        predictions = self.predict(self.unlabelled.x)
 
+        # compute predictions and keep a record of the decision making results.
+        # this additional data can be used to reclassify the dataset without retraining or
+        # recomputing classification.
+        metrics = {}
+        predictions = self.predict(self.unlabelled.x, metrics=metrics)
+        assert 'validation' in metrics, 'Decision metrics must be derived from validation data'
+
+        self._write_metrics('unlabelled', [metrics['validation']])
         self._write_metadata('unlabelled')
         # clear result records from metadata.
         self._init_metadata()
 
         logger.info('Unlabelled classification complete.')
-        return self.df_unlabelled.join(pd.DataFrame(predictions), validate='1:1')
+        df_result = self.df_unlabelled.join(pd.DataFrame(predictions), validate='1:1')
+        self.write_table(df_result,
+                         os.path.join(self.output_dir, 'unlabelled_predictions.csv'),
+                         reorder=False, format_columns=False)
+        return df_result
 
     def plot_precision_recall_curve(self,
                                     file_name: str,
@@ -1296,9 +1333,9 @@ class ContactClassifier(object):
 
     @staticmethod
     def compute_fbeta_curve(y_true: np.ndarray,
-                         y_prob: np.ndarray,
-                         beta: float=1.0,
-                         epsilon: float=1e-7) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray):
+                            y_prob: np.ndarray,
+                            beta: float=1.0,
+                            epsilon: float=1e-7) -> (np.ndarray, np.ndarray, np.ndarray, np.ndarray):
         """
         Computes the Fbeta score along with precision, recall, and thresholds for a
         given prediction probability array and corresponding true labels.
@@ -1315,18 +1352,19 @@ class ContactClassifier(object):
                  - Fbeta scores (excluding last element to match thresholds).
                  - Precision values (excluding last element to match thresholds).
                  - Recall values (excluding last element to match thresholds).
-                 - Thresholds corresponding to precision-recall values.
+                 - Probabilty corresponding to precision-recall values.
         """
-        precision, recall, thres = precision_recall_curve(y_true, y_prob)
+        precision, recall, proba = precision_recall_curve(y_true, y_prob)
         # avoid zeros in the denominator
+        # this is obsolete now.
         # denominator = recall+precision
         # denominator[denominator == 0] = 0.01
 
         fbeta_scores = (1 + beta**2) * precision * recall / (beta**2 * precision + recall + epsilon)
 
         # for simplicity, just drop the last element of Fbeta, P and R so as
-        # to match the length of thres.
-        return fbeta_scores[:-1], precision[:-1], recall[:-1], thres
+        # to match the length of proba.
+        return fbeta_scores[:-1], precision[:-1], recall[:-1], proba
 
     @staticmethod
     def find_simple_maximum(x: np.ndarray, y: np.ndarray) -> (float, float):
@@ -1364,27 +1402,105 @@ class ContactClassifier(object):
         self.metadata.setdefault(f'{set_name}_recall', []).append(recall_score(y_true, y_pred))
         self.metadata.setdefault(f'{set_name}_fbeta', []).append(fbeta_score(y_true, y_pred, beta=self.f_beta))
 
-        fbeta_scores, precision, recall, thres = ContactClassifier.compute_fbeta_curve(y_true, y_prob, beta=self.f_beta)
+        fbeta_scores, precision, recall, proba = ContactClassifier.compute_fbeta_curve(y_true, y_prob, beta=self.f_beta)
 
-        max_thres, max_fbeta  = ContactClassifier.find_simple_maximum(thres, fbeta_scores)
+        max_thres, max_fbeta  = ContactClassifier.find_simple_maximum(proba, fbeta_scores)
         logger.info(f'{tag}: probability threshold of {max_thres:.5g} achieves the '
                     f'highest Fbeta-score: {max_fbeta:.5g}')
 
         self.plot_precision_recall_curve(
             f'precision_recall_curve_{tag}.svg',
-            precision, recall, fbeta_scores, thres)
+            precision, recall, fbeta_scores, proba)
 
         return max_fbeta, max_thres
 
-    # @staticmethod
+    @staticmethod
+    def _find_valid_boundary(precision_threshold: float,
+                             proba: np.ndarray,
+                             precision: np.ndarray) -> float:
+        assert 0 <= precision_threshold <= 1, 'A precision threshold must be between 0 and 1'
+        decision_boundary = find_root(proba, precision - precision_threshold)
+        assert decision_boundary is not None, 'The specified precision threshold was not reachable'
+        return decision_boundary
+
+    @staticmethod
+    def reclassify(new_precision: float,
+                   classification_dir: str) -> pd.DataFrame:
+        """
+        Reclassifies the dataset based on a new precision threshold using previously
+        calculated precision and probability from validation. Both the crossvalidated
+        and unlabelled data are reclassified.
+
+        In applying decision boundaries, the method respects the original k-fold
+        crossvalidation of labelled data.
+
+        :param new_precision: New precision threshold for classification adjustment.
+        :param classification_dir: Path to the directory containing the necessary input files
+            and where the output will be saved.
+        :return: A reclassified dataset containing both cv and unlabelled data (not reordered).
+        :rtype: pd.DataFrame
+        """
+        logger.info(f'Reclassifying dataset with new precision threshold: {new_precision:.5g}')
+
+        # Reclassify the CV data.
+
+        # Load the runtime metadata and classification metrics
+        with open(os.path.join(classification_dir, 'crossvalidated_metadata.json'), 'rt') as input_h:
+            cv_metadata: dict = read_from_stream(input_h, 'json')
+        cv_metrics = load_object(os.path.join(classification_dir, 'crossvalidated_metrics.p.gz'))
+
+        # Load the original prediction result for crossvalidated only, dropping the group
+        # column which is not present in the unlabelled data.
+        df_cv = (pd.read_csv(os.path.join(classification_dir, 'crossvalidated_predictions.csv'))
+                 .drop(columns=['group']))
+
+        # Recompute the splits, so we can assign new boundaries to each.
+        k_splitter = (TVStratifiedKFold(n_splits=cv_metadata['k_folds'],
+                                        random_state=cv_metadata['seed']).split(df_cv, df_cv['intra_z']))
+        # Initialise all to False
+        df_cv['is_intracellular_new'] = False
+        df_cv["boundary_new"] = None
+        for fold_n, (train_index, test_index, val_index) in enumerate(k_splitter):
+            logger.info(f'--- Processing Fold {fold_n+1}/{cv_metadata["k_folds"]} ---')
+
+            boundary = ContactClassifier._find_valid_boundary(new_precision,
+                                                              cv_metrics[fold_n]['proba'],
+                                                              cv_metrics[fold_n]['precision'])
+
+            logger.info(f'For set "{fold_n+1}": the new requested precision of {new_precision:.4g} '
+                        f'is achieved when the probability threshold is {boundary:.4g}')
+
+            df_cv.loc[test_index, 'is_intracellular'] = (
+                    df_cv.loc[test_index, 'intracellular_score'] > boundary)
+            df_cv.loc[test_index, 'boundary'] = boundary
+
+        # Reclassify the unlabelled data
+        logger.info('--- Processing the unlabelled set ---')
+        ul_metrics = load_object(os.path.join(classification_dir, 'unlabelled_metrics.p.gz'))
+        df_ul = pd.read_csv(os.path.join(classification_dir, 'unlabelled_predictions.csv'))
+
+        boundary = ContactClassifier._find_valid_boundary(new_precision,
+                                                          ul_metrics[0]["proba"],
+                                                          ul_metrics[0]["precision"])
+
+        logger.info(f'For the unlabelled set: the new requested precision of {new_precision:.4g} '
+                    f'is achieved when the probability threshold is {boundary:.4g}')
+        df_ul['is_intracellular'] = df_ul['intracellular_score'] > boundary
+        df_ul['boundary'] = boundary
+
+        # return combined but not reordered
+        return pd.concat([df_cv, df_ul])
+
     def compute_decision_boundary(self,
                                   set_name: str,
-                                  precision_threshold: float) ->  float:
+                                  precision_threshold: float,
+                                  metrics: Optional[Dict[str, npt.ArrayLike]]=None) -> float:
         """
         Using predictions and true values, compute the decision boundary (in terms of assigned model probability)
         at which overall dataset precision exceeds the requested threshold.
         :param set_name: specified data set by name [test, validation, training]
         :param precision_threshold: Requested threshold precision.
+        :param metrics: Optional parameter for returning resulting metrics for this dataset
         :return: Probability boundary to achieve requested precision.
         """
         if set_name == 'test':
@@ -1396,27 +1512,32 @@ class ContactClassifier(object):
         else:
             raise ValueError(f'Unknown set name: {set_name}')
 
-        fbeta_scores, precision, recall, thres = ContactClassifier.compute_fbeta_curve(y_true, y_prob, beta=self.f_beta)
+        fbeta_scores, precision, recall, proba = ContactClassifier.compute_fbeta_curve(y_true, y_prob, beta=self.f_beta)
+        if metrics is not None:
+            # store classification metrics as a contiguous structured numpy array, which
+            # is keyed by the set type used.
+            metrics[set_name] = np.fromiter(itertools.zip_longest(proba, precision, recall, fbeta_scores),
+                                            dtype=ContactClassifier._METRIC_DTYPE)
+
         assert precision.max() >= precision_threshold, \
             (f'For the {set_name} set: the maximum value reached for Precision was {precision.max():.5g}, '
              f'which is less than the requested decision boundary threshold: {precision_threshold:.5g}')
-        if len(thres) <= 1:
+        if len(proba) <= 1:
             logger.error(f'For the {set_name} set: predicted class probabilities have a '
                          f'single value: {np.unique(y_prob):.5g}')
             raise ValueError('Single-valued probability array suggests model fitting failure')
 
         logger.info(f'Maximal values for set \"{set_name}\": '
-                     f'(pr,Pre)=({thres[precision.argmax()]:.4g}, {precision.max():.5g}), '
-                     f'(pr,Rec)=({thres[recall.argmax()]:.4g}, {recall.max():.5g}), '
-                     f'(pr,Fbeta)=({thres[fbeta_scores.argmax()]:.4g}, {fbeta_scores.max():.5g})')
+                     f'(pr,Pre)=({proba[precision.argmax()]:.4g}, {precision.max():.5g}), '
+                     f'(pr,Rec)=({proba[recall.argmax()]:.4g}, {recall.max():.5g}), '
+                     f'(pr,Fbeta)=({proba[fbeta_scores.argmax()]:.4g}, {fbeta_scores.max():.5g})')
 
         # add various scores to metadata run log
         for nm, arr in [('precision', precision), ('recall', recall), ('fbeta_score', fbeta_scores)]:
-            self.metadata[f"{set_name}_{nm}_argmax"] = thres[arr.argmax()]
+            self.metadata[f"{set_name}_{nm}_argmax"] = proba[arr.argmax()]
             self.metadata[f'{set_name}_{nm}_max'] = arr.max()
 
-        decision_boundary = find_root(thres, precision - precision_threshold)
-        assert decision_boundary is not None, 'The specified precision threshold was not reachable'
+        decision_boundary = ContactClassifier._find_valid_boundary(precision_threshold, proba, precision)
         logger.info(f'For set \"{set_name}\": the requested precision of {precision_threshold:.4g} '
                     f'is achieved when the probability threshold is {decision_boundary:.4g} ')
         self.metadata['precision_threshold'] = precision_threshold

@@ -1,6 +1,11 @@
 from .._version import __version__
 from .embedding import MetagenomeEmbeddings, center_of_mass
-from .keras_model import ContactClassifier, StatefulBinaryFBeta, create_baseline
+from .keras_model import (
+    ContactClassifier,
+    StatefulBinaryFBeta,
+    TVStratifiedKFold,
+    create_baseline,
+)
 from .labeller import (
     DataLabeller,
     anti_join,
@@ -36,6 +41,7 @@ __all__ = [
     'SequencePromiscuity',
     'SignificantLinks',
     'StatefulBinaryFBeta',
+    'TVStratifiedKFold',
     '__version__',
     'anti_join',
     'calculate_rejection_thresholds',
