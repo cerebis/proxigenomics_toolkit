@@ -130,8 +130,9 @@ def get_map(_m: sp.spmatrix,
             _m = _m.tocsr()
             _m.eliminate_zeros()
     else:
-        _m = sp.triu(_m, k=1 if no_diagonal else 0).tocsr()
-    return _m
+        _m = sp.triu(_m, k=1 if no_diagonal else 0)
+
+    return _m.tocsr()
 
 
 def create_seq2cluster_graph(contact_map: ContactMap,
@@ -139,7 +140,8 @@ def create_seq2cluster_graph(contact_map: ContactMap,
                              coverage_info: pd.DataFrame,
                              mappability_info: pd.DataFrame,
                              min_seq_length: int,
-                             tidy: bool=True) -> nx.Graph:
+                             tidy: bool=True,
+                             include_self: bool=False) -> nx.Graph:
     """
     Create bipartite graph
 
@@ -149,6 +151,7 @@ def create_seq2cluster_graph(contact_map: ContactMap,
     :param mappability_info: mappability index for every sequence
     :param min_seq_length:
     :param tidy: remove collections of member attributes
+    :param include_self: include self-self interactions
     :return:
     """
 
@@ -232,7 +235,7 @@ def create_seq2cluster_graph(contact_map: ContactMap,
     # NOTE: in eliminating self-self interactions, edges will not be created between singleton
     # clusters and their sole member sequence. We do not want to treat self-self interactions as
     # they do not contribute to the seq-seq clustering.
-    _map = get_map(contact_map.seq_map, full=True, no_diagonal=True)
+    _map = get_map(contact_map.seq_map, full=True, no_diagonal=not include_self)
 
     #
     # Steps in building the graph.
@@ -333,12 +336,16 @@ def create_seq2cluster_graph(contact_map: ContactMap,
         if tidy and 'removed' in g.nodes[u]:
             del g.nodes[u]['removed']
 
-    _diag = contact_map.seq_map.diagonal()
-    for u in cluster_nodes:
-        cl_info = g.nodes[u]
-        if 'members' in cl_info and len(cl_info['members']) == 1:
-            v = ('n', next(iter(cl_info['members'].values()))['seq_name'])
-            g.add_edge(u, v, contacts=SYMBOLIC_SELF_CONTACTS)
+    if not include_self:
+        # When we have excluded self-self interactions, just add symbolic
+        # entries. These are not intended for use in downstream work, only
+        # so they appear in the table of contacts.
+        _diag = contact_map.seq_map.diagonal()
+        for u in cluster_nodes:
+            cl_info = g.nodes[u]
+            if 'members' in cl_info and len(cl_info['members']) == 1:
+                v = ('n', next(iter(cl_info['members'].values()))['seq_name'])
+                g.add_edge(u, v, contacts=SYMBOLIC_SELF_CONTACTS)
 
     if tidy:
         for u in cluster_nodes:
@@ -725,7 +732,8 @@ class SignificantLinks(object):
                  mappability_file: str,
                  mappability_k: int,
                  output_dir: str,
-                 seed: int) -> None:
+                 seed: int,
+                 include_self: bool) -> None:
 
         self.contact_map_file = contact_map_file
         self.clustering_file = clustering_file
@@ -734,6 +742,7 @@ class SignificantLinks(object):
         self.mappability_k = mappability_k
         self.output_dir = output_dir
         self.seed = seed
+        self.include_self = include_self
         # find the R script within this current package folder
         # self.find_significant_function_r = SignificantLinks._source_r_function('model_fit.R', 'find_significant')
         self.seq2cl_graph = None
@@ -792,7 +801,8 @@ class SignificantLinks(object):
 
         logger.info('Creating bipartite graph between clusters and sequences')
         seq2cl_graph = create_seq2cluster_graph(contact_map, clustering, coverage_info,
-                                                mappability_info, min_seq_length)
+                                                mappability_info, min_seq_length,
+                                                include_self=self.include_self)
 
         logger.info('Initial graph info: nodes={:,}, edges={:,}'.format(
             seq2cl_graph.order(), seq2cl_graph.size()))
