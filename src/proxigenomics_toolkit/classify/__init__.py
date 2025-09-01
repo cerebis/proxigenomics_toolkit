@@ -7,10 +7,10 @@ from .keras_model import (
     create_baseline,
 )
 from .labeller import (
+    ClusterFilter,
     DataLabeller,
     anti_join,
     exclude_clusters,
-    high_quality_clusters,
     identify_suspected_intra,
     normalised_out_degree,
     replace_zeros,
@@ -36,6 +36,7 @@ from .significance import (
 
 __all__ = [
     'ContactClassifier',
+    'ClusterFilter',
     'DataLabeller',
     'MetagenomeEmbeddings',
     'SequencePromiscuity',
@@ -51,7 +52,6 @@ __all__ = [
     'exclude_clusters',
     'fill_zeros',
     'get_map',
-    'high_quality_clusters',
     'identify_suspected_intra',
     'mappability_report',
     'normalised_out_degree',
