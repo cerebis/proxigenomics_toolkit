@@ -1,7 +1,7 @@
 import logging
 import os
 import warnings
-from typing import ClassVar, Dict, Optional, Tuple
+from typing import ClassVar, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,6 +47,24 @@ def scaler(arr: np.ndarray,
         raise ValueError('Both mu and sig must be provided if one is provided.')
 
 
+def logistical_transform(x: np.ndarray) -> np.ndarray:
+    """
+    Apply a logistic transformation to the input data.
+
+    The logistical transformation is defined as log(x / (1 - x)).
+    It is typically applied to probabilities or data constrained
+    in the interval [0, 1].
+
+    :param x: Input array-like object representing data constrained
+        in the interval [0, 1].
+    :type x: np.ndarray
+    :return: Transformed data after applying the logistic
+        function, with the same shape as the input.
+    :rtype: np.ndarra
+    """
+    return np.log(x / (1 - x))
+
+
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
     Transforms the given DataFrame by assigning new columns calculated with specific transformations.
@@ -63,9 +81,14 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
     :return: Transformed DataFrame with newly assigned columns `intra_z`, `cov_z`, and `freq_z`.
     :rtype: pd.DataFrame
     """
-    return df.assign(intra_z = lambda x: x.intra.astype(np.uint8),
-                     cov_z   = lambda x: scaler(np.log(x.cov_u * x.cov_v))[0],
-                     freq_z  = lambda x: scaler(np.log(x.contacts / (x.sites_u*x.sites_v * x.uf_u*x.uf_v)))[0],
+    return df.assign(intra_z=lambda x: x.intra.astype(np.uint8),
+                     cov_z=lambda x: scaler(np.log(x.cov_u * x.cov_v))[0],
+                     sites_z=lambda x: scaler(np.log(x.sites_u * x.sites_v))[0],
+                     freq_z=lambda x: scaler(np.log(x.contacts / (x.sites_u * x.sites_v * x.uf_u * x.uf_v)))[0],
+                     uf_z=lambda x: scaler(logistical_transform(x.uf_u * x.uf_v))[0],
+                     linkage_z=lambda x: scaler(np.log(x.linkage))[0],
+                     log_covu=lambda x: scaler(np.log(x.cov_u))[0],
+                     log_covv=lambda x: scaler(np.log(x.cov_v))[0],
                      )
 
 
@@ -82,28 +105,66 @@ def anti_join(target: pd.DataFrame, exclude_from: pd.DataFrame) -> pd.DataFrame:
     return target[~ mask].reset_index()
 
 
-def high_quality_clusters(binning_qc_file: str,
-                          min_completeness: float,
-                          max_contamination: float,
-                          qc_method: str) -> set:
-    """
-    Select clusters which meet the minimum quality thresholds for completeness and contamination.
-    :param binning_qc_file:
-    :param min_completeness:
-    :param max_contamination:
-    :param qc_method: e.g. CheckMv1, CheckMv2, CoCoPye
-    :return: set of cluster IDs
-    """
-    # Binning QC summary to eliminate contaminated bins
-    df = pd.read_csv(binning_qc_file, header=[0,1], index_col=0)
-    df.sort_index(axis=1, inplace=True)
-    assert np.all(df.index.str.startswith('CL')), \
-        'Binning QC table did not appear to be indexed by cluster names'
-    hq_set = set(df[(qc_method,)].query(
-        'Contamination <= @max_contamination and Completeness >= @min_completeness').index)
-    logger.info(f'Referring to {qc_method}, there were {len(hq_set)} acceptable clusters '
-                f'with Completeness>={min_completeness:.0f} and Contamination<={max_contamination:.0f}.')
-    return hq_set
+class ClusterFilter(object):
+
+    _METHOD_QUALITY_LIMITS : ClassVar[Dict[str, Dict[str, List[int]]]] = {
+        'CheckMv1': {    'high': [90, 5],
+                         'partial': [50, 5],
+                         'moderate': [50, 10]},
+
+        'CheckMv2': {    'high': [90, 5],
+                         'partial': [50, 5],
+                         'moderate': [50, 10]},
+
+        'CoCoPye': {    'high': [90, 10],
+                        'partial': [50, 10],
+                        'moderate': [50, 20]}
+    }
+
+    def __init__(self, qc_filename: str, file_format: str='collated_qc') -> None:
+        """
+        Initializes the quality control report object by loading and validating data from
+        a specified CSV file. The CSV file must adhere to a specific format and structure.
+
+        :param qc_filename: Path to the quality control input file. Must point to a
+            valid CSV formatted file containing the quality control report.
+        :type qc_filename: str
+        :param file_format: The expected file format of the quality control report.
+            This method currently supports only the 'collated_qc' format. Defaults to 'collated_qc'.
+        :type file_format: str
+        :raises AssertionError: If the specified file format is not supported.
+        :raises AssertionError: If the quality report does not have cluster names as index.
+        """
+        self.qc_filename = qc_filename
+        assert file_format == 'collated_qc', 'Unsupported file format specified'
+        self.quality_report = pd.read_csv(qc_filename, header=[0,1], index_col=0).sort_index(axis=1)
+        assert np.all(self.quality_report.index.str.startswith('CL')), \
+            'Binning QC table did not appear to be indexed by cluster names'
+
+    def quality_filter(self, method: str, quality_type: str) -> Set[str]:
+        """
+        Filters clusters based on their quality metrics as defined by the specified
+        method and quality type. This method evaluates the `Completeness` and
+        `Contamination` thresholds provided in the method- and quality-type-specific
+        configuration and returns the set of clusters that meet these criteria.
+
+        :param method: The quality control method to use for filtering. It must
+            match one of the keys in the defined `_METHOD_QUALITY_LIMITS`.
+        :type method: str
+        :param quality_type: The quality type associated with the QC method,
+            specifying further thresholds for filtering. It must match the
+            appropriate values in `_METHOD_QUALITY_LIMITS`.
+        :type quality_type: str
+        :return: A set of cluster indices that satisfy the quality requirements
+            for the given method and quality type.
+        :rtype: set
+        """
+        assert method in self._METHOD_QUALITY_LIMITS, f'QC method {method} not recognised'
+        assert quality_type in self._METHOD_QUALITY_LIMITS[method], f'Quality type {quality_type} not recognised'
+        min_compl, max_contam = ClusterFilter._METHOD_QUALITY_LIMITS[method][quality_type]
+        cl_set = (self.quality_report.loc[:, (method)][['Completeness','Contamination']]
+                  .query("Completeness >= @min_compl and Contamination <= @max_contam").index)
+        return set(cl_set)
 
 
 def exclude_clusters(df_target: pd.DataFrame,
@@ -216,7 +277,7 @@ def seq2cluster_similarity(df: pd.DataFrame,
     return np.fromiter((linear_kernel(u[[i]], v[[i]])[0][0] for i in range(u.shape[0])), dtype='f8')
 
 
-def normalised_out_degree(x: pd.Series) -> np.ndarray:
+def normalised_out_degree(x: pd.DataFrame) -> np.ndarray:
     """
     NOTE: Intended to be performed on a dataframe of associations grouped by sequence name.
 
@@ -296,12 +357,6 @@ class DataLabeller(object):
     _MIN_NUM_OBS = 2
     _MIN_EXTENT = 100_000
     _BIG_EXTENT = 500_000
-    _HQ_COMPL = 90
-    _HQ_CONTAM = 5
-    _PURE_COMPL = 50
-    _PURE_CONTAM = 10
-    _MQ_COMPL = 50
-    _MQ_CONTAM = 5
 
     _SUSP_MIN_CLUSTER_EXTENT = 1_000_000
     _SUSP_MIN_SEQ_LENGTH = 500_000
@@ -315,7 +370,7 @@ class DataLabeller(object):
         'combined': 'combined.csv',
         'spurious_acceptable_clusters': 'spurious_acceptable_clusters.csv',
         'intra_acceptable_clusters': 'intra_acceptable_clusters.csv',
-        'pure_clusters': 'pure_clusters.csv',
+        'moderate_quality_clusters': 'moderate_quality_clusters.csv',
     }
 
     @staticmethod
@@ -353,6 +408,8 @@ class DataLabeller(object):
         self.binning_qc_file = binning_qc_file
         self.use_suspected = use_suspected
         self.qc_method = qc_method
+
+        self.cluster_filter = ClusterFilter(self.binning_qc_file)
 
         self.embeddings = MetagenomeEmbeddings(self.embeddings_file,
                                                self.clustering_file,
@@ -415,10 +472,9 @@ class DataLabeller(object):
 
         logger.info(f'Spurious pool: count before exclusion: {len(df_spur)}, all: {len(df_all)}')
 
-        hq_clusters = high_quality_clusters(self.binning_qc_file,
-                                            DataLabeller._HQ_COMPL,
-                                            DataLabeller._HQ_CONTAM,
-                                            self.qc_method)
+        hq_clusters = self.cluster_filter.quality_filter(self.qc_method, 'high')
+        logger.info(f'There ae {len(hq_clusters)} high-quality clusters that can be '
+                    f'used for inferring spurious contacts')
         # keep a record of those clusters deemed high-quality
         self.write_table(pd.DataFrame({'cluster': list(hq_clusters)}), 'spurious_acceptable_clusters',
                          'clusters deemed high quality', index=False)
@@ -468,7 +524,6 @@ class DataLabeller(object):
                         .apply(normalised_out_degree, include_groups=False)
         # Log-transform and standardise the linkage coefficient, as its distribution is far
         # from smooth, with significant mass close to zero (spurious contacts).
-        # df_cmb['linkage'] = scaler(np.log(linkage))[0]
         df_cmb['linkage'] = linkage
 
         logger.info('Standardising all observations together')
@@ -482,11 +537,11 @@ class DataLabeller(object):
         #   those contacts which evidence strongly indicates the contact intra-cellular
 
         # STEP ONE: basic filter for intuitively sensible seq->cluster relationships.
-        # 1. sequence smaller than cluster (this is akin to looking at half the contact map)
-        # 2. cluster minimum extent
-        # 3. at least N contacts
+        # 1. sequence not larger than cluster (this is akin to looking at half the seq->cl contact map).
+        # 2. impose a minimum extent on clusters.
+        # 3. impose a minimum number of seq->cl contacts (observations).
         df_all = df_all.query(f'contacts > {DataLabeller._MIN_NUM_OBS}'
-                              ' and length_u < length_v'
+                              ' and length_u <= length_v'
                               f' and length_v > {DataLabeller._MIN_EXTENT}') \
                        .set_index(['seq','cluster'])
         logger.info(f'General pool: after basic filtering: {len(df_all)} ')
@@ -495,10 +550,9 @@ class DataLabeller(object):
         df_signif = df_all.query(f'intra and length_v > {DataLabeller._BIG_EXTENT}').copy()
         logger.info(f'Intra pool: initial contact count: {len(df_signif)}')
 
-        mq_clusters = high_quality_clusters(self.binning_qc_file,
-                                            DataLabeller._MQ_COMPL,
-                                            DataLabeller._MQ_CONTAM,
-                                            self.qc_method)
+        mq_clusters = self.cluster_filter.quality_filter(self.qc_method, 'partial')
+        logger.info(f"There are {len(mq_clusters)} partial (or better) clusters that can be "
+                    f"used for inferring intra-cluster contacts")
         self.write_table(pd.DataFrame({'cluster': list(mq_clusters)}), 'intra_acceptable_clusters',
                          'clusters deemed medium quality', index=False)
         n_before = len(df_signif)
@@ -520,14 +574,14 @@ class DataLabeller(object):
         # STEP 4: try to find additional "suspected intra-cluster" contacts from even larger
         # clusters, that may be split. These must still be low contamination.
         if self.use_suspected:
-            pure_clusters = high_quality_clusters(self.binning_qc_file,
-                                                  DataLabeller._PURE_COMPL, DataLabeller._PURE_CONTAM,
-                                                  self.qc_method)
-            # keep a record of those clusters deemed as "pure"
-            self.write_table(pd.DataFrame({'cluster': list(pure_clusters)}), 'pure_clusters',
-                             'clusters selected as pure', index=False)
+            moderate_clusters = self.cluster_filter.quality_filter(self.qc_method, 'moderate')
+            logger.info(f"There are {len(moderate_clusters)} moderate-quality (or better) clusters that can be "
+                        f"used as to extend the number intra-cluster contacts")
+            # keep a record of those clusters deemed as "moderate"
+            self.write_table(pd.DataFrame({'cluster': list(moderate_clusters)}), 'moderate_quality_clusters',
+                             'clusters selected as moderate quality', index=False)
 
-            df_suspected = identify_suspected_intra(df_undecided.reset_index(), pure_clusters,
+            df_suspected = identify_suspected_intra(df_undecided.reset_index(), moderate_clusters,
                                                     DataLabeller._SUSP_MIN_SIM,
                                                     DataLabeller._SUSP_MIN_NUM_OBS,
                                                     DataLabeller._SUSP_MIN_CLUSTER_EXTENT,
