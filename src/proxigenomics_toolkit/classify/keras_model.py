@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 L2_KERNEL = 0.15
 L2_BIAS = 0.02
-DROPOUT_RATE = 0.3
+DROPOUT_RATE = 0.5
 
 
 class DataSet(NamedTuple):
@@ -413,7 +413,13 @@ class ContactClassifier(object):
     _PAGE_HEIGHT_MM = 210
 
     _METRIC_NAME = 'fbeta'
-    _FIT_VARS: ClassVar[List[str]]= ['similarity', 'freq_z', 'cov_z', 'linkage']
+    _FIT_VARS: ClassVar[List[str]]= ['similarity',
+                                     'freq_z',
+                                     'cov_z',
+                                     'sites_z',
+                                     'linkage_z',
+                                     'uf_z',]
+
     _PREDICT_DTYPE = np.dtype([('intracellular_score', 'f8'),
                                ('is_intracellular', bool),
                                ('boundary', 'f8')])
@@ -951,9 +957,11 @@ class ContactClassifier(object):
             "prop_cl": "{:0.5f}",
             "intra_z": "{:d}",
             "similarity": "{:0.5f}",
-            "linkage": "{:0.5f}",
-            "cov_z": "{:0.5f}",
             "freq_z": "{:0.5f}",
+            "cov_z": "{:0.5f}",
+            "sites_z": "{:0.5f}",
+            "linkage_z": "{:0.5f}",
+            "uf_z": "{:0.5f}",
             "train": "{}",
             "intracellular_score": "{:0.5f}",
             "is_intracellular": "{}",
@@ -1094,7 +1102,7 @@ class ContactClassifier(object):
         self.assess_predictions(f'{tag}', 'training', train.y, pr_train)
         if test is not None:
             self.assess_predictions(f'{tag}', 'test', test.y, self.model.predict_proba(test.x)[:, 1])
-        if self.val is not None:
+        if val is not None:
             self.assess_predictions(f'{tag}', 'validation', val.y, self.model.predict_proba(val.x)[:, 1])
 
     def fit(self, train: DataSet, validation: Optional[DataSet]=None) -> None:
@@ -1233,6 +1241,7 @@ class ContactClassifier(object):
                 self.train = self._balance_data(self.train)
                 fold_info['balanced_size'].append(len(self.train.x))
                 fold_info['balanced_postive_frac'].append(self.train.y.sum() / len(self.train.y))
+                self.val = self._balance_data(self.val)
 
             self.fit(self.train, validation=self.val)
             self.report_and_plot(f'fold_{fold_n}', self.train, self.test, self.val)
@@ -1405,11 +1414,11 @@ class ContactClassifier(object):
         fbeta_scores, precision, recall, proba = ContactClassifier.compute_fbeta_curve(y_true, y_prob, beta=self.f_beta)
 
         max_thres, max_fbeta  = ContactClassifier.find_simple_maximum(proba, fbeta_scores)
-        logger.info(f'{tag}: probability threshold of {max_thres:.5g} achieves the '
+        logger.info(f'{tag}: For set \"{set_name}\" a probability threshold of {max_thres:.5g} achieves the '
                     f'highest Fbeta-score: {max_fbeta:.5g}')
 
         self.plot_precision_recall_curve(
-            f'precision_recall_curve_{tag}.svg',
+            f'precision_recall_curve_{tag}_{set_name}.svg',
             precision, recall, fbeta_scores, proba)
 
         return max_fbeta, max_thres
