@@ -9,6 +9,60 @@ import pyvis
 logger = logging.getLogger(__name__)
 
 
+def prune_graph(g: nx.Graph, min_degree: int) -> nx.Graph:
+    """
+    For the visualisation, we are only interested in true interactions. After pruning spurious
+    edges, we must also remove nodes which become isolated.
+    :param g: the interaction graph
+    :param min_degree: remove nodes with less than this degree (mainly for removing isolates)
+    :return: a pruned graph
+    """
+    # keep only edges deemed intracellular
+    g_tmp = g.copy()
+    g_tmp.remove_edges_from(((u, v) for u, v, d in g.edges(data=True) if not d["is_intracellular"]))
+    g = g_tmp
+    # remove isolated nodes
+    g_tmp = g.copy()
+    g_tmp.remove_nodes_from((u for u, d in g.nodes(data=True) if g.degree(u) < min_degree))
+    g = g_tmp
+    # repeat this when pruning aggressively as there may still be isolates
+    if min_degree > 1:
+        g_tmp = g.copy()
+        g_tmp.remove_nodes_from((u for u, d in g.nodes(data=True) if g.degree(u) == 0))
+        g = g_tmp
+    return g
+
+
+def report_highly_connected(g: nx.Graph, report_file: str) -> None:
+    """
+    Generates a report for highly connected nodes in a bipartite graph.
+    This function prunes the input graph to retain nodes with a connection
+    degree of at least two, then identifies nodes of one partition in the
+    bipartite graph. The identified nodes and their connected neighbors
+    are written to the specified report file.
+
+    :param report_file: Path to the output file where the highly connected
+        nodes and their connections will be recorded.
+        The file will contain lines with a node and its neighbors separated
+        by commas.
+    :type report_file: str
+    :param g: An input bipartite graph from the NetworkX library. The
+        graph should have a "bipartite" attribute in node data to identify
+        partitions.
+    :type g: nx.Graph
+    :return: This function does not return a value, as it operates by
+        writing to a file and logging relevant information.
+    :rtype: None
+    """
+    g = prune_graph(g, 2)
+    seq_nodes = sorted({n for n, d in g.nodes(data=True) if d["bipartite"] == 0})
+    with open(report_file, "w") as h_output:
+        h_output.write("sequence,degree,classification,containing_bins\n")
+        for u in seq_nodes:
+            h_output.write(f'{u},{g.degree(u)},{g.nodes[u]["mge_status"]},\"{" ".join(g.neighbors(u))}\"\n')
+    logger.info(f"There were {len(seq_nodes)} sequences with >= 2 bins")
+
+
 def make_graph_representation(pred_filename: str,
                               mge_filename: str,
                               binqc_filename: str,
@@ -35,29 +89,6 @@ def make_graph_representation(pred_filename: str,
     :param min_degree: Minimum degree of nodes to be considered for the graph.
     :return: A NetworkX graph instance.
     """
-
-    def prune_graph(g: nx.Graph, min_degree) -> nx.Graph:
-        """
-        For the visualisation, we are only interested in true interactions. After pruning spurious
-        edges, we must also remove nodes which become isolated.
-        :param g: the interaction graph
-        :param min_degree: remove nodes with less than this degree (mainly for removing isolates)
-        :return: a pruned graph
-        """
-        # keep only edges deemed intracellular
-        g_tmp = g.copy()
-        g_tmp.remove_edges_from(((u, v) for u, v, d in g.edges(data=True) if not d["is_intracellular"]))
-        g = g_tmp
-        # remove isolated nodes
-        g_tmp = g.copy()
-        g_tmp.remove_nodes_from((u for u, d in g.nodes(data=True) if g.degree(u) < min_degree))
-        g = g_tmp
-        # repeat this when pruning aggressively as there may still be isolates
-        if min_degree > 1:
-            g_tmp = g.copy()
-            g_tmp.remove_nodes_from((u for u, d in g.nodes(data=True) if g.degree(u) == 0))
-            g = g_tmp
-        return g
 
     # read the tables and join, clean-up some attributes that tools like Gephi stumble over.
     df_plot = (
@@ -143,8 +174,10 @@ def make_graph_representation(pred_filename: str,
         )
 
     logger.debug(f'The full graph representation contained {g.order()} nodes and {g.size()} edges.')
+
     g = prune_graph(g, min_degree=min_degree)
     logger.debug(f'The pruned graph representation contained {g.order()} nodes and {g.size()} edges.')
+
     return g
 
 
@@ -260,6 +293,15 @@ def create_interactive_visualisation(output_dir: str,
                                                   mge_summary_file,
                                                   binqc_summary_file,
                                                   min_degree)
+
+    # write the interaction to a standard graph format
+    nx.write_graphml(interaction_graph,
+                     os.path.join(output_dir, f'interactions_DEG{min_degree}.graphml'))
+
+    # write a ragged table of all sequences and their containing bins with degree >= 2.
+    report_highly_connected(interaction_graph,
+                            os.path.join(output_dir, 'highly_connected.csv'))
+
     add_pyvis_attributes(interaction_graph)
 
     network = pyvis.network.Network(
