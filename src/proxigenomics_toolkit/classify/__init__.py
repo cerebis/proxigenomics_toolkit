@@ -33,10 +33,11 @@ from .significance import (
     sequence_details,
     simple_spurious_estimation,
 )
+from .visualise import create_interactive_visualisation, make_graph_representation
 
 __all__ = [
-    'ContactClassifier',
     'ClusterFilter',
+    'ContactClassifier',
     'DataLabeller',
     'MetagenomeEmbeddings',
     'SequencePromiscuity',
@@ -48,11 +49,13 @@ __all__ = [
     'calculate_rejection_thresholds',
     'center_of_mass',
     'create_baseline',
+    'create_interactive_visualisation',
     'create_seq2cluster_graph',
     'exclude_clusters',
     'fill_zeros',
     'get_map',
     'identify_suspected_intra',
+    'make_graph_representation',
     'mappability_report',
     'normalised_out_degree',
     'replace_zeros',
