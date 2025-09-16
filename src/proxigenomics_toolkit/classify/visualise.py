@@ -60,7 +60,7 @@ def report_highly_connected(g: nx.Graph, report_file: str) -> None:
         h_output.write("sequence,degree,classification,containing_bins\n")
         for u in seq_nodes:
             h_output.write(f'{u},{g.degree(u)},{g.nodes[u]["mge_status"]},\"{" ".join(g.neighbors(u))}\"\n')
-    logger.info(f"There were {len(seq_nodes)} sequences with >= 2 bins")
+    logger.info(f"There were {len(seq_nodes)} sequences interacting with at least two genome bins")
 
 
 def make_graph_representation(pred_filename: str,
